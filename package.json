@@ -5,7 +5,7 @@
   "main": "src/main.cjs",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/model.cjs test/proxy.cjs test/ai.cjs test/keys.cjs test/socks-addresses.cjs test/sku-desk.cjs test/sku-transport.cjs test/commerce-engine.cjs test/listing-config.cjs test/vinted-adapter.cjs test/commerce-preflight.cjs test/navigation-lifecycle.cjs test/commerce-photos.cjs test/vinted-photo-upload.cjs test/proxy-auth.cjs test/vinted-account.cjs test/vinted-publication.cjs test/vinted-publication-evidence.cjs test/commerce-scheduler.cjs test/commerce-scheduler-integration.cjs",
+    "test": "node --test test/model.cjs test/proxy.cjs test/ai.cjs test/keys.cjs test/socks-addresses.cjs test/sku-desk.cjs test/sku-transport.cjs test/commerce-engine.cjs test/listing-config.cjs test/vinted-adapter.cjs test/commerce-preflight.cjs test/navigation-lifecycle.cjs test/commerce-photos.cjs test/vinted-photo-upload.cjs test/proxy-auth.cjs test/vinted-account.cjs test/vinted-publication.cjs test/vinted-publication-evidence.cjs test/commerce-scheduler.cjs test/commerce-scheduler-integration.cjs test/vinted-publish-submit.cjs",
     "package": "node scripts/package.mjs",
     "test:electron": "electron test/electron-smoke.cjs"
   },

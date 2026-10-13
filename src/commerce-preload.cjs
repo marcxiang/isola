@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('commerce', {
   preflight: planId => ipcRenderer.invoke('commerce-preflight', planId),
   inspectAccount: planId => ipcRenderer.invoke('commerce-account-inspect', planId),
   inspectPublication: planId => ipcRenderer.invoke('commerce-publication-inspect', planId),
+  submitPublication: planId => ipcRenderer.invoke('commerce-publication-submit', planId),
   prepareDraft: planId => ipcRenderer.invoke('commerce-prepare-draft', planId),
   inspectPhotos: planId => ipcRenderer.invoke('commerce-photos-inspect', planId),
   preparePhotos: planId => ipcRenderer.invoke('commerce-photos-prepare', planId),

@@ -6,7 +6,7 @@ Isola 是一个基于 Electron 的 macOS 浏览器项目，支持独立浏览器
 
 ## Project status / 当前状态
 
-The current development version is **0.5.2**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and read-only publication checks are integrated. It is a development snapshot, not a completed unattended commerce system.
+The current development version is **0.5.2**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. It is a development snapshot, not a completed unattended commerce system.
 
 - Environment management, persistent Chromium sessions, proxy configuration, AI click/scroll feedback, supplier catalog synchronization and listing plans are implemented.
 - Listing-field preparation has been exercised on the Vinted France new-item page. Publishing, buyer messages, offers, shipping labels and real supplier purchases have not completed end-to-end validation.

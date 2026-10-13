@@ -9,7 +9,7 @@ const { CommerceEngine } = require('./commerce-engine.cjs');
 const { VintedAdapter } = require('./vinted-adapter.cjs');
 const { VintedAccount } = require('./vinted-account.cjs');
 const commercePreparation = require('./commerce-preflight.cjs');
-const {inspectPublication}=require('./commerce-publication-service.cjs');
+const {inspectPublication,submitPublication}=require('./commerce-publication-service.cjs');
 const {createPhotoService}=require('./commerce-photo-service.cjs');
 const { SKUDeskClient } = require('./sku-desk.cjs');
 const { RequestGate } = require('./sku-transport.cjs');
@@ -237,6 +237,7 @@ function register() {
   handle('commerce-open',openCommerce);
   const desk=(name,fn)=>ipcMain.handle(name,(e,...args)=>{if(!commerceWindow||commerceWindow.isDestroyed()||e.sender!==commerceWindow.webContents)throw Error('无权访问运营工作台');return fn(ensureCommerce(),...args);});
   desk('commerce-publication-inspect',(c,id)=>inspectPublication(c,id));
+  desk('commerce-publication-submit',(c,id)=>submitPublication(c,id,{beforeSubmit:plan=>{const w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}}));
   desk('commerce-preflight',(c,id)=>commercePreparation.preflight(c,id));desk('commerce-prepare-draft',(c,id)=>commercePreparation.prepareDraft(c,id,{beforeFields:plan=>{const w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}}));
   desk('commerce-account-inspect',(c,id)=>c.configure(async(signal,guard)=>{
     const plan=c.plan(id),w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}

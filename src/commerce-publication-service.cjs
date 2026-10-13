@@ -1,6 +1,7 @@
 'use strict';
 const {readPreparedPhotos}=require('./commerce-photos.cjs');
 const {VintedPublicationEvidence}=require('./vinted-publication-evidence.cjs');
+const {VintedPublishSubmit}=require('./vinted-publish-submit.cjs');
 
 // Only a plan ID crosses IPC. Page proofs, supplier claims and private file
 // manifests are assembled here and never accepted from the renderer.
@@ -21,7 +22,17 @@ function inspectPublication(engine,id){
   let report;
   try{const input=await publicationInput(engine,id,signal,guard);guard();report=await new VintedPublicationEvidence(engine.adapter).inspect(input,{signal});guard();}
   catch(error){guard();report={planId:id,checkedAt:new Date().toISOString(),checks:[{name:'发布准备',ok:false,detail:String(error.message||'无法核对').slice(0,700)}],blockers:[String(error.message||'无法核对').slice(0,700)],readyForPublication:false,publicationEnabled:false,message:'发布前核对未通过；没有保存草稿或发布商品。'};}
-  return {...report,published:false,saved:false};
+  const occupied=engine.db.publications.submissions.some(row=>row.proof.facts.planId===id&&row.state!=='cancelled'&&!row.closedSale);
+  return {...report,manualPublicationEnabled:!occupied,published:false,saved:false};
  });
 }
-module.exports={inspectPublication,publicationInput};
+function submitPublication(engine,id,{beforeSubmit=()=>{}}={}){
+ return engine.configure(async(signal,guard)=>{
+  const input=await publicationInput(engine,id,signal,guard);guard();
+  await beforeSubmit(input.plan);guard();
+  const result=await new VintedPublishSubmit({enabled:true}).submit({engine,planId:id,input,signal,guard});
+  engine.event('warning','已发送一次刊登提交；结果需核对，请勿重复发布');engine.persist();engine.emit();
+  return result;
+ });
+}
+module.exports={inspectPublication,publicationInput,submitPublication};

@@ -110,4 +110,4 @@ class VintedAccount {
     }
   }
 }
-module.exports={VintedAccount,memberURL};
+module.exports={VintedAccount,memberURL,probeAccountDOM};

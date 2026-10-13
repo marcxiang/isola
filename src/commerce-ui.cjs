@@ -15,12 +15,14 @@
   const jobNames = {listing:'商品上架', list:'商品上架', publish:'商品上架', reply:'回复消息', message:'回复消息', messages:'检查消息', offer:'处理报价', offers:'检查报价', accept_offer:'接受报价', label:'获取运单', shipping_label:'获取运单', shipment:'获取运单', fulfillment:'面单与货盘履约', procurement:'货盘采购', purchase:'货盘采购', order:'货盘采购', reconcile:'核对结果', sync:'同步货盘'};
   const stepNames = {pending:'检查执行条件',claim_photos:'领取商品图片',prepare_listing:'准备刊登草稿',publish_listing:'提交刊登',record_listing:'记录刊登回执',draft_reply:'准备商品回复',send_reply:'发送回复',check_offer:'核对报价',accept_offer:'接受报价',download_label:'下载并核对运单',check_stock_price:'核对库存与采购价',wms_checkout:'核对可用仓库',create_supplier_order:'提交货盘订单',verified:'核对完成'};
   const pageDetails = {overview:['商品运营','查看每个商品在哪个环境销售，以及接下来需要做什么。'],plans:['上架计划','为每个环境设置商品、销售目标与价格规则。'],inventory:['货盘与图片','核对商品库存，区分自己的图片与他人占用的套装。'],jobs:['任务记录','检查每一步的执行状态与外部平台回执。'],settings:['连接与规则','连接货盘，并为后台执行设置明确的范围。']};
-  let state = {settings:{},connection:{status:'not_configured'},profiles:[],products:[],photoSets:[],photoPreparations:[],plans:[],jobs:[],events:[],running:false,readiness:{vinted:'unverified'}};
+  let state = {settings:{},connection:{status:'not_configured'},profiles:[],products:[],photoSets:[],photoPreparations:[],plans:[],jobs:[],events:[],publications:[],running:false,readiness:{vinted:'unverified'}};
   let currentPage = 'overview', settingsDirty = false, photoProductId = '', selectedJobId = '', selectedPlanId = '', toastTimer;
   let pageReport = null, reportKind = 'preflight', reportError = '';
   let selectedPhotoPlanId = '';
   let jobPlanFilter = '', distributionLimit = 100;
   const photoReports = new Map();
+  const publicationAttempts = new Map();
+  let publicationReviewedPlan = '';
   const listingFields = {title:'listingTitle',description:'listingDescription',categoryPath:'listingCategoryPath',condition:'listingCondition',brand:'listingBrand',size:'listingSize',color:'listingColor',parcel:'listingParcel'};
   const listingNames = {title:'商品标题',description:'商品描述',categoryPath:'分类路径',condition:'成色',brand:'品牌',size:'尺码',color:'颜色',parcel:'包裹规格',price:'价格',photos:'图片'};
   const pending = new Set();
@@ -59,7 +61,7 @@
   function statusBadge(value) { return badge(stateNames[value] || String(value || '待执行'),completedStates.has(value) ? 'good' : reviewStates.has(value) ? 'warn' : value === 'running' ? 'good' : 'neutral'); }
   function profileName(id) { return find(state.profiles,id)?.name || '环境不可用'; }
   function productName(id) { return find(state.products,id)?.name || '商品不可用'; }
-  function pageActionPending() { return [...pending].some(key=>/^plan-(?:preflight|draft|open|photo)-/.test(key)); }
+  function pageActionPending() { return [...pending].some(key=>/^plan-(?:preflight|draft|open|photo|publication)-/.test(key)); }
   function photoActionPending() { return [...pending].some(key=>key.startsWith('plan-photo-')); }
   function photoSummary(id) {
     const saved=state.photoPreparations.find(item=>same(item.planId,id)), latest=photoReports.get(String(id))?.summary;
@@ -97,13 +99,15 @@
   function applyState(incoming) {
     if (!incoming || typeof incoming !== 'object') return;
     state = {...state,...incoming,settings:{...state.settings,...incoming.settings},connection:{...state.connection,...incoming.connection},readiness:{...state.readiness,...incoming.readiness}};
-    for (const key of ['profiles','products','photoSets','photoPreparations','plans','jobs','events']) if (!Array.isArray(state[key])) state[key]=[];
+    for (const key of ['profiles','products','photoSets','photoPreparations','plans','jobs','events','publications']) if (!Array.isArray(state[key])) state[key]=[];
+    reconcilePublicationAttempts();
     $('#load-error').hidden = !state.faulted;
     if (state.faulted) $('#load-error').textContent = '运营数据无法安全写入，外部操作已停止。请检查本机存储后重新打开应用。';
     renderSummary(); renderPlans(); renderInventory(); renderJobs(); renderEvents(); renderConnection(); renderControls();
     if (!settingsDirty) fillSettings();
     if (jobDialog.open && selectedJobId) renderJobDetail();
     if (photoDialog.open && selectedPhotoPlanId) renderPhotoReport();
+    if (preflightDialog.open && reportKind==='publication') renderPageReport();
   }
   function renderControls() {
     const active = !!state.running;
@@ -122,6 +126,11 @@
     $('#retry-form [type=submit]').disabled = pending.has('resolve') || !!state.running;
     const checking = pageActionPending();
     $('#preflight-fill').hidden=reportKind==='publication';
+    const publicationVisible=reportKind==='publication'&&typeof api.submitPublication==='function';
+    $('#publication-submit').hidden=!publicationVisible;
+    $('#publication-submit').disabled=!publicationVisible||!canSubmitPublication(selectedPlanId)||checking;
+    $('#publication-submit').textContent=pending.has(`plan-publication-${selectedPlanId}`)?'正在提交并核对…':'发布商品';
+    renderPublicationResult();
     $('#preflight-fill').disabled = checking || !!state.faulted || !selectedPlanId || reportKind==='preflight'&&pageReport?.readyForFields!==true;
     $('#preflight-edit').disabled = checking || !selectedPlanId;
     renderPhotoControls();
@@ -151,6 +160,7 @@
     const error=typeof review?.error==='string'?review.error:typeof review?.error?.message==='string'?review.error.message:'';
     if(state.faulted)return {key:'attention',label:'执行已停止',tone:'warn',next:'修复本机运营存储，再核对原任务记录。',job};
     if(!find(state.profiles,plan.profileId))return {key:'attention',label:'环境不可用',tone:'warn',next:'核对计划关联的浏览器环境。',job};
+    if(openPublication(plan.id)&&!publishedPublication(plan.id)||publicationAttempts.has(String(plan.id)))return {key:'attention',label:'发布结果待核对',tone:'warn',next:'已有一次发布调用或提交记录，请核对原刊登页面，不要重复点击发布。',job};
     if(review)return {key:'attention',label:stateNames[review.state]||'需要核对',tone:'warn',next:error||'打开任务记录，核对当前页面和原回执。',job};
     if(running)return {key:'running',label:'执行中',tone:'good',next:`${jobNames[running.type]||running.type} · ${stepNames[running.step]||running.step||'正在执行'}`,job};
     if(plan.activeListingId)return {key:'listed',label:'已有在售记录',tone:'good',next:!plan.enabled?'计划已停用；已保存的刊登记录仍保留。':state.readiness.vinted!=='verified'?'刊登记录已保存；消息、报价与成交监测仍待流程验证。':state.running?'等待成交，检查消息与报价。':'启动调度后检查消息、报价与成交。',job};
@@ -166,6 +176,47 @@
       const url=new URL(plan.activeListingUrl), id=url.pathname.match(/^\/items\/(\d+)(?:-[^/]*)?\/?$/)?.[1];
       return url.protocol==='https:'&&url.hostname==='www.vinted.fr'&&!url.port&&!url.username&&!url.password&&id===String(plan.activeListingId)&&!url.search&&!url.hash?url.href:'';
     }catch{return '';}
+  }
+  function openPublication(id) { return state.publications.find(record=>same(record.planId,id)&&record.closedSale!==true&&record.state!=='cancelled'); }
+  function publishedPublication(id) { const record=openPublication(id);return record?.state==='published'&&find(state.plans,id)?.activeListingId?record:null; }
+  function reconcilePublicationAttempts() {
+    for(const [planId,attempt] of publicationAttempts){
+      if(attempt.submissionId&&state.publications.some(record=>same(record.planId,planId)&&record.id===attempt.submissionId&&record.state==='published'))publicationAttempts.delete(planId);
+    }
+  }
+  function publicationPlanSignature(id) {
+    const plan=find(state.plans,id),account=find(state.profiles,plan?.profileId)?.marketAccount,photos=photoSummary(id);
+    return plan?JSON.stringify({id:plan.id,profileId:plan.profileId,productId:plan.productId,sku:plan.sku,enabled:plan.enabled,activeListingId:plan.activeListingId||null,targetCount:plan.targetCount,completedCount:plan.completedCount,currency:plan.currency,price:plan.listingPriceCents,listing:plan.listing,account:account?.memberId,claimId:photos?.claimId,photoState:photos?.state}):'';
+  }
+  function canSubmitPublication(id) {
+    const plan=find(state.plans,id),account=find(state.profiles,plan?.profileId)?.marketAccount;
+    return !!plan&&plan.enabled===true&&!plan.activeListingId&&account?.platform==='vinted-fr'&&!!account.username&&!!account.verifiedAt&&photoSummary(id)?.ready===true&&reportKind==='publication'&&selectedPlanId===String(id)&&pageReport?.readyForPublication===true&&pageReport.manualPublicationEnabled!==false&&publicationReviewedPlan===publicationPlanSignature(id)&&!openPublication(id)&&!publicationAttempts.has(String(id))&&!state.running&&!state.configBusy&&!state.faulted;
+  }
+  function renderPublicationResult() {
+    const result=$('#publication-submission-result');result.replaceChildren();result.hidden=reportKind!=='publication';if(result.hidden)return;
+    const record=openPublication(selectedPlanId),attempt=publicationAttempts.get(String(selectedPlanId));
+    if(publishedPublication(selectedPlanId)&&!attempt){
+      result.append(el('div','report-status good','已核对发布成功，刊登回执已保存。'),el('p','field-hint',`提交记录：${record.id}`),el('p','field-hint',`在售商品编号：${find(state.plans,selectedPlanId).activeListingId}`),el('p','field-hint','已有在售商品，不能重复发布。消息、报价、运单及采购仍按各自的流程验证状态运行。'));return;
+    }
+    if(record||attempt){
+      const message=attempt?.pending?'正在发送一次发布请求并核对页面，请保持当前环境打开。':attempt?.message||record?.reason||'原发布提交记录尚未完成核对，请查看原刊登页面。';
+      result.append(el('div','report-status warn',attempt?.pending?'正在提交，尚未确认发布结果。':'发布结果待核对，请勿重复点击发布。'),el('p','field-hint',message));
+      const id=attempt?.submissionId||record?.id;if(id)result.append(el('p','field-hint',`提交记录：${id}`));
+      if(attempt?.clickIssued===true)result.append(el('p','field-hint','已发送一次页面点击；目前没有已验证的发布成功回执。'));
+      return;
+    }
+    if(pageReport?.readyForPublication===true)result.append(el('p','publication-submit-note',pageReport.manualPublicationEnabled===false?'当前版本尚未启用手动发布。':canSubmitPublication(selectedPlanId)?'点击「发布商品」会将本计划商品刊登到当前已核对的 Vinted 账号。提交后需核对真实刊登回执。':'发布前请确认计划已启用、账号和本机照片已核对，并暂停后台调度。资料变更后须重新核对发布条件。'));
+  }
+  async function submitPublication() {
+    const id=selectedPlanId;if(pageActionPending()||typeof api.submitPublication!=='function'||!canSubmitPublication(id))return;
+    // Retain an uncertain local marker even when IPC rejects or state refresh
+    // fails. Only the main process can establish whether a click was issued.
+    publicationAttempts.set(id,{pending:true});
+    try{
+      const result=await request(`plan-publication-${id}`,()=>api.submitPublication(id));
+      publicationAttempts.set(id,{pending:false,submissionId:typeof result?.submissionId==='string'?result.submissionId:'',clickIssued:result?.clickIssued===true,message:typeof result?.message==='string'?result.message:'本次提交需要核对原网页和提交记录，请勿重复点击。'});
+    }catch(error){publicationAttempts.set(id,{pending:false,message:`${cleanError(error)} 请核对原网页和提交记录，不要重复点击发布。`});}
+    finally{reconcilePublicationAttempts();renderPageReport();renderControls();renderPlans();renderDistribution();}
   }
   function showPlanJobs(id) {
     jobPlanFilter=String(id);$('#job-filter').value='';renderJobs();changePage('jobs');
@@ -424,9 +475,10 @@
     if(!pageReport){detail.append(el('p','report-loading',reportKind==='draft'?'正在核对并填写页面…':'正在读取商品、图片与当前网页…'));return;}
     const report=pageReport;
     if(reportKind==='publication'){
-      detail.append(el('div',`report-status ${report.readyForPublication?'good':'warn'}`,report.readyForPublication?'当前发布条件已核对；商品尚未发布。':'发布条件仍有待核对项目，商品尚未发布。'));
+      const submitted=!!openPublication(selectedPlanId)||publicationAttempts.has(String(selectedPlanId)),published=!!publishedPublication(selectedPlanId)&&!publicationAttempts.has(String(selectedPlanId));
+      detail.append(el('div',`report-status ${published||report.readyForPublication&&!submitted?'good':'warn'}`,published?'刊登回执已验证并保存，以下为此前的发布条件检查。':submitted?'以下为提交前的检查记录；当前发布结果仍需核对。':report.readyForPublication?pageReport.manualPublicationEnabled===false?'当前发布条件已核对；手动发布尚未启用。':'当前发布条件已核对，可手动发布一次。':'发布条件仍有待核对项目，本次检查未执行发布。'));
       if(Array.isArray(report.checks)&&report.checks.length){const checks=el('div','report-checks');for(const item of report.checks.slice(0,60)){const row=el('div','report-check'),body=el('div');body.append(el('b','',typeof item.name==='string'?item.name:'检查项'));if(typeof item.detail==='string')body.append(el('p','',item.detail));row.append(badge(item.ok===true?'已通过':'待核对',item.ok===true?'good':'warn'),body);checks.append(row);}detail.append(checks);}
-      reportList(detail,'仍需处理',report.blockers,'warning');if(typeof report.message==='string')detail.append(el('p','field-hint',report.message));return;
+      reportList(detail,'仍需处理',report.blockers,'warning');if(typeof report.message==='string'&&!submitted)detail.append(el('p','field-hint',report.message));detail.append(el('p','field-hint','这里仅执行当前商品的单次发布；消息、报价、运单和采购仍按各自的流程验证状态运行。'));return;
     }
     if(reportKind==='draft'){
       detail.append(el('div','report-status','仅填写页面，尚未发布商品。'));
@@ -447,9 +499,9 @@
   async function inspectPlan(id,kind) {
     const key=`plan-${kind==='draft'?'draft':'preflight'}-${id}`;
     if(pageActionPending())return;
-    selectedPlanId=String(id);reportKind=kind;pageReport=null;reportError='';renderPageReport();
+    selectedPlanId=String(id);reportKind=kind;pageReport=null;reportError='';publicationReviewedPlan='';renderPageReport();
     if(!preflightDialog.open)preflightDialog.showModal();
-    try{const result=await request(key,()=>kind==='draft'?api.prepareDraft(id):kind==='publication'?api.inspectPublication(id):api.preflight(id));if(result&&selectedPlanId===String(id)&&reportKind===kind)pageReport=result;}
+    try{const result=await request(key,()=>kind==='draft'?api.prepareDraft(id):kind==='publication'?api.inspectPublication(id):api.preflight(id));if(result&&selectedPlanId===String(id)&&reportKind===kind){pageReport=result;if(kind==='publication'&&result.readyForPublication===true)publicationReviewedPlan=publicationPlanSignature(id);}}
     catch(error){if(selectedPlanId===String(id)&&reportKind===kind)reportError=cleanError(error);}
     renderPageReport();renderControls();
   }
@@ -477,6 +529,7 @@
   $('#readiness-settings').addEventListener('click',()=>changePage(isConnected()||state.settings.hasToken?'plans':'settings'));
   $('#preflight-edit').addEventListener('click',()=>{const plan=find(state.plans,selectedPlanId);if(plan){preflightDialog.close();editPlan(plan);}});
   $('#preflight-fill').addEventListener('click',()=>{if(selectedPlanId)void inspectPlan(selectedPlanId,'draft');});
+  $('#publication-submit').addEventListener('click',()=>{void submitPublication();});
   for(const action of ['inspect','prepare','upload','preview'])$('#photo-'+action).addEventListener('click',()=>{if(selectedPhotoPlanId)void runPhotoAction(selectedPhotoPlanId,action).catch(error=>toast(cleanError(error)));});
   $('#new-plan').addEventListener('click',()=>editPlan());$('#overview-new-plan').addEventListener('click',()=>editPlan());
   for(const [id,event] of [['distribution-search','input'],['distribution-profile','change'],['distribution-status','change']])$('#'+id).addEventListener(event,()=>{distributionLimit=100;renderDistribution();});

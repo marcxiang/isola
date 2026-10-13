@@ -38,6 +38,8 @@ The workbench groups catalog products by sales environment, separates enabled pl
 
 `src/vinted-publication.cjs` adds durable preparation/dispatch/uncertain/publication states. One attempt is allowed per submission; restart never replays an uncertain click. Completion still requires a real observed listing, seller, item-only price and photo identity mapping. A passed preflight is not a completed publication.
 
+The manual `submitPublication(planId)` bridge resolves the stored plan, supplier product and local photo manifest in the main process. `src/vinted-publish-submit.cjs` uses the publication journal and the existing window lock; the renderer cannot supply a proof or file path. The workbench exposes the action after a successful check, displays uncertain submissions and prevents repeat clicks. Candidate navigation is saved as evidence to investigate, never treated as a publication receipt. Background marketplace capabilities remain separate and gated by their own verification.
+
 ## Runtime audit
 
 `src/proxy-auth.cjs` replaces the lifetime authentication counter. It releases successful URL attempts while limiting repeated failed credentials and rotating realms. Credentials are restricted to the configured proxy host and port. Main-process request completion is tied to the tab and navigation generation.
@@ -46,7 +48,7 @@ The Electron audit passed repeated navigation authentication, 35 successful chal
 
 ## Validation record
 
-The 2026-10-14 checkpoint passed 337 unit tests and 163 checks in one full Electron desktop suite. The suite includes eight operations-dashboard checks, account-menu and publication-evidence DOM fixtures, native photo transport, proxy/storage audits, navigation guards and AI-control regressions. Separate runs overlap and are not added to these totals. Real France evidence at this checkpoint covers eight filled fields, one uploaded image, current-account binding and 15 read-only prepublication checks; no publish, buyer message, offer, label or purchase has been executed.
+The latest 2026-10-14 source passed 356 unit tests and 36 focused Electron desktop checks covering the commerce bridge, operations dashboard, publication UI, evidence and trusted native single-submit flow. This includes seven publication UI checks and three native submit checks. An earlier full desktop checkpoint passed 163 checks, including photo transport, proxy/storage audits, navigation and AI-control regressions; the focused run overlaps and is not added to that total. Independent review reproduced and verified fixes for account/photo changes at the last click boundary and late execution after a dispatch timeout. Real France evidence covers eight filled fields, one uploaded image, current-account binding and 15 read-only prepublication checks. The updated app was launched, but the Mac locked before the new real-page test could continue; no publish, buyer message, offer, label or purchase has been executed.
 
 ## Contributions
 

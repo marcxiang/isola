@@ -1,0 +1,28 @@
+{
+  "name": "isola-browser",
+  "version": "0.5.1",
+  "description": "Local isolated browsing environments",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/model.cjs test/proxy.cjs test/ai.cjs test/keys.cjs test/socks-addresses.cjs test/sku-desk.cjs test/sku-transport.cjs test/commerce-engine.cjs test/listing-config.cjs test/vinted-adapter.cjs test/commerce-preflight.cjs test/navigation-lifecycle.cjs",
+    "package": "node scripts/package.mjs",
+    "test:electron": "electron test/electron-smoke.cjs"
+  },
+  "devDependencies": {
+    "electron": "^41.0.0",
+    "@electron/packager": "^19.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marcxiang/isola.git"
+  },
+  "homepage": "https://github.com/marcxiang/isola#readme",
+  "bugs": {
+    "url": "https://github.com/marcxiang/isola/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

@@ -1,0 +1,32 @@
+// These helpers run only in the isolated page world and do not edit page markup.
+function installDOMHelpers(){
+ function parent(e){return e?.parentElement||e?.getRootNode()?.host||null;}
+ function parents(e){const out=[];for(let p=e;p;p=parent(p))out.push(p);return out;}
+ function closest(e,selector){return parents(e).find(p=>p.matches?.(selector))||null;}
+ function visible(e){const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0.01;}
+ function safeText(e,limit=180){if(!e||closest(e,'script,style,noscript,input,textarea,[contenteditable]:not([contenteditable="false"])'))return '';const parts=[];let length=0,visited=0;const walker=document.createTreeWalker(e,NodeFilter.SHOW_TEXT);let n;while((n=walker.nextNode())&&length<limit&&visited++<20000){const p=n.parentElement;if(!p||closest(p,'script,style,noscript,input,textarea,[contenteditable]:not([contenteditable="false"])')||!visible(p))continue;const text=n.textContent.trim();if(text){parts.push(text);length+=text.length+1;}}return parts.join(' ').slice(0,limit);}
+ function labelledBy(e){return (e.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>safeText(e.getRootNode().getElementById?.(id)||document.getElementById(id))).join(' ').slice(0,180);}
+ function label(e){return (e.getAttribute('aria-label')||labelledBy(e)||safeText(e.labels?.[0])||e.getAttribute('placeholder')||safeText(e)||e.getAttribute('title')||e.getAttribute('name')||e.type||e.tagName).trim().slice(0,180);}
+ function disabled(e){return !!e?.disabled||!!e?.matches?.(':disabled')||!!closest(e,'[inert],[aria-disabled="true"]');}
+ function active(){let e=document.activeElement;while(e?.shadowRoot?.activeElement)e=e.shadowRoot.activeElement;return e;}
+ function rect(e){const r=e.getBoundingClientRect();return {x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height)};}
+ function context(e){const group=parents(parent(e)).find(p=>p.matches?.('fieldset,form,section,article,[role=group],[role=radiogroup],[role=dialog],[role=listbox],[role=menu],[role=tree],dialog'));if(!group)return '';const heading=group.querySelector('legend,h1,h2,h3,h4,h5,h6,[role=heading]');return (group.getAttribute('aria-label')||labelledBy(group)||safeText(heading)||group.getAttribute('name')||group.getAttribute('role')||group.tagName.toLowerCase()).trim().slice(0,180);}
+ function scrollContainer(e){return parents(e).find(p=>p!==document.body&&p!==document.documentElement&&p.scrollHeight>p.clientHeight+1&&/(auto|scroll)/.test(getComputedStyle(p).overflowY))||document.scrollingElement;}
+ function scrollState(e=document.scrollingElement){if(!e)return null;const maxY=Math.max(0,e.scrollHeight-e.clientHeight),maxX=Math.max(0,e.scrollWidth-e.clientWidth);return {top:Math.round(e.scrollTop),left:Math.round(e.scrollLeft),maxY:Math.round(maxY),maxX:Math.round(maxX),canUp:e.scrollTop>1,canDown:e.scrollTop<maxY-1,container:e===document.scrollingElement?'page':(e.getAttribute('aria-label')||labelledBy(e)||e.getAttribute('role')||e.tagName.toLowerCase()).slice(0,100)};}
+ function hitAt(x,y){let hit=document.elementFromPoint(x,y),next;while(hit?.shadowRoot&&(next=hit.shadowRoot.elementFromPoint(x,y))&&next!==hit)hit=next;return hit;}
+ function owns(e,hit){return hit===e||!!hit&&parents(hit).includes(e)||hit?.control===e;}
+ function clippedRects(e){let bounds={left:0,top:0,right:innerWidth,bottom:innerHeight};for(const p of parents(parent(e))){if(p===document.body||p===document.documentElement)continue;const s=getComputedStyle(p),r=p.getBoundingClientRect();if(/hidden|clip|auto|scroll/.test(s.overflowX)){bounds.left=Math.max(bounds.left,r.left+p.clientLeft);bounds.right=Math.min(bounds.right,r.left+p.clientLeft+p.clientWidth);}if(/hidden|clip|auto|scroll/.test(s.overflowY)){bounds.top=Math.max(bounds.top,r.top+p.clientTop);bounds.bottom=Math.min(bounds.bottom,r.top+p.clientTop+p.clientHeight);}}
+  return [...e.getClientRects()].slice(0,10).map(r=>({left:Math.max(r.left,bounds.left),right:Math.min(r.right,bounds.right),top:Math.max(r.top,bounds.top),bottom:Math.min(r.bottom,bounds.bottom)})).filter(r=>r.right-r.left>1&&r.bottom-r.top>1);
+ }
+ function probe(e){
+  const rects=clippedRects(e);let blocker=null;for(const r of rects){for(const [fx,fy]of [[.5,.5],[.2,.5],[.8,.5],[.5,.2],[.5,.8],[.15,.15],[.85,.15],[.15,.85],[.85,.85]]){const x=r.left+(r.right-r.left)*fx,y=r.top+(r.bottom-r.top)*fy,hit=hitAt(x,y);if(owns(e,hit))return {point:{x,y},blocker:null,inViewport:true};if(!blocker&&hit)blocker={tag:hit.tagName.toLowerCase(),role:hit.getAttribute('role')||'',label:label(hit).slice(0,120)};}}
+  return {point:null,blocker,inViewport:rects.length>0};
+ }
+ function collect(root=document){const nodes=[];const selector='a[href],button,input:not([type=hidden]),textarea,select,summary,[role=button],[role=link],[role=textbox],[role=combobox],[role=option],[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox],[role=treeitem],[role=radio],[role=checkbox],[role=tab],[tabindex]:not([tabindex="-1"]),[aria-haspopup],[onclick]';
+  for(const e of root.querySelectorAll('*')){if(nodes.length>3000)break;const explicit=e.matches(selector);const heuristic=!explicit&&(e.tagName==='LI'||e.hasAttribute('data-testid'))&&getComputedStyle(e).cursor==='pointer'&&(e.innerText||'').trim().length<200;if((explicit||heuristic)&&visible(e))nodes.push(e);if(e.shadowRoot){watch(e.shadowRoot);nodes.push(...collect(e.shadowRoot));}}return nodes;
+ }
+ const activity={changedAt:performance.now(),mutations:0},watched=new WeakSet();const observer=new MutationObserver(records=>{activity.changedAt=performance.now();activity.mutations+=records.length;});function watch(root){if(!watched.has(root)){watched.add(root);observer.observe(root,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','disabled','readonly','aria-busy','aria-expanded','aria-selected','aria-checked','aria-invalid','aria-disabled']});}}watch(document);
+ function stability(){return {quietFor:performance.now()-activity.changedAt,mutations:activity.mutations,busy:!!document.querySelector('[aria-busy="true"]'),ready:document.readyState};}
+ globalThis.__isolaDOM={parent,parents,closest,visible,safeText,label,disabled,active,rect,context,scrollContainer,scrollState,probe,collect,stability};
+}
+module.exports={installDOMHelpers};

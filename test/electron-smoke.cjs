@@ -1,0 +1,47 @@
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),http=require('node:http');
+const root=path.resolve(__dirname,'..');
+fs.mkdirSync(path.join(root,'test-artifacts'),{recursive:true});
+process.env.ISOLA_TEST_DATA=path.join(require('node:os').tmpdir(),'isola-qa-'+Date.now());
+const output=path.join(root,'test-artifacts/report.json'),progress=path.join(root,'test-artifacts/progress.log');
+const checks=[];fs.writeFileSync(progress,'Starting QA\n');
+const log=s=>fs.appendFileSync(progress,s+'\n');
+const {app}=require('electron');const api=require(path.join(root,'src/main.cjs'));
+process.on('uncaughtException',e=>{log(e.stack);fs.writeFileSync(output,JSON.stringify({ok:false,error:e.stack,checks},null,2));});
+async function check(name,fn){log('START '+name);const value=await fn();checks.push({name,ok:true,value});log('PASS '+name);fs.writeFileSync(output,JSON.stringify({ok:false,inProgress:true,checks},null,2));}
+(async()=>{await api.ready;
+const server=http.createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end('<!doctype html><title>Isola local fixture</title><h1>Local test page</h1>');});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+const url='http://127.0.0.1:'+server.address().port;
+let a,b,failed=false;
+try{
+await check('create environments',async()=>{a=api.saveProfile({name:'QA Paris',url,language:'fr-FR',timezone:'Europe/Paris',width:1200,height:760,hardwareConcurrency:4,group:'QA'});b=api.saveProfile({name:'QA Tokyo',url,language:'ja-JP',timezone:'Asia/Tokyo',width:1024,height:768,group:'QA'});assert.notEqual(a.id,b.id);});
+await check('edit form accepts a direct connection with no port',async()=>{const w=api.getManager().webContents;await w.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');const valid=await w.executeJavaScript(`(()=>{const edit=[...document.querySelectorAll('.row button')].find(b=>b.textContent==='编辑');edit.click();const valid=document.querySelector('#form').checkValidity();document.querySelector('#editor').close();return valid;})()`);assert.equal(valid,true);});
+await check('startup and fingerprint applied',async()=>{await api.launch(a.id);const c=api.windows.get(a.id).tabs[0].view.webContents;const r=await c.executeJavaScript(`({language:navigator.language,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,width:innerWidth,height:innerHeight,cpu:navigator.hardwareConcurrency,node:typeof require,ua:navigator.userAgent,hints:navigator.userAgentData?.toJSON()})`);assert.equal(r.language,'fr-FR');assert.equal(r.timezone,'Europe/Paris');assert.equal(r.width,1200);assert.equal(r.height,760);assert.equal(r.cpu,4);assert.equal(r.node,'undefined');assert.equal(r.hints.platform,'macOS');assert.ok(r.hints.brands.some(b=>b.brand==='Chromium'));return r;});
+await check('cookie, localStorage and IndexedDB isolation',async()=>{await api.launch(b.id);const ca=api.windows.get(a.id).tabs[0].view.webContents,cb=api.windows.get(b.id).tabs[0].view.webContents;await ca.executeJavaScript(`document.cookie='identity=A; path=/';localStorage.setItem('identity','A');new Promise((resolve,reject)=>{const r=indexedDB.open('isola-test',1);r.onupgradeneeded=()=>r.result.createObjectStore('values');r.onsuccess=()=>{const db=r.result;const t=db.transaction('values','readwrite');t.objectStore('values').put('A','identity');t.oncomplete=()=>{db.close();resolve(true)}};r.onerror=()=>reject(r.error)})`);const r=await cb.executeJavaScript(`({cookie:document.cookie,storage:localStorage.getItem('identity')})`);assert.equal(r.cookie,'');assert.equal(r.storage,null);const databases=await cb.executeJavaScript('indexedDB.databases()');assert.ok(!databases.some(d=>d.name==='isola-test'));return {cookies:true,localStorage:true,indexedDB:true};});
+await check('second environment retains its fingerprint',async()=>{const c=api.windows.get(b.id).tabs[0].view.webContents;const r=await c.executeJavaScript(`({language:navigator.language,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,width:innerWidth})`);assert.equal(r.language,'ja-JP');assert.equal(r.timezone,'Asia/Tokyo');assert.equal(r.width,1024);return r;});
+await check('cookies and storage survive environment restart',async()=>{api.windows.get(a.id).close();await new Promise(r=>setTimeout(r,300));await api.launch(a.id);const c=api.windows.get(a.id).tabs[0].view.webContents;const r=await c.executeJavaScript(`({cookie:document.cookie,storage:localStorage.getItem('identity')})`);assert.ok(r.cookie.includes('identity=A'));assert.equal(r.storage,'A');return r;});
+await check('toolbar and local diagnostic tab',async()=>{const w=api.windows.get(a.id);await w.webContents.executeJavaScript(`window.browser.navigate('check')`);assert.equal(w.tabs.length,2);const c=w.tabs[1].view.webContents;const text=await c.executeJavaScript('document.body.innerText');assert.ok(text.includes('Europe/Paris'));assert.ok(text.includes('fr-FR'));await c.capturePage().then(i=>fs.writeFileSync(path.join(root,'test-artifacts/fingerprint.png'),i.toPNG()));return {tabs:2,diagnostic:true};});
+await check('clear browser data leaves profile intact',async()=>{api.windows.get(a.id).close();await new Promise(r=>setTimeout(r,300));await api.clearProfile(a.id);assert.ok(api.list().some(p=>p.id===a.id));await api.launch(a.id);const c=api.windows.get(a.id).tabs[0].view.webContents;assert.equal(await c.executeJavaScript('localStorage.getItem("identity")'),null);assert.equal((await api.sesFor(a).cookies.get({name:'identity'})).length,0);});
+await check('configuration copy does not copy stored browser data',async()=>{const copy=api.duplicateProfile(b.id);assert.notEqual(copy.id,b.id);assert.equal(copy.timezone,'Asia/Tokyo');await api.deleteProfile(copy.id);});
+await check('proxy unavailable never falls back to direct',async()=>{const p=api.saveProfile({name:'QA broken proxy',url,proxy:{type:'http',host:'127.0.0.1',port:9}});await api.launch(p.id);const tab=api.windows.get(p.id).tabs[0];assert.ok(tab.error,/missing proxy error/);const text=await tab.view.webContents.executeJavaScript('document.body.innerText');assert.ok(!text.includes('Local test page'));api.windows.get(p.id).close();await new Promise(r=>setTimeout(r,200));await api.deleteProfile(p.id);return {error:tab.error};});
+process.env.ISOLA_EMBEDDED_TEST='1';
+for(const c of require(path.join(root,'test/proxy.cjs')))await check(c.name,c.fn);
+await check('HTTP authenticated proxy',async()=>{const proxy=http.createServer((req,res)=>{if(req.headers['proxy-authorization']!=='Basic '+Buffer.from('qa:secret').toString('base64')){res.writeHead(407,{'Proxy-Authenticate':'Basic realm="Isola QA"'});res.end();}else{res.setHeader('Content-Type','application/json');res.end('{"ip":"203.0.113.7"}');}});await new Promise(r=>proxy.listen(0,'127.0.0.1',r));try{const result=await api.testProxy({name:'proxy',proxy:{type:'http',host:'127.0.0.1',port:proxy.address().port,username:'qa',password:'secret'}},'http://proxy-test.invalid/');assert.equal(result.ip,'203.0.113.7');return result;}finally{proxy.closeAllConnections();await new Promise(r=>proxy.close(r));}});
+await check('password storage encrypted; public profile redacted',async()=>{const p=api.saveProfile({name:'QA secret',proxy:{type:'http',host:'localhost',port:8888,username:'qa',password:'super-secret-qa'}});assert.equal(p.proxy.password,undefined);assert.ok(!fs.readFileSync(api.dataFile(),'utf8').includes('super-secret-qa'));await api.deleteProfile(p.id);});
+await require(path.join(root,'test/ai-smoke.cjs'))(api,check);
+await require(path.join(root,'test/control-regression.cjs'))(api,check);
+await require(path.join(root,'test/boundary-regression.cjs'))(api,check);
+await require(path.join(root,'test/native-regression.cjs'))(api,check);
+await require(path.join(root,'test/control-feedback.cjs'))(api,check);
+await require(path.join(root,'test/vision-regression.cjs'))(api,check);
+await require(path.join(root,'test/ai-flow.cjs'))(api,check);
+await require(path.join(root,'test/pointer-feedback.cjs'))(api,check);
+await require(path.join(root,'test/commerce-smoke.cjs'))(api,check);
+await require(path.join(root,'test/vinted-form-smoke.cjs'))(api,check);
+await require(path.join(root,'test/navigation-smoke.cjs'))(api,check);
+if(process.env.ISOLA_PUBLIC_AUDIT==='1')await require('./detection-audit.cjs')(api,path.join(root,'test-artifacts/detection-audit.json'));
+for(const w of api.windows.values())w.close();await new Promise(r=>setTimeout(r,300));await api.deleteProfile(a.id);await api.deleteProfile(b.id);
+await api.getManager().webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
+await api.getManager().webContents.capturePage().then(i=>fs.writeFileSync(path.join(root,'test-artifacts/manager.png'),i.toPNG()));
+fs.writeFileSync(output,JSON.stringify({ok:true,checks},null,2));log('ALL PASS');
+}catch(e){failed=true;log(e.stack);fs.writeFileSync(output,JSON.stringify({ok:false,error:e.stack,checks},null,2));}finally{server.closeAllConnections();server.close();if(failed)app.exit(1);else app.quit();}
+})().catch(e=>{log(e.stack);fs.writeFileSync(output,JSON.stringify({ok:false,error:e.stack,checks},null,2));app.exit(1);});

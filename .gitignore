@@ -1,0 +1,18 @@
+node_modules/
+test-artifacts/
+.DS_Store
+
+# Local credentials, runtime data and generated output
+.env
+.env.*
+!.env.example
+*.log
+*.pem
+*.key
+profiles.json*
+ai-settings.json*
+commerce-state.json*
+Partitions/
+prepared-photos/
+dist/
+out/

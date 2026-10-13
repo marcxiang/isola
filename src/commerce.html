@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Isola · 运营工作台</title>
+  <link rel="stylesheet" href="commerce.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span>◈</span> Isola<small>COMMERCE WORKSPACE</small></div>
+    <nav aria-label="运营导航">
+      <button type="button" data-page="overview" class="nav-item active" aria-current="page"><span>▦</span> 运营概览</button>
+      <button type="button" data-page="plans" class="nav-item"><span>▤</span> 上架计划</button>
+      <button type="button" data-page="inventory" class="nav-item"><span>◇</span> 货盘与图片</button>
+      <button type="button" data-page="jobs" class="nav-item"><span>≋</span> 任务记录 <b id="nav-review-count" hidden>0</b></button>
+      <button type="button" data-page="settings" class="nav-item"><span>⚙</span> 连接与规则</button>
+    </nav>
+    <div class="sidebar-foot"><div class="connection-dot"><i id="sidebar-dot"></i><span id="sidebar-connection">货盘尚未连接</span></div><p>各环境独立运行<br>操作状态保存在本机</p></div>
+  </aside>
+  <main>
+    <header class="page-header">
+      <div><div class="eyebrow">ISOLA / OPERATIONS</div><h1 id="page-title">运营概览</h1><p id="page-description">从商品、上架到订单，每一步都有记录。</p></div>
+      <div class="header-actions"><span class="runner-status" id="runner-status"><i></i> 已暂停</span><button type="button" id="run-once">检查一次</button><button type="button" class="primary" id="runner-toggle">启动调度</button></div>
+    </header>
+    <div id="load-error" role="alert" class="banner error" hidden></div>
+    <div id="readiness" class="banner" role="status"><span class="banner-icon">i</span><div><b id="readiness-title">等待连接与验证</b><p id="readiness-message">先连接货盘、配置环境计划，再核对网页操作流程。</p></div><button type="button" id="readiness-settings">配置连接</button></div>
+
+    <section id="page-overview" class="page-section">
+      <div class="stats">
+        <article><span>启用的上架计划</span><strong id="stat-plans">0</strong><small id="stat-profiles">覆盖 0 个环境</small></article>
+        <article><span>可用货盘商品</span><strong id="stat-products">0</strong><small id="stat-photo-sets">0 套图片</small></article>
+        <article><span>已完成任务</span><strong id="stat-complete">0</strong><small>以任务记录为准</small></article>
+        <article class="attention-stat"><span>需要核对</span><strong id="stat-review">0</strong><small>不确定的结果会暂停</small></article>
+      </div>
+      <section class="card workflow-card"><div class="section-heading"><div><h2>一条可追踪的工作流</h2><p>操作前检查条件，操作后保存结果。</p></div><span class="pill neutral" id="workflow-status">等待流程验证</span></div><div class="workflow"><div><span>01</span><b>商品与上架</b><small>库存 · 图片 · 数量 · 价格</small></div><div><span>02</span><b>消息与报价</b><small>商品事实 · 接受价格下限</small></div><div><span>03</span><b>成交与面单</b><small>核对交易 · 获取运单</small></div><div><span>04</span><b>货盘采购</b><small>匹配商品 · 限额 · 订单记录</small></div></div></section>
+      <div class="overview-grid"><section class="card"><div class="section-heading"><div><h2>环境计划</h2><p>每个窗口可以使用不同的商品与价格。</p></div><button type="button" id="overview-new-plan" class="text-button">＋ 新建计划</button></div><div id="overview-plans" class="compact-list"></div></section><section class="card"><div class="section-heading"><div><h2>最新动态</h2><p>最近的调度与执行结果。</p></div><span class="live-label">本机记录</span></div><div id="events" class="event-list" aria-live="polite"></div></section></div>
+      <p class="footnote">保持应用运行即可在后台调度；系统睡眠、网络断开或退出应用时，任务无法继续执行。结果不明确的步骤需要核对后再继续。</p>
+    </section>
+
+    <section id="page-plans" class="page-section" hidden>
+      <div class="section-tools"><input id="plan-search" type="search" placeholder="搜索商品或环境…" aria-label="搜索计划"><div class="spacer"></div><button type="button" class="primary" id="new-plan">＋ 新建计划</button></div>
+      <div id="plans" class="plan-list"></div>
+    </section>
+
+    <section id="page-inventory" class="page-section" hidden>
+      <div class="section-tools"><input id="product-search" type="search" placeholder="搜索商品名称或 SKU…" aria-label="搜索货盘"><span id="inventory-count" class="muted"></span><div class="spacer"></div><button type="button" id="sync">同步货盘</button></div>
+      <div class="card table-card"><table><thead><tr><th>商品 / SKU</th><th>库存</th><th>货盘价格</th><th>图片套数</th><th>操作</th></tr></thead><tbody id="products"></tbody></table><div id="inventory-empty" class="empty" hidden></div></div>
+      <section class="card photos-card"><div class="section-heading"><div><h2 id="photos-heading">图片套装</h2><p>图片的使用状态以货盘返回的数据为准。</p></div><button type="button" id="clear-photo-filter" class="text-button" hidden>查看全部</button></div><div id="photo-sets" class="photo-grid"></div></section>
+    </section>
+
+    <section id="page-jobs" class="page-section" hidden>
+      <div class="section-tools"><select id="job-filter" aria-label="筛选任务状态"><option value="">全部任务</option><option value="attention">需要核对</option><option value="active">待执行 / 执行中</option><option value="complete">已完成</option></select><span id="job-count" class="muted"></span></div>
+      <div class="card table-card"><table><thead><tr><th>任务 / 商品</th><th>环境</th><th>状态</th><th>当前步骤</th><th>更新时间</th><th></th></tr></thead><tbody id="jobs"></tbody></table><div id="jobs-empty" class="empty" hidden></div></div>
+      <p class="footnote">外部操作的结果不明确时，不自动重新提交。先核对平台原记录；无法确认的任务保持暂停。</p>
+    </section>
+
+    <section id="page-settings" class="page-section" hidden>
+      <form id="settings-form" class="settings-grid">
+        <section class="card"><div class="section-heading"><div><h2>货盘 API</h2><p>凭据仅用于连接你配置的货盘服务。</p></div><span id="connection-badge" class="pill neutral">未配置</span></div>
+          <label>API 基础地址<input name="baseURL" type="url" placeholder="https://sku.meetist.fr/api/v1" autocomplete="url" spellcheck="false" maxlength="2048"></label>
+          <label>API Token<input name="token" type="password" placeholder="填写货盘提供的 Token" autocomplete="new-password" maxlength="4096"></label>
+          <label class="check-row"><input type="checkbox" name="clearToken"> 清除已保存的 Token</label>
+          <p class="field-hint" id="token-hint">Token 不会显示在页面上。填写后保存，再检查连接。</p>
+          <div id="connection-detail" class="connection-detail"></div>
+          <div class="form-actions"><button type="submit" class="primary">保存设置</button><button type="button" id="connect">检查已保存的连接</button></div>
+        </section>
+        <section class="card"><div class="section-heading"><div><h2>执行与采购规则</h2><p>先限定执行范围，再启动持续调度。</p></div></div>
+          <label class="toggle-row"><span><b>允许后台持续调度</b><small>最小化窗口后仍检查任务；需要保持应用和电脑运行。</small></span><input type="checkbox" name="backgroundEnabled"></label>
+          <div class="field-grid"><label>最多同时运行的环境数<input name="maxConcurrent" type="number" min="1" max="3" step="1" value="1" required></label><label>货盘履约方式<select name="fulfillmentMethod"><option value="wms">仓库履约（WMS）</option><option value="self">自行履约</option></select></label></div>
+          <div class="field-grid"><label>单笔采购上限（€）<input name="perOrderLimit" type="text" inputmode="decimal" placeholder="0.00" value="0.00" required maxlength="14"></label><label>每日采购上限（€）<input name="dailyLimit" type="text" inputmode="decimal" placeholder="0.00" value="0.00" required maxlength="14"></label></div>
+          <p class="field-hint">金额保留最多两位小数。上限设为 0 时，不授权自动采购；实际执行还需订单信息和流程验证完整。</p>
+          <div class="rule-note"><b>法国站 · 普通账号</b><p>每个环境、每个 SKU 只保留一个在售商品，确认成交后才补充上架。普通账号的商业销售限制需遵守 Vinted 法国站的《目录规则》及《条款和条件》。</p></div>
+          <div class="rule-note"><b>遇到不确定的结果会暂停</b><p>缺货、图片冲突、页面变化、账户验证、金额不匹配或订单提交结果未知时，保留任务记录并等待核对。</p></div>
+        </section>
+      </form>
+    </section>
+  </main>
+
+  <dialog id="plan-dialog"><form id="plan-form"><div class="dialog-heading"><div><div class="eyebrow">ENVIRONMENT PLAN</div><h2 id="plan-title">新建上架计划</h2></div><button type="button" data-close="plan-dialog" class="icon-button" aria-label="关闭">×</button></div><input name="id" type="hidden">
+    <div class="field-grid"><label>浏览器环境<select name="profileId" required></select></label><label>货盘商品<select name="productId" required></select></label></div><p class="field-hint" id="plan-product-info">选择货盘商品后查看库存和图片。</p>
+    <div class="field-grid three"><label>累计销售目标（件）<input name="targetCount" type="number" min="1" max="1000" step="1" value="1" required></label><label>上架价格（€）<input name="listingPrice" type="text" inputmode="decimal" value="" placeholder="例如 24.90" required maxlength="14"></label><label>最低接受价格（€）<input name="minOffer" type="text" inputmode="decimal" value="" placeholder="例如 20.00" required maxlength="14"></label></div>
+    <p class="field-hint">同一环境、同一 SKU 最多一个在售商品。确认成交后再补充上架，直到达到累计销售目标。</p>
+    <fieldset class="listing-fields"><legend>Vinted 刊登资料</legend><p class="field-hint">填写可以确认的商品信息，分类及选项请使用法国站显示的名称。资料可以先留空保存；核对时会列出缺项。</p>
+      <label>商品标题<input name="listingTitle" type="text" maxlength="100" placeholder="使用真实商品名称，不直接使用测试 SKU"></label>
+      <label>商品描述<textarea name="listingDescription" rows="4" maxlength="2000" placeholder="商品类型、材质、尺寸、使用情况及可确认的瑕疵"></textarea></label>
+      <label>分类路径<input name="listingCategoryPath" type="text" maxlength="821" placeholder="逐层填写，用「 / 」分隔"></label>
+      <div class="field-grid"><label>成色<input name="listingCondition" type="text" maxlength="100" placeholder="按实际成色填写"></label><label>品牌<input name="listingBrand" type="text" maxlength="100" placeholder="有依据才填写品牌或无品牌"></label><label>尺码<input name="listingSize" type="text" maxlength="100" placeholder="按商品实际尺码填写"></label><label>颜色<input name="listingColor" type="text" maxlength="100"></label></div>
+      <label>包裹规格<input name="listingParcel" type="text" maxlength="100" placeholder="按实际包装尺寸和重量填写"></label>
+    </fieldset>
+    <div class="plan-rules"><label class="check-row"><input name="reuseOwnPhotos" type="checkbox" checked><span>允许同一账号重复使用自己的图片</span></label><label class="check-row"><input name="autoReply" type="checkbox"><span>启用客人问题自动回复</span></label><label class="check-row"><input name="autoAcceptOffers" type="checkbox"><span>启用报价自动接受（不低于最低接受价格）</span></label></div>
+    <label>商品回复说明<textarea name="replyPolicy" rows="3" maxlength="2000" placeholder="填写可以确认的商品信息，例如尺码、材质、发货时间。没有依据的问题会留待人工处理。"></textarea></label>
+    <label class="toggle-row"><span><b>启用这个计划</b><small>只有调度已启动且所需流程完成验证后，才会执行。</small></span><input name="enabled" type="checkbox"></label><div id="plan-error" class="form-error" role="alert" hidden></div><div class="form-actions end"><button type="button" data-close="plan-dialog">取消</button><button type="submit" class="primary">保存计划</button></div>
+  </form></dialog>
+
+  <dialog id="job-dialog"><div class="dialog-heading"><div><div class="eyebrow">TASK RECEIPT</div><h2>任务详情</h2></div><button type="button" data-close="job-dialog" class="icon-button" aria-label="关闭">×</button></div><div id="job-detail"></div><form id="reconcile-form" hidden><h3>核对原订单</h3><p class="field-hint">根据已保存的货盘订单编号，重新读取原订单和仓库状态。此检查不会重新下单；停止调度后可以执行。</p><div class="form-actions"><button type="submit">检查原订单状态</button></div></form><form id="retry-form" hidden><h3>重新排队</h3><p class="field-hint">只恢复这条任务的排队状态，保留原编号和执行记录。此操作不会立即执行；之后可再次检查。</p><div class="form-actions"><button type="submit">重新排队此任务</button></div></form></dialog>
+  <dialog id="preflight-dialog" aria-labelledby="preflight-title"><div class="dialog-heading"><div><div class="eyebrow">VINTED / PAGE CHECK</div><h2 id="preflight-title">核对刊登资料</h2></div><button type="button" data-close="preflight-dialog" class="icon-button" aria-label="关闭">×</button></div><div class="rule-note preflight-note"><b>填写页面只准备表单</b><p>按计划填写能够核对的字段，缺少的内容会列出；不会点击发布、发送消息、接受报价或提交采购。图片与网页选项仍需逐项核对。</p></div><div id="preflight-detail" aria-live="polite"></div><div class="form-actions end"><button type="button" data-close="preflight-dialog">关闭</button><button type="button" id="preflight-edit">编辑资料</button><button type="button" id="preflight-fill" class="primary">填写页面</button></div></dialog>
+  <div id="toast" role="status" hidden></div>
+  <script src="commerce-ui.cjs"></script>
+</body>
+</html>

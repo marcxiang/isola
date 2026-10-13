@@ -9,6 +9,7 @@ module.exports=async function runtimeAudit(api,check){
  const start=async handler=>{const server=http.createServer(handler);server.on('clientError',(_,socket)=>socket.destroy());await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});servers.push(server);return server;};
  const until=async fn=>{const end=Date.now()+8000;while(!fn()){if(Date.now()>end)throw Error('Audit cleanup timed out');await new Promise(r=>setTimeout(r,20));}};
  const create=async input=>{const p=api.saveProfile({name:'QA supplementary audit',fingerprintMode:'native',...input});profiles.push(p);await api.launch(p.id);return {profile:p,w:api.windows.get(p.id),c:api.windows.get(p.id).tabs[0].view.webContents};};
+ const boundedPage=async(c,work)=>{let timer;try{return await Promise.race([Promise.resolve().then(work),new Promise((_,reject)=>{timer=setTimeout(()=>{try{c.stop();}catch{}reject(Error('Local proxy authentication did not settle within 8 seconds'));},8000);})]);}finally{clearTimeout(timer);}};
  const script=fs.readFileSync(path.join(__dirname,'../src/device-probe.cjs'),'utf8');
  let authRound=1,authChallenges=0;
  try{
@@ -25,6 +26,38 @@ module.exports=async function runtimeAudit(api,check){
     const value=await p.c.executeJavaScript('document.body.dataset.round||null');rounds.push(value);assert.equal(value,String(authRound),`Proxy authentication round ${authRound} failed after ${authChallenges} challenges`);
    }
    assert.ok(authChallenges>=3,'Fixture must challenge at least three times');return {rounds,challenges:authChallenges,origin:'local fake HTTP proxy; no real proxy subscription'};
+  });
+  await check('browser proxy authentication recovers for the exact same URL and realm across navigations',async()=>{
+   authRound=100;const target='http://proxy-same-url.invalid/repeated',p=await create({url:'http://fixture-initial.invalid/initial',proxy:{type:'http',host:'127.0.0.1',port:proxy.address().port,username:'qa-retry',password:'qa-secret'}}),before=authChallenges;
+   for(let i=0;i<4;i++){await api.sesFor(p.profile).clearAuthCache();await api.sesFor(p.profile).closeAllConnections();await boundedPage(p.c,()=>p.c.loadURL(target));assert.equal(await p.c.executeJavaScript('document.body.dataset.round'),'100');}
+   assert.ok(authChallenges-before>=4);return {sameURL:true,sameRealm:true,navigations:4,challenges:authChallenges-before};
+  });
+  await check('a long-lived document survives more than 32 successful same-URL proxy reauthentications',async()=>{
+   authRound=200;const target='http://proxy-long-lived.invalid/',p=await create({url:target,proxy:{type:'http',host:'127.0.0.1',port:proxy.address().port,username:'qa-retry',password:'qa-secret'}}),before=authChallenges;
+   const documentKey=await p.c.executeJavaScript('performance.timeOrigin');
+   for(let i=0;i<35;i++){
+    await api.sesFor(p.profile).clearAuthCache();await api.sesFor(p.profile).closeAllConnections();
+    const body=await boundedPage(p.c,()=>p.c.executeJavaScript(`fetch('/same-resource',{cache:'no-store'}).then(async response=>({status:response.status,text:await response.text()}))`));
+    assert.equal(body.status,200);assert.match(body.text,/Authenticated proxy fixture 200/);
+   }
+   assert.equal(await p.c.executeJavaScript('performance.timeOrigin'),documentKey);assert.ok(authChallenges-before>=35);return {sameDocument:true,sameURL:true,successfulReauthentications:35,challenges:authChallenges-before};
+  });
+  for(const rotating of [false,true])await check(rotating?'changing proxy realms cannot cause unbounded credential retries':'wrong proxy credentials stop after bounded attempts and may retry after a new navigation',async()=>{
+   let requests=0,credentialRequests=0,loginEvents=0;
+   const denied=await start((req,res)=>{if(new URL(req.url).pathname==='/initial'){res.end('<!doctype html><title>Initial local fixture</title>');return;}requests++;if(req.headers['proxy-authorization'])credentialRequests++;res.writeHead(407,{'Proxy-Authenticate':`Basic realm="${rotating?'rotation-'+requests:'always-denied'}"`,'Cache-Control':'no-store','Connection':'close'});res.end('Fixture rejects every credential');});
+   const p=await create({url:'http://fixture-initial.invalid/initial',proxy:{type:'http',host:'127.0.0.1',port:denied.address().port,username:'bad-fixture-user',password:'bad-fixture-password'}}),observe=()=>loginEvents++;p.c.on('login',observe);
+   try{
+    const target='http://proxy-denied.invalid/same-target';await boundedPage(p.c,()=>p.c.loadURL(target).catch(error=>({error:error.code})));
+    assert.ok(loginEvents>0);assert.ok(credentialRequests>0);assert.ok(loginEvents<=(rotating?33:3),`Unexpected ${loginEvents} login events`);assert.ok(requests<=(rotating?35:5),`Unexpected ${requests} proxy requests`);
+    if(!rotating){const prior=credentialRequests;await api.sesFor(p.profile).clearAuthCache();await api.sesFor(p.profile).closeAllConnections();await boundedPage(p.c,()=>p.c.loadURL(target).catch(error=>({error:error.code})));assert.ok(credentialRequests>prior);assert.ok(loginEvents<=6);}
+    return {rotatingRealm:rotating,requests,credentialRequests,loginEvents,bounded:true};
+   }finally{p.c.removeListener('login',observe);}
+  });
+  await check('an origin HTTP 401 cannot receive the configured proxy password',async()=>{
+   const authorizations=[];let originChallenges=0;
+   const originAuth=await start((req,res)=>{if(new URL(req.url).pathname==='/initial'){res.end('<!doctype html><title>Initial local fixture</title>');return;}authorizations.push(req.headers.authorization||null);res.writeHead(401,{'WWW-Authenticate':'Basic realm="origin-only"','Cache-Control':'no-store','Connection':'close'});res.end('Origin authentication requires separate credentials');});
+   const p=await create({url:'http://fixture-initial.invalid/initial',proxy:{type:'http',host:'127.0.0.1',port:originAuth.address().port,username:'proxy-only-user',password:'proxy-only-secret'}}),observe=(_event,_details,info)=>{if(!info.isProxy)originChallenges++;};p.c.on('login',observe);
+   try{await boundedPage(p.c,()=>p.c.loadURL('http://origin-auth.invalid/').catch(error=>({error:error.code})));assert.ok(originChallenges>0);assert.ok(authorizations.length>0);assert.ok(authorizations.every(value=>value===null));return {originChallenges,originAuthorizationSent:false};}finally{p.c.removeListener('login',observe);}
   });
   const server=await start((req,res)=>{
    res.setHeader('Cache-Control','no-store');

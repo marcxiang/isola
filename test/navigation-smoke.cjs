@@ -70,6 +70,16 @@ module.exports=async function navigationSmoke(api,check){
    const oldTab=tab,oldCount=w.tabs.length;let result=await open();assert.equal(result.profileId,profile.id);assert.equal(result.url,'https://www.vinted.fr/items/new');assert.equal(w.tabs.length,oldCount+1);assert.ok(w.tabs.includes(oldTab));const form=w.tabs.find(t=>t.id===w.activeTab);await form.view.webContents.executeJavaScript(`window.marker='preserved'`);result=await open();assert.equal(w.tabs.length,oldCount+1);assert.equal(await form.view.webContents.executeJavaScript('window.marker'),'preserved');
    engine.db.plans=originalPlans;originalPlans=null;
   });
+  await check('active listing IPC opens only a matching stored receipt in its profile and preserves other tabs',async()=>{
+   engine=api.getCommerce();const plans=engine.db.plans.slice(),claims=engine.db.claims.slice();
+   const plan={id:'qa-active-listing',profileId:profile.id,productId:'qa-nav',sku:'QA-NAV',activeListingId:'123456'},receipt={listingId:'123456',url:'https://www.vinted.fr/items/123456-fixture'};
+   engine.db.plans.push(plan);engine.db.claims.push({id:'qa-nav-claim',profileId:profile.id,productId:plan.productId,listings:[receipt]});
+   try{await api.openCommerce();const desk=api.getCommerceWindow().webContents,open=()=>desk.executeJavaScript(`window.commerce.openActiveListing('qa-active-listing')`),before=w.tabs.slice();
+    const result=await open();assert.equal(result.profileId,profile.id);assert.equal(result.url,receipt.url);assert.equal(w.tabs.length,before.length+1);assert.ok(before.every(tab=>w.tabs.includes(tab)));
+    const current=w.tabs.find(tab=>tab.id===w.activeTab);await current.view.webContents.executeJavaScript(`window.listingMarker='preserved'`);await open();assert.equal(w.tabs.length,before.length+1);assert.equal(await current.view.webContents.executeJavaScript('window.listingMarker'),'preserved');
+    receipt.url='https://outside-fixture.invalid/items/123456';await assert.rejects(open(),/没有可核对/);assert.equal(w.tabs.length,before.length+1);
+   }finally{engine.db.plans=plans;engine.db.claims=claims;}
+  });
   await check('window close Keep preserves draft and close completion waits for actual destruction',async()=>{
    const active=w.tabs.find(t=>t.id===w.activeTab);await dirty(active.view.webContents);choice=0;w.close();await until(()=>!w.closingPromise);assert.equal(w.isDestroyed(),false);assert.ok(api.windows.has(profile.id));choice=1;w.close();await until(()=>w.isDestroyed());assert.equal(api.windows.has(profile.id),false);
   });

@@ -11,7 +11,7 @@
   <aside class="sidebar">
     <div class="brand"><span>◈</span> Isola<small>COMMERCE WORKSPACE</small></div>
     <nav aria-label="运营导航">
-      <button type="button" data-page="overview" class="nav-item active" aria-current="page"><span>▦</span> 运营概览</button>
+      <button type="button" data-page="overview" class="nav-item active" aria-current="page"><span>▦</span> 商品运营</button>
       <button type="button" data-page="plans" class="nav-item"><span>▤</span> 上架计划</button>
       <button type="button" data-page="inventory" class="nav-item"><span>◇</span> 货盘与图片</button>
       <button type="button" data-page="jobs" class="nav-item"><span>≋</span> 任务记录 <b id="nav-review-count" hidden>0</b></button>
@@ -21,7 +21,7 @@
   </aside>
   <main>
     <header class="page-header">
-      <div><div class="eyebrow">ISOLA / OPERATIONS</div><h1 id="page-title">运营概览</h1><p id="page-description">从商品、上架到订单，每一步都有记录。</p></div>
+      <div><div class="eyebrow">ISOLA / OPERATIONS</div><h1 id="page-title">商品运营</h1><p id="page-description">查看每个商品在哪个环境销售，以及接下来需要做什么。</p></div>
       <div class="header-actions"><span class="runner-status" id="runner-status"><i></i> 已暂停</span><button type="button" id="run-once">检查一次</button><button type="button" class="primary" id="runner-toggle">启动调度</button></div>
     </header>
     <div id="load-error" role="alert" class="banner error" hidden></div>
@@ -34,9 +34,12 @@
         <article><span>已完成任务</span><strong id="stat-complete">0</strong><small>以任务记录为准</small></article>
         <article class="attention-stat"><span>需要核对</span><strong id="stat-review">0</strong><small>不确定的结果会暂停</small></article>
       </div>
-      <section class="card workflow-card"><div class="section-heading"><div><h2>一条可追踪的工作流</h2><p>操作前检查条件，操作后保存结果。</p></div><span class="pill neutral" id="workflow-status">等待流程验证</span></div><div class="workflow"><div><span>01</span><b>商品与上架</b><small>库存 · 图片 · 数量 · 价格</small></div><div><span>02</span><b>消息与报价</b><small>商品事实 · 接受价格下限</small></div><div><span>03</span><b>成交与面单</b><small>核对交易 · 获取运单</small></div><div><span>04</span><b>货盘采购</b><small>匹配商品 · 限额 · 订单记录</small></div></div></section>
-      <div class="overview-grid"><section class="card"><div class="section-heading"><div><h2>环境计划</h2><p>每个窗口可以使用不同的商品与价格。</p></div><button type="button" id="overview-new-plan" class="text-button">＋ 新建计划</button></div><div id="overview-plans" class="compact-list"></div></section><section class="card"><div class="section-heading"><div><h2>最新动态</h2><p>最近的调度与执行结果。</p></div><span class="live-label">本机记录</span></div><div id="events" class="event-list" aria-live="polite"></div></section></div>
-      <p class="footnote">保持应用运行即可在后台调度；系统睡眠、网络断开或退出应用时，任务无法继续执行。结果不明确的步骤需要核对后再继续。</p>
+      <section class="card operations-runner"><div class="section-heading"><div><h2 id="operations-runner-title">后台已暂停</h2><p id="operations-runner-summary">等待运营状态。</p></div><span class="pill neutral" id="workflow-status">等待流程验证</span></div><div id="operations-runner-detail" class="runner-detail"></div><p class="field-hint">最小化后可继续调度。需要应用运行、电脑保持唤醒且网络可用；每个环境依次操作，结果不明确时暂停该任务。</p></section>
+      <section class="card distribution-card" aria-labelledby="distribution-heading"><div class="section-heading"><div><h2 id="distribution-heading">商品销售分布</h2><p>Vinted 法国站 · 按商品查看环境、价格和实际刊登记录。</p></div><button type="button" id="overview-new-plan" class="primary">＋ 分配商品</button></div>
+        <div class="distribution-tools"><label class="search-label"><span>商品</span><input id="distribution-search" type="search" placeholder="商品名称或 SKU…"></label><label><span>销售环境</span><select id="distribution-profile"><option value="">全部环境</option></select></label><label><span>执行状态</span><select id="distribution-status"><option value="">全部状态</option><option value="unassigned">尚未分配</option><option value="pending">待发布 / 待执行</option><option value="listed">已有在售记录</option><option value="running">执行中</option><option value="attention">需要核对</option><option value="paused">计划未启用</option><option value="target_reached">目标已达成</option></select></label><button type="button" id="distribution-reset">重置</button></div>
+        <div class="distribution-count" id="distribution-count" role="status"></div><div id="distribution-list"></div><button type="button" id="distribution-more" class="text-button" hidden>显示更多商品</button>
+      </section>
+      <section class="card operations-events"><div class="section-heading"><div><h2>最新动态</h2><p>最近的调度与执行结果。</p></div><span class="live-label">本机记录</span></div><div id="events" class="event-list" aria-live="polite"></div></section>
     </section>
 
     <section id="page-plans" class="page-section" hidden>
@@ -51,7 +54,7 @@
     </section>
 
     <section id="page-jobs" class="page-section" hidden>
-      <div class="section-tools"><select id="job-filter" aria-label="筛选任务状态"><option value="">全部任务</option><option value="attention">需要核对</option><option value="active">待执行 / 执行中</option><option value="complete">已完成</option></select><span id="job-count" class="muted"></span></div>
+      <div class="section-tools"><select id="job-filter" aria-label="筛选任务状态"><option value="">全部任务</option><option value="attention">需要核对</option><option value="active">待执行 / 执行中</option><option value="complete">已完成</option></select><span id="job-count" class="muted"></span><span id="job-plan-context" class="pill neutral" hidden></span><button type="button" id="clear-job-plan" class="text-button" hidden>查看全部计划</button></div>
       <div class="card table-card"><table><thead><tr><th>任务 / 商品</th><th>环境</th><th>状态</th><th>当前步骤</th><th>更新时间</th><th></th></tr></thead><tbody id="jobs"></tbody></table><div id="jobs-empty" class="empty" hidden></div></div>
       <p class="footnote">外部操作的结果不明确时，不自动重新提交。先核对平台原记录；无法确认的任务保持暂停。</p>
     </section>
@@ -96,6 +99,14 @@
 
   <dialog id="job-dialog"><div class="dialog-heading"><div><div class="eyebrow">TASK RECEIPT</div><h2>任务详情</h2></div><button type="button" data-close="job-dialog" class="icon-button" aria-label="关闭">×</button></div><div id="job-detail"></div><form id="reconcile-form" hidden><h3>核对原订单</h3><p class="field-hint">根据已保存的货盘订单编号，重新读取原订单和仓库状态。此检查不会重新下单；停止调度后可以执行。</p><div class="form-actions"><button type="submit">检查原订单状态</button></div></form><form id="retry-form" hidden><h3>重新排队</h3><p class="field-hint">只恢复这条任务的排队状态，保留原编号和执行记录。此操作不会立即执行；之后可再次检查。</p><div class="form-actions"><button type="submit">重新排队此任务</button></div></form></dialog>
   <dialog id="preflight-dialog" aria-labelledby="preflight-title"><div class="dialog-heading"><div><div class="eyebrow">VINTED / PAGE CHECK</div><h2 id="preflight-title">核对刊登资料</h2></div><button type="button" data-close="preflight-dialog" class="icon-button" aria-label="关闭">×</button></div><div class="rule-note preflight-note"><b>填写页面只准备表单</b><p>按计划填写能够核对的字段，缺少的内容会列出；不会点击发布、发送消息、接受报价或提交采购。图片与网页选项仍需逐项核对。</p></div><div id="preflight-detail" aria-live="polite"></div><div class="form-actions end"><button type="button" data-close="preflight-dialog">关闭</button><button type="button" id="preflight-edit">编辑资料</button><button type="button" id="preflight-fill" class="primary">填写页面</button></div></dialog>
+  <dialog id="plan-photos-dialog" aria-labelledby="plan-photos-title">
+    <div class="dialog-heading"><div><div class="eyebrow">VINTED / LISTING PHOTOS</div><h2 id="plan-photos-title">照片准备与上传</h2></div><button type="button" data-close="plan-photos-dialog" class="icon-button" aria-label="关闭照片面板">×</button></div>
+    <div class="rule-note photo-process-note"><b>领取免费，但会永久占用图片套组</b><p>每个计划保留原领取和下载记录，重试继续处理原套组。本机准备完成后，还须上传并核对网页回执；这些操作不会保存草稿或发布商品。</p></div>
+    <div id="plan-photos-detail" aria-live="polite"></div>
+    <div class="photo-dialog-actions"><button type="button" id="photo-prepare">领取并准备图片</button><button type="button" id="photo-preview">预览已准备图片</button><button type="button" id="photo-inspect">检查照片控件</button><button type="button" id="photo-upload" class="primary">上传并核对</button></div>
+    <p id="photo-action-hint" class="field-hint"></p>
+    <div class="form-actions end"><span class="photo-close-note">关闭面板不会取消已发出的操作。</span><button type="button" data-close="plan-photos-dialog">关闭</button></div>
+  </dialog>
   <div id="toast" role="status" hidden></div>
   <script src="commerce-ui.cjs"></script>
 </body>

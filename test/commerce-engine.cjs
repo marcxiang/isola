@@ -271,3 +271,24 @@ test('a safe blocked plan remains uneditable while an account action or polling 
   f.engine.ticking=true;try{assert.throws(()=>f.engine.savePlan({...f.plan,replyPolicy:'changed'}),/执行中或已提交/);}finally{f.engine.ticking=false;}
   assert.equal(f.plan.replyPolicy,'');assert.equal(f.engine.savePlan({...f.plan,replyPolicy:'ready to retry'}).replyPolicy,'ready to retry');
 });
+
+
+test('sales distribution exposes only a single matching receipt URL in the original profile',async t=>{
+ const {engine,plan}=await fixture(t);plan.activeListingId='12345';plan.activeListingUrl='https://evil.invalid/';
+ const row={listingId:'12345',url:'https://www.vinted.fr/items/12345-fixture'};
+ const claim={id:'fixture-receipt',profileId:plan.profileId,productId:plan.productId,listings:[row]};engine.db.claims.push(claim);
+ const url=()=>engine.state().plans.find(p=>p.id===plan.id).activeListingUrl;
+ assert.equal(url(),row.url);
+ for(const bad of ['https://evil.invalid/items/12345','https://www.vinted.fr/items/98765','https://user:pass@www.vinted.fr/items/12345','https://www.vinted.fr/items/12345?redirect=other','javascript:alert(1)']){row.url=bad;assert.equal(url(),null);}
+ row.url='https://www.vinted.fr/items/12345-fixture';claim.profileId='profile-2';assert.equal(url(),null);claim.profileId=plan.profileId;
+ claim.listings.push({...row});assert.equal(url(),null);claim.listings.pop();plan.activeListingId=null;assert.equal(url(),null);
+});
+
+
+test('market account binding persists its member identity and rejects a silent account switch',async t=>{
+ const {engine,plan,options}=await fixture(t),account={verified:true,memberId:'123456',username:'fixture-seller',profileURL:'https://www.vinted.fr/member/123456'};
+ const bound=engine.bindMarketAccount(plan.profileId,account);assert.equal(bound.platform,'vinted-fr');assert.equal(engine.state().profiles.find(p=>p.id===plan.profileId).marketAccount.memberId,'123456');
+ assert.throws(()=>engine.bindMarketAccount(plan.profileId,{...account,memberId:'98765',profileURL:'https://www.vinted.fr/member/98765'}),/不同/);
+ assert.throws(()=>engine.bindMarketAccount(plan.profileId,{...account,profileURL:'https://www.vinted.fr/member/98765'}));assert.throws(()=>engine.bindMarketAccount(plan.profileId,{...account,verified:false}));assert.throws(()=>engine.bindMarketAccount('missing',account));
+ await engine.close();const restored=new CommerceEngine(options);try{assert.equal(restored.state().profiles.find(p=>p.id===plan.profileId).marketAccount.memberId,'123456');restored.bindMarketAccount(plan.profileId,{...account,username:'renamed-fixture'});assert.equal(restored.db.marketAccounts.length,1);}finally{await restored.close();}
+});

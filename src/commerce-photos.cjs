@@ -2,25 +2,52 @@
 const fs=require('node:fs'),path=require('node:path'),{randomUUID,createHash}=require('node:crypto');
 const MAX_IMAGE_BYTES=5*1024*1024,READ_TIMEOUT_MS=30000;
 const STATES=new Set(['prepared','claiming','uncertain','receipt_saved','downloading','ready','needs_review']);
+const UUID='[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const stamp=()=>new Date().toISOString();
 function failure(code,message){const error=Error(message);error.code=code;return error;}
 function object(value){return !!value&&typeof value==='object'&&!Array.isArray(value);}
 function identifier(value){return typeof value==='string'&&value.length>0&&value.length<=256&&!/[\x00-\x20\x7f]/.test(value);}
 function stopped(){return failure('STOPPED','照片准备已停止；原领取和下载记录已保留');}
-function bounded(work,signal){
+function bounded(work,signal,{saveReceipt}={}){
  if(signal.aborted)return Promise.reject(stopped());
  const controller=new AbortController();
  return new Promise((resolve,reject)=>{
   let settled=false,timer;const finish=(fn,value)=>{if(settled)return;settled=true;clearTimeout(timer);signal.removeEventListener('abort',abort);fn(value);};
-  const abort=()=>{controller.abort();finish(reject,stopped());};signal.addEventListener('abort',abort,{once:true});
+  // A sent mutation may succeed while being cancelled. Keep its bounded slot
+  // until the transport settles, and durably retain a returned receipt first.
+  const abort=()=>{controller.abort();if(!saveReceipt)finish(reject,stopped());};signal.addEventListener('abort',abort,{once:true});
   timer=setTimeout(()=>{controller.abort();finish(reject,failure('PHOTO_TIMEOUT','照片请求超时，已保留原请求编号，不能重新领取其他套组'));},READ_TIMEOUT_MS);
-  Promise.resolve().then(()=>{if(controller.signal.aborted)throw stopped();return work(controller.signal);}).then(value=>finish(resolve,value),error=>finish(reject,error));
+  Promise.resolve().then(()=>{if(controller.signal.aborted)throw stopped();return work(controller.signal);}).then(value=>{if(settled)return;try{saveReceipt?.(value);finish(signal.aborted?reject:resolve,signal.aborted?stopped():value);}catch(error){finish(reject,error);}},error=>finish(reject,signal.aborted?stopped():error));
  });
 }
 function binding(record){return {planId:record.planId,profileId:record.profileId,productId:record.productId,sku:record.sku,baseURL:record.baseURL,supplierAccountId:record.supplierAccountId,setId:record.setId,payload:record.payload,idempotencyKey:record.idempotencyKey};}
 function validRecord(record){
- if(!object(record)||!STATES.has(record.state)||!/^[a-f0-9-]{36}$/.test(record.id||'')||!['planId','profileId','productId','sku','supplierAccountId','setId'].every(k=>identifier(record[k]))||!object(record.payload)||record.payload.productId!==record.productId||record.payload.setId!==record.setId||Object.keys(record.payload).length!==2||!/^isola-photo-[a-f0-9-]{36}$/.test(record.idempotencyKey||'')||!Array.isArray(record.assets)||record.assets.length>20||record.bindingHash!==hash(JSON.stringify(binding(record))))throw failure('PHOTO_RECORD','原照片准备记录不完整或身份已改变，禁止重新领取');
+ const invalid=()=>{throw failure('PHOTO_RECORD','原照片准备记录不完整或身份已改变，禁止重新领取');};
+ if(!object(record)||!STATES.has(record.state)||!new RegExp('^'+UUID+'$').test(record.id||'')||!['planId','profileId','productId','supplierAccountId','setId'].every(k=>identifier(record[k]))||typeof record.sku!=='string'||!record.sku.trim()||record.sku.length>256||/[\0\r\n]/.test(record.sku)||!object(record.payload)||record.payload.productId!==record.productId||record.payload.setId!==record.setId||Object.keys(record.payload).length!==2||!new RegExp('^isola-photo-'+UUID+'$').test(record.idempotencyKey||'')||!Array.isArray(record.assets)||record.assets.length>20||record.bindingHash!==hash(JSON.stringify(binding(record))))invalid();
+ let base;try{base=new URL(record.baseURL);}catch{invalid();}const local=['localhost','127.0.0.1','[::1]'].includes(base.hostname);if(base.protocol!=='https:'&&!(base.protocol==='http:'&&local)||base.username||base.password||base.search||base.hash||base.href!==record.baseURL||!base.pathname.endsWith('/api/v1'))invalid();
+ if(!['createdAt','updatedAt'].every(key=>typeof record[key]==='string'&&Number.isFinite(Date.parse(record[key])))||typeof record.error!=='string'||record.error.length>500)invalid();
+ const attempted=Number.isSafeInteger(record.attempts)&&record.attempts>0&&typeof record.firstAttemptAt==='string'&&Number.isFinite(Date.parse(record.firstAttemptAt)),hasReceipt=Object.hasOwn(record,'receipt');
+ if(record.state==='prepared'?(record.attempts!==undefined||record.firstAttemptAt!==undefined||hasReceipt):!attempted)invalid();
+ if(hasReceipt&&(!object(record.receipt)||record.receiptHash!==hash(JSON.stringify(record.receipt))))invalid();
+ if(['claiming','uncertain'].includes(record.state)&&hasReceipt||['receipt_saved','downloading','ready'].includes(record.state)&&!hasReceipt)invalid();
+ if(record.claimId!==undefined&&!identifier(record.claimId))invalid();
+ if(record.images!==undefined){if(!Array.isArray(record.images)||record.images.length<1||record.images.length>20||!record.claimId||!hasReceipt)invalid();receiptImages(record);}
+ if(record.assets.length&&(!record.images||record.assets.length>record.images.length))invalid();
+ record.assets.forEach((asset,index)=>{assetPath('',asset,index);if(typeof asset.ready!=='boolean'||asset.imageId!==record.images[index].id)invalid();});
+ if(record.state==='ready'&&(!record.images||record.images.length!==record.assets.length||record.assets.some(asset=>!asset.ready)))invalid();
+}
+function restorePhotoPreparations(db){
+ if(db.photoPreparations===undefined)db.photoPreparations=[];
+ if(!Array.isArray(db.photoPreparations))throw failure('PHOTO_RECORD','照片准备历史格式无效，原文件已保留');
+ const ids=new Set(),plans=new Set(),sets=new Set();
+ for(const record of db.photoPreparations){
+  validRecord(record);const plan=db.plans.find(plan=>plan.id===record.planId),set=JSON.stringify([record.baseURL,record.supplierAccountId,record.setId]);
+  if(!plan||plan.profileId!==record.profileId||plan.productId!==record.productId||plan.sku!==record.sku||record.baseURL!==db.settings.baseURL||record.supplierAccountId!==db.supplierAccountId||ids.has(record.id)||plans.has(record.planId)||sets.has(set))throw failure('PHOTO_RECORD','照片准备历史的计划、账号或套组身份冲突，原文件已保留');
+  ids.add(record.id);plans.add(record.planId);sets.add(set);
+ }
+ // Validate all history before changing interruption states; never discard it.
+ for(const record of db.photoPreparations){if(record.state==='claiming'){record.state='uncertain';record.error='上次领取尚未核对，只能恢复原套组与请求编号';record.updatedAt=stamp();}else if(record.state==='downloading'){record.state='receipt_saved';record.error='原领取回执已保存，可继续下载同一套照片';record.updatedAt=stamp();}}
 }
 function summarizePreparation(record){return {id:record.id,planId:record.planId,profileId:record.profileId,productId:record.productId,sku:record.sku,setId:record.setId,claimId:record.claimId||null,state:record.state,count:Array.isArray(record.images)?record.images.length:0,downloadedCount:Array.isArray(record.assets)?record.assets.filter(a=>a?.ready===true).length:0,ready:record.state==='ready',error:record.error||'',createdAt:record.createdAt,updatedAt:record.updatedAt,permanentClaim:true};}
 function findRecord(engine,plan){
@@ -47,6 +74,11 @@ function receiptImages(record){
  if(new Set(images.map(i=>i.id)).size!==images.length)throw failure('PHOTO_RECEIPT','套组出现重复照片编号');
  if(record.images&&JSON.stringify(images)!==JSON.stringify(record.images))throw failure('PHOTO_RECEIPT','原领取照片顺序或地址发生变化，未替换本地照片');
  return {claimId,images};
+}
+function matchingClaim(engine,record,{required=false}={}){
+ const related=engine.db.claims.filter(c=>c.id===record.claimId||c.setId===record.setId);
+ if(required&&related.length!==1||related.length>1||related.some(c=>c.id!==record.claimId||c.setId!==record.setId||c.profileId!==record.profileId||c.productId!==record.productId||c.supplierAccountId!==undefined&&c.supplierAccountId!==record.supplierAccountId||!Array.isArray(c.listings)||!Array.isArray(c.images)||JSON.stringify(c.images.map(i=>imageURL(i.url,record.baseURL)))!==JSON.stringify(record.images)))throw failure('PHOTO_CONFLICT','本套照片的本地领取记录、环境或商品不一致，已停止');
+ return related[0];
 }
 function privateDirectory(directory){
  if(!fs.existsSync(directory))fs.mkdirSync(directory,{mode:0o700});
@@ -78,6 +110,7 @@ function readPreparedPhotos(engine,planId){
  const summary=summarizePreparation(record);if(record.state!=='ready')return {summary,manifest:null};
  try{
   const validated=receiptImages(record);if(record.claimId!==validated.claimId||record.assets.length!==validated.images.length)throw failure('PHOTO_STORAGE','本地照片数量与原领取不一致');
+  matchingClaim(engine,record,{required:true});
   const dir=cacheDirectory(engine,record),files=record.assets.map((asset,index)=>{if(!asset.ready||asset.imageId!==validated.images[index].id)throw failure('PHOTO_STORAGE','本地照片尚未完整保存');return {path:readAsset(dir,asset,index),sha256:asset.sha256,width:asset.width,height:asset.height,size:asset.size,imageId:asset.imageId};});
   return {summary,manifest:{preparationId:record.id,planId:record.planId,profileId:record.profileId,productId:record.productId,sku:record.sku,setId:record.setId,claimId:record.claimId,count:files.length,files}};
  }catch{return {summary:{...summary,ready:false,state:'needs_review',error:'本地照片文件缺失或校验失败，请重新准备以恢复原领取'},manifest:null};}
@@ -100,7 +133,7 @@ async function preparePhotos(engine,planId,{setId,signal:callerSignal,validateIm
  return engine.configure(async(configSignal,configGuard)=>{
   const controller=new AbortController(),abort=()=>controller.abort();for(const signal of [configSignal,callerSignal]){signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();}
   const signal=controller.signal,guard=()=>{if(signal.aborted)throw stopped();configGuard();if(engine.faulted)throw failure('PHOTO_STORAGE','运营存储不可用，照片准备已停止');};
-  let record;
+  let record,started=false;
   const save=()=>{record.updatedAt=stamp();engine.persist();engine.emit();};
   try{
    guard();const plan=engine.plan(planId);if(!engine.profiles().some(p=>p.id===plan.profileId))throw failure('PHOTO_PROFILE','照片计划的环境不存在');
@@ -115,19 +148,18 @@ async function preparePhotos(engine,planId,{setId,signal:callerSignal,validateIm
     const chosen=await chooseSet(client,plan,setId,signal,guard,reserved);guard();
     record={id:randomUUID(),planId:plan.id,profileId:plan.profileId,productId:plan.productId,sku:plan.sku,baseURL:engine.db.settings.baseURL,supplierAccountId:accountId,setId:chosen,payload:{productId:plan.productId,setId:chosen},idempotencyKey:'isola-photo-'+randomUUID(),state:'prepared',assets:[],createdAt:stamp(),updatedAt:stamp(),error:''};record.bindingHash=hash(JSON.stringify(binding(record)));engine.db.photoPreparations.push(record);save();
    }
-   guard();
-   if(!record.receipt){
+   guard();started=true;const dir=cacheDirectory(engine,record,true);syncDirectory(path.dirname(dir));syncDirectory(engine.dir);
+   if(!Object.hasOwn(record,'receipt')){
     // The supplied v1.8.0 contract specifies same-key/body replay, but no 24h
     // expiry. Always fixing setId also prevents allocation of a different set.
     record.state='claiming';record.error='';record.firstAttemptAt=record.firstAttemptAt||stamp();record.attempts=(record.attempts||0)+1;save();guard();
-    const receipt=await bounded(s=>client.claimPhotos({...record.payload},{idempotencyKey:record.idempotencyKey,signal:s}),signal);
-    // A receipt is durable even if cancellation arrives with the response.
-    record.receipt=receipt;record.state='receipt_saved';save();guard();
+    await bounded(s=>client.claimPhotos({...record.payload},{idempotencyKey:record.idempotencyKey,signal:s}),signal,{saveReceipt:receipt=>{
+     record.receipt=object(receipt)?JSON.parse(JSON.stringify(receipt)):{invalidReceipt:true};record.receiptHash=hash(JSON.stringify(record.receipt));record.state='receipt_saved';save();
+    }});guard();
    }
    const validated=receiptImages(record);record.claimId=validated.claimId;record.images=validated.images;
-   const conflicting=engine.db.claims.find(c=>(c.id===record.claimId||c.setId===record.setId)&&(c.profileId!==record.profileId||c.productId!==record.productId));if(conflicting)throw failure('PHOTO_CONFLICT','本套照片已关联其他环境或商品，已停止');
-   if(!engine.db.claims.some(c=>c.id===record.claimId))engine.db.claims.push({id:record.claimId,profileId:record.profileId,productId:record.productId,setId:record.setId,images:record.images.map(i=>({...i})),listings:[],preparationId:record.id,supplierAccountId:record.supplierAccountId});
-   record.state='downloading';record.error='';save();guard();const dir=cacheDirectory(engine,record,true);syncDirectory(path.dirname(dir));
+   if(!matchingClaim(engine,record))engine.db.claims.push({id:record.claimId,profileId:record.profileId,productId:record.productId,setId:record.setId,images:record.images.map(i=>({...i})),listings:[],preparationId:record.id,supplierAccountId:record.supplierAccountId});
+   record.state='downloading';record.error='';save();guard();
    for(let index=0;index<record.images.length;index++){
     guard();const image=record.images[index];let asset=record.assets[index];
     if(asset){if(asset.imageId!==image.id)throw failure('PHOTO_STORAGE','本地照片顺序与原领取不一致');try{readAsset(dir,asset,index);asset.ready=true;save();continue;}catch(error){if(error.code!=='ENOENT')throw failure('PHOTO_STORAGE','已保存照片校验失败，未用新内容覆盖');}}
@@ -137,9 +169,9 @@ async function preparePhotos(engine,planId,{setId,signal:callerSignal,validateIm
    }
    guard();record.state='ready';record.error='';save();return readPreparedPhotos(engine,planId);
   }catch(error){
-   if(record&&!engine.faulted){record.state=record.receipt?'needs_review':record.firstAttemptAt?'uncertain':'prepared';record.error=error?.code==='STOPPED'?'照片准备已停止，原领取与文件记录已保留':error?.code==='PHOTO_TIMEOUT'?'请求超时，保留原编号与套组等待恢复':'照片准备未完成，请核对原领取与本地照片后重试';save();}
+   if(started&&record&&!engine.faulted){record.state=Object.hasOwn(record,'receipt')?'needs_review':record.firstAttemptAt?'uncertain':'prepared';record.error=error?.code==='STOPPED'?'照片准备已停止，原领取与文件记录已保留':error?.code==='PHOTO_TIMEOUT'?'请求超时，保留原编号与套组等待恢复':'照片准备未完成，请核对原领取与本地照片后重试';save();}
    throw error;
   }finally{for(const signal of [configSignal,callerSignal])signal?.removeEventListener('abort',abort);}
  });
 }
-module.exports={preparePhotos,readPreparedPhotos,summarizePreparation,MAX_IMAGE_BYTES,READ_TIMEOUT_MS};
+module.exports={preparePhotos,readPreparedPhotos,summarizePreparation,restorePhotoPreparations,MAX_IMAGE_BYTES,READ_TIMEOUT_MS};

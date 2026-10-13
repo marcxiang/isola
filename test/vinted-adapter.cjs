@@ -36,13 +36,14 @@ function fixture(options={}){
       if(!values.categorySearch&&level===2)rows.push({tag:'input',type:'radio',role:'radio',label:'Autres accessoires',option:true,selectedValue:'Autres accessoires'});
     }
     if(menu==='brand'){rows.push({key:'brandSearch',tag:'input',type:'text',label:'Rechercher une marque'});if(values.brandSearch==='Sans marque')rows.push({tag:'input',type:'radio',role:'radio',label:'Sans marque',option:true,selectedValue:'Sans marque'});rows.push({tag:'input',type:'radio',role:'radio',label:'The Unbranded Brand',option:true,selectedValue:'The Unbranded Brand'});}
-    if(menu==='color'){rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Noir',option:true,selectedValue:'Noir',checked:values.color==='Noir'});rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Blanc',option:true,selectedValue:'Blanc',checked:options.otherColorChecked===true});}
+    if(menu==='color'){if(options.colorSuggestions)rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Noir',option:true,selectedValue:'Noir',colorGroup:'suggestions',checked:values.color==='Noir'});rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Noir',option:true,selectedValue:'Noir',colorGroup:options.colorSuggestions?'all':undefined,checked:values.color==='Noir'});rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Blanc',option:true,selectedValue:'Blanc',colorGroup:options.colorSuggestions?'all':undefined,checked:options.otherColorChecked===true});}
     if(menu==='condition')rows.push({tag:'input',type:'radio',role:'radio',label:'Neuf avec étiquette Article neuf et jamais porté',option:true,selectedValue:'Neuf avec étiquette'});
     if(options.includeParcel)rows.push(...['Petit','Moyen','Grand'].map(name=>({tag:'input',type:'radio',role:'radio',label:options.rawParcelLabels?'radio':parcelDescriptions[name],parcelOption:true,selectedValue:name,checked:values.parcel===name})));
     if(options.rows)rows=options.rows(rows,api,{menu,level});
-    const elements=[];
+    const elements=[],colorGroups=new Map();
     for(const row of rows){
       const id='e'+version+'-'+elements.length,node={...row,tagName:row.tag.toUpperCase(),isConnected:true,get value(){return String(values[row.key]||'');},autocomplete:'',nav:row.nav,form:row.nav?null:form,getAttribute:name=>row[name]||null,contains(other){return this===other;},querySelectorAll:()=>[]};
+      if(row.colorGroup){if(!colorGroups.has(row.colorGroup)){const title=row.colorGroup==='suggestions'?'Suggestions':'Toutes les couleurs',heading={tagName:'DIV',_text:title,querySelectorAll:()=>[]};colorGroups.set(row.colorGroup,{tagName:'DIV',label:options.plainColorHeading?'':title,children:options.plainColorHeading?[heading]:[],contains:other=>other.colorGroup===row.colorGroup});}node._colorGroup=colorGroups.get(row.colorGroup);}
       if(row.parcelOption){
         const wrapper={tag:'button',role:'button',tagName:'BUTTON',type:'button',isConnected:true,parcelOption:true,selectedValue:row.selectedValue,_text:parcelDescriptions[row.selectedValue],contains:e=>e===wrapper||e===node,querySelectorAll:selector=>selector==='input[type=radio]'?[node]:[],getAttribute:()=>null};
         node._wrapper=wrapper;parcelNodes.push(node);
@@ -57,7 +58,7 @@ function fixture(options={}){
     checkedSnapshot:async(_tab,{signal})=>{assert.equal(_tab,tab);if(signal?.aborted)throw Error('stopped');if(options.beforeSnapshot)await options.beforeSnapshot(api);return snapshot();},
     isolated:async(_tab,expression)=>{
       assert.equal(_tab,tab);
-      return vm.runInNewContext(expression,{globalThis:{__isolaElements:currentIds,__isolaDOM:{closest:node=>node.nav?{}:null,parents:node=>node.parcelOption?[node,...(node._wrapper?[node._wrapper]:[]),parcelGroup,form]:[node,form],label:node=>node.label||node._text||'',safeText:node=>node.tagName==='INPUT'?'':node._text||node.label||'',visible:node=>!node.hidden,disabled:node=>!!node.disabled}},performance:{timeOrigin:documentKey}});
+      return vm.runInNewContext(expression,{globalThis:{__isolaElements:currentIds,__isolaDOM:{closest:node=>node.nav?{}:null,parents:node=>node.parcelOption?[node,...(node._wrapper?[node._wrapper]:[]),parcelGroup,form]:[node,...(node._colorGroup?[node._colorGroup]:[]),form],label:node=>node.label||node._text||'',safeText:node=>node.tagName==='INPUT'?'':node._text||node.label||'',visible:node=>!node.hidden,disabled:node=>!!node.disabled}},performance:{timeOrigin:documentKey}});
     },
     performAction:async(_tab,args,opts)=>{
       assert.equal(_tab,tab);calls.push(args);
@@ -307,4 +308,17 @@ test('parcel descriptions can come from a single-radio parent rather than a raw 
 
 test('hidden parcel radios are read through exact visible shipping anchors, and only visible wrappers are clicked',async()=>{
   const f=fixture({includeParcel:true,hiddenParcel:true,rawParcelLabels:true});const current=await f.adapter.prepareFields('profile-1',{parcel:'Moyen'});assert.equal(current.filled[0].unchanged,true);assert.equal(f.calls.length,0);const changed=await f.adapter.prepareFields('profile-1',{parcel:'Grand'});assert.equal(changed.filled[0].selected,'Grand');assert.equal(f.calls.length,1);assert.equal(f.values.parcel,'Grand');
+});
+test('duplicate suggested colors use only the unique Toutes les couleurs group and verify its checked receipt',async()=>{
+  for(const plainColorHeading of [false,true]){const clicked=[];const f=fixture({includeBrandColor:true,colorSuggestions:true,plainColorHeading,beforeAction(api,args){const node=api.currentIds.get(args.elementId);if(args.action==='click'&&node?.type==='checkbox')clicked.push(node.colorGroup);}});const result=await f.adapter.prepareFields('profile-1',{color:'Noir',priceCents:500});assert.deepEqual(result.filled.map(field=>field.field),['color','priceCents']);assert.deepEqual(clicked,['all']);assert.equal(f.values.color,'Noir');assert.equal(f.calls.filter(call=>call.action==='key'&&call.key==='Escape').length,1);}
+});
+test('ambiguous all-colors groups or suggestions without an all-colors group are never guessed',async()=>{
+  const variants=[rows=>rows.filter(row=>row.colorGroup!=='all'),rows=>[...rows,...rows.filter(row=>row.colorGroup==='all'&&row.label==='Noir').map(row=>({...row,colorGroup:'all-copy'}))]];
+  for(const rows of variants){const clicked=[];const f=fixture({includeBrandColor:true,colorSuggestions:true,rows,beforeAction(api,args){if(args.action==='click'&&api.currentIds.get(args.elementId)?.type==='checkbox')clicked.push(args.elementId);}});const result=await f.adapter.prepareFields('profile-1',{color:'Noir',priceCents:500});assert.equal(result.filled.length,0);assert.match(result.unresolved.find(field=>field.field==='color').reason,/Toutes les couleurs/);assert.deepEqual(clicked,[]);assert.equal(f.values.priceCents,'');}
+});
+test('a checked different color outside the canonical group is preserved and blocks a new choice',async()=>{
+  const f=fixture({includeBrandColor:true,colorSuggestions:true,rows:rows=>[...rows,...(rows.some(row=>row.colorGroup)?[{tag:'input',type:'checkbox',role:'checkbox',label:'Blanc',colorGroup:'suggestions',checked:true,disabled:true}]:[])]});const result=await f.adapter.prepareFields('profile-1',{color:'Noir',priceCents:500});assert.equal(result.filled.length,0);assert.match(result.unresolved.find(field=>field.field==='color').reason,/其他颜色/);assert.equal(f.values.color,'');assert.equal(f.values.priceCents,'');
+});
+test('a website-recommended material is never selected or claimed verified and stops later draft replacement',async()=>{
+  const touched=[];const f=fixture({includeBrandColor:true,colorSuggestions:true,extraFields:[{key:'material',tag:'input',type:'text',label:'Matériau (recommandé)',readOnly:true}],beforeAction(api,args){const node=api.currentIds.get(args.elementId);if(node?.selectedValue==='Autres accessoires')api.values.material='Plastique';if(node?.key==='material')touched.push(args);}});const result=await f.adapter.prepareFields('profile-1',{...listing,color:'Noir'});assert.ok(result.filled.some(field=>field.field==='color'));assert.equal(result.filled.some(field=>field.field==='material'),false);assert.equal(f.values.material,'Plastique');assert.deepEqual(touched,[]);assert.match(result.unresolved.find(field=>field.field==='photos').reason,/独立上传流程/);await assert.rejects(f.adapter.prepareFields('profile-1',{...listing,color:'Noir'}),{code:'EXISTING_DRAFT'});assert.equal(f.values.material,'Plastique');
 });

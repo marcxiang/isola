@@ -63,7 +63,7 @@ async function collect(engine,planId,signal,guard){
  check('包裹规格',!!listing.parcel,listing.parcel||'请确认包裹规格 Petit / Moyen / Grand');
  const pageOK=!!pageURL&&pageURL.origin==='https://www.vinted.fr'&&!pageURL.username&&!pageURL.password&&pageURL.pathname==='/items/new'&&!pageURL.search&&!pageURL.hash;
  check('法国站刊登页',pageOK,pageError||(pageOK?'已打开法国站刊登表单':'请打开对应环境的 Vinted 刊登页面'));
- check('真实发布能力',false,'照片上传、发布回执和订单步骤尚未验证；本次仅核对或填写字段');
+ check('真实发布能力',false,'自动发布回执和订单步骤尚未验证；照片上传请查看独立的图片回执，本次仅核对或填写字段');
  checkpoint(signal,guard);
  const index=engine.db.products.findIndex(p=>p.id===product.id);if(index>=0)engine.db.products[index]=product;
  engine.db.photoSets=engine.db.photoSets.filter(s=>s.productId!==product.id).concat(sets);engine.persist();engine.emit();

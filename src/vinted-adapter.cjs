@@ -1,6 +1,7 @@
 const defaultControl = require('./page-control.cjs');
 const {problem} = require('./commerce-engine.cjs');
 const {VintedPhotoUpload} = require('./vinted-photo-upload.cjs');
+const {rememberCategoryTraversal}=require('./vinted-publication-evidence.cjs');
 
 const ORIGIN = 'https://www.vinted.fr';
 const FORM_URL = ORIGIN + '/items/new';
@@ -56,7 +57,7 @@ class VintedAdapter {
     this.windows=windows; this.control=control; this.isBusy=isBusy; this.drafts=new Map();this.menuWaitMs=Math.min(3000,Math.max(0,Number(menuWaitMs)||0));this.pollIntervalMs=Math.min(200,Math.max(10,Number(pollIntervalMs)||100));this.photos=new VintedPhotoUpload(this);
   }
   readiness() {
-    return {vinted:'unverified',capabilities:{inspect:true,prepareTextFields:true,prepareCategory:true,prepareBrand:true,prepareColor:true,prepareParcel:true,preparePrice:true,publish:false,messages:false,offers:false,shippingLabel:false,procurement:false},message:'可检查法国站页面，按明确内容准备全新商品页的标题、描述、分类、明确品牌、成色、单一颜色、价格与明确包裹规格。照片及其余必填项仍需逐项核对；自动刊登、消息、报价、运单和真实采购尚未启用。'};
+    return {vinted:'unverified',capabilities:{inspect:true,prepareTextFields:true,prepareCategory:true,prepareBrand:true,prepareColor:true,prepareParcel:true,preparePrice:true,inspectPhotos:true,uploadPhotos:true,verifyPhotoReceipt:true,publish:false,messages:false,offers:false,shippingLabel:false,procurement:false},message:'可准备法国站商品字段，检查照片区域，并上传已领取、下载和校验的照片；通过网页完成文案、已加载图片和状态逐项核对回执。其余必填项仍需核对；自动刊登、消息、报价、运单和真实采购尚未启用。'};
   }
   current(profileId,{signal,tab,controller,form=false}={}) {
     try {
@@ -198,7 +199,7 @@ class VintedAdapter {
         if(supplied(listing[field]))unresolved.push({field,reason:'此控件尚未验证，未尝试猜测或填写'});
         else if(field==='parcel'||observed)missing.push({field,reason:field==='parcel'?'包裹规格尚需核对':'网页显示此选项，是否必填需按当前分类核对'});
       }
-      unresolved.push({field:'photos',reason:'照片上传尚未接入；本步骤没有认领图片、上传、保存草稿或发布商品'});
+      unresolved.push({field:'photos',reason:'照片需通过独立上传流程核对；本步骤未上传、保存草稿或发布商品'});
       return {url:FORM_URL,filled,missing,unresolved,draftComplete:false,published:false,saved:false,message:'已准备能逐项确认的商品字段；仍需核对图片和其余必填信息，商品没有发布或保存。'};
     } finally {
       signal?.removeEventListener('abort',cancel);
@@ -270,6 +271,24 @@ class VintedAdapter {
     if(!Array.isArray(allowed))throw problem('ELEMENT_STALE','选项范围已改变');
     return candidates.filter(e=>allowed.includes(e.id));
   }
+  async colorOptions(profileId,context,page,label) {
+    const options=await this.nonNavigationCandidates(profileId,context,page.elements.filter(e=>!e.sensitive&&(e.role==='checkbox'||e.tag==='input'&&e.type==='checkbox')));
+    const scoped=await this.control.isolated(context.tab,`(() => {
+      const ids=${JSON.stringify(options.map(e=>e.id))},d=globalThis.__isolaDOM,normalize=value=>String(value||'').replace(/\\s+/g,' ').trim();
+      const entries=ids.map(id=>({id,node:globalThis.__isolaElements?.get(id)}));if(entries.some(item=>!item.node?.isConnected))return {stale:true};
+      const title=(node,label)=>normalize(d.label(node))===label||Array.from(node.children||[]).some(child=>d.visible(child)&&!child.querySelectorAll('input[type=checkbox],[role=checkbox]').length&&normalize(d.safeText(child,180))===label);
+      const nearest=(node,label)=>{for(const parent of d.parents(node)){if(['BODY','HTML','MAIN','FORM'].includes(parent.tagName))break;if(!['INPUT','LABEL'].includes(parent.tagName)&&title(parent,label))return parent;}return null;};
+      const groups=[...new Set(entries.map(item=>nearest(item.node,'Toutes les couleurs')).filter(Boolean))],suggestions=entries.some(item=>nearest(item.node,'Suggestions'));
+      if(groups.length>1)return {error:'页面出现多个 Toutes les couleurs 区域，未猜测颜色范围'};
+      if(!groups.length&&suggestions)return {error:'页面只有颜色建议，未找到唯一 Toutes les couleurs 区域'};
+      return {ids:groups.length?entries.filter(item=>groups[0].contains(item.node)).map(item=>item.id):ids};
+    })()`);
+    this.current(profileId,context);
+    if(!scoped||scoped.stale)throw problem('ELEMENT_STALE','颜色分组选项已改变');
+    if(scoped.error)return {options,matches:[],error:scoped.error};
+    if(!Array.isArray(scoped.ids))throw problem('ELEMENT_STALE','颜色选项范围无效');
+    return {options,matches:options.filter(e=>scoped.ids.includes(e.id)&&!e.disabled&&normalized(e.label)===label)};
+  }
   async readChoiceValue(profileId,context,ownership,spec) {
     const page=await this.read(profileId,context),match=this.field(page,spec,{readOnly:true});
     if(match.error)return {error:match.error};
@@ -318,18 +337,20 @@ class VintedAdapter {
         if(search.matches.length!==1||search.matches[0].value!==label)return {reason:'品牌搜索与指定标签不一致',halted:true};
       }
     }
-    const readOptions=async()=>{const page=await this.read(profileId,context),options=await this.nonNavigationCandidates(profileId,context,page.elements.filter(e=>!e.disabled&&!e.sensitive&&(spec.key==='brand'?(e.role==='radio'||e.tag==='input'&&e.type==='radio'):checkbox(e))));return {page,options,matches:options.filter(e=>normalized(e.label)===label)};};
+    const readOptions=async()=>{const page=await this.read(profileId,context);if(spec.key==='color')return {page,...await this.colorOptions(profileId,context,page,label)};const options=await this.nonNavigationCandidates(profileId,context,page.elements.filter(e=>!e.disabled&&!e.sensitive&&(e.role==='radio'||e.tag==='input'&&e.type==='radio')));return {page,options,matches:options.filter(e=>normalized(e.label)===label)};};
     const found=spec.key==='brand'?await this.waitForMenu(profileId,context,readOptions,value=>value.matches.length>0):await readOptions();
     page=found.page;const optionsOnPage=found.options,matches=found.matches;
+    if(found.error)return {reason:found.error,halted:true};
     if(matches.length!==1){const observedOptions=spec.key==='brand'?await this.brandOptionSummary(profileId,context,page,optionsOnPage):[];return {reason:'未找到唯一的明确'+spec.label+'选项：'+label+(spec.key==='brand'?(observedOptions.length?'；品牌菜单：'+observedOptions.map(e=>e.role+' '+e.label).join(' / '):'；品牌菜单尚无可核对的单选项'):''),observedOptions,halted:true};}
     const checked=e=>e.checked===true||e.checked==='true';
-    if(spec.key==='color'&&optionsOnPage.some(e=>e.id!==matches[0].id&&checked(e)))return {reason:'页面还选中了其他颜色，未自动取消或叠加颜色',halted:true};
+    if(spec.key==='color'&&optionsOnPage.some(e=>normalized(e.label)!==label&&checked(e)))return {reason:'页面还选中了其他颜色，未自动取消或叠加颜色',halted:true};
     if(spec.key==='brand'||!checked(matches[0])){await this.control.performAction(context.tab,{action:'click',elementId:matches[0].id},options);guard();}
     const selected=await this.readChoiceValue(profileId,context,ownership,spec);
     if(selected.error||selected.value!==label)return {reason:selected.error||'选择后的'+spec.label+'与指定标签不一致',halted:true};
     if(spec.key==='color'){
-      const matches=await this.nonNavigationCandidates(profileId,context,selected.page.elements.filter(e=>checkbox(e)&&normalized(e.label)===label));
-      if(matches.length!==1||!checked(matches[0]))return {reason:'颜色复选框没有确认选中，未继续操作',halted:true};
+      const confirmed=await this.colorOptions(profileId,context,selected.page,label);
+      if(confirmed.error||confirmed.matches.length!==1||!checked(confirmed.matches[0]))return {reason:confirmed.error||'颜色复选框没有确认选中，未继续操作',halted:true};
+      if(confirmed.options.some(e=>normalized(e.label)!==label&&checked(e)))return {reason:'选择后页面还选中了其他颜色，未继续操作',halted:true};
     }
     ownership.fields[spec.key]=selected.value;
     const closed=await this.closeChoiceMenu(profileId,context,spec,label);if(closed.halted)return closed;
@@ -416,7 +437,7 @@ class VintedAdapter {
       if(!menu.matches.length){page=await this.read(profileId,context);match=this.field(page,spec,{readOnly:true});if(match.error)return {reason:match.error,halted:true};await this.control.performAction(context.tab,{action:'click',elementId:match.element.id},options);guard();}
       const reset=await this.clearCategorySearch(profileId,context,ownership);if(reset.halted)return reset;
     }else{await this.control.performAction(context.tab,{action:'click',elementId:match.element.id},options);guard();}
-    const labels=spec.key==='categoryPath'?listing.categoryPath:[listing.condition];
+    const labels=spec.key==='categoryPath'?listing.categoryPath:[listing.condition],steps=[];
     for(const [index,label] of labels.entries()){
       page=await this.read(profileId,context);
       const final=index===labels.length-1;
@@ -432,12 +453,15 @@ class VintedAdapter {
       const matches=candidates.filter(e=>allowed.includes(e.id));
       if(matches.length!==1)return {reason:matches.length?'选项出现多个同名控件，未猜测目标':candidates.length?'目标属于导航或已改变，未选择':'未找到唯一且角色匹配的明确选项：'+label,halted:true};
       await this.control.performAction(context.tab,{action:'click',elementId:matches[0].id},options);guard();
+      if(spec.key==='categoryPath')steps.push({label,elementId:matches[0].id,role:final?'radio':'button',documentKey:ownership.documentKey,unique:true});
     }
     page=await this.read(profileId,context);match=this.field(page,spec,{readOnly:true});
     if(match.error)return {reason:match.error,halted:true};
     const next=await this.values(context.tab,page);guard();const selected=next.values.find(e=>e.id===match.element.id)?.value;
     if(next.documentKey!==ownership.documentKey||!expectedValue(spec.key,listing,selected))return {reason:'选择后的控件值与要求不一致，已停止',halted:true};
-    ownership.fields[spec.key]=selected;return {verified:true};
+    ownership.fields[spec.key]=selected;
+    if(spec.key==='categoryPath')rememberCategoryTraversal(ownership,{tab:context.tab,documentKey:ownership.documentKey,path:labels,selectedValue:selected,steps});
+    return {verified:true};
   }
   async requireReady(){throw problem('VINTED_UNVERIFIED','真实 Vinted 业务流程尚未验证，任务已保留；文字字段准备不会启用刊登、消息或下单');}
   async poll(){return [];}

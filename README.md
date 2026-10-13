@@ -6,14 +6,14 @@ Isola 是一个基于 Electron 的 macOS 浏览器项目，支持独立浏览器
 
 ## Project status / 当前状态
 
-The latest packaged development version is **0.5.1**. This repository also contains unfinished photo preparation and upload work. It is a development snapshot, not a completed unattended commerce system.
+The current development version is **0.5.2**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and read-only publication checks are integrated. It is a development snapshot, not a completed unattended commerce system.
 
 - Environment management, persistent Chromium sessions, proxy configuration, AI click/scroll feedback, supplier catalog synchronization and listing plans are implemented.
 - Listing-field preparation has been exercised on the Vinted France new-item page. Publishing, buyer messages, offers, shipping labels and real supplier purchases have not completed end-to-end validation.
-- Photo controls can be inspected and trusted file manifests can be validated. The photo upload method deliberately stops with `PHOTO_UPLOAD_UNVERIFIED`; upload execution and receipt verification are unfinished.
+- Supplier photo claims persist their request identity and receipt, download and validate image files, and expose previews in the workbench. Uploads are bound to the current profile and page; uncertain results are checked without selecting the files again. The France new-item page has received the test photo successfully.
 - The commerce adapter still blocks unattended business actions. Do not remove this guard merely to make the workflow run.
 
-当前源码包含尚未完成的照片模块。真实刊登、消息、报价、面单及采购流程尚未跑通，不能用于正式无人值守运营。详细接续事项见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+商品销售分布、账号核验、照片领取、下载、预览与网页上传已接入；真实法国站的 TEST 表单已通过发布前 15 项核对。正式发布、消息、报价、面单及采购流程尚未跑通，不能用于正式无人值守运营。详细接续事项见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 ## Features / 功能
 
@@ -22,7 +22,8 @@ The latest packaged development version is **0.5.1**. This repository also conta
 - HTTP and SOCKS5 proxies, including authentication, connection checks and local SOCKS bridging.
 - OpenAI-compatible model configuration, page reading, clicking, typing, keyboard navigation and scrolling, with visible action feedback and pause/stop controls.
 - SKU Desk supplier connection, catalog/photo-set synchronization, per-environment listing plans and a durable commerce workflow engine.
-- Conservative handling of uncertain external results, purchase limits and duplicate-operation prevention.
+- Product-to-account sales distribution, combined filters, per-environment prices and sales targets, verified account names and actual listing receipt links.
+- Conservative handling of uncertain external results, purchase limits, bounded read retries, task leases and duplicate-operation prevention.
 
 ## Run locally / 本地开发
 
@@ -45,7 +46,7 @@ node --test test/vinted-photo-upload.cjs
 npm run test:electron
 ```
 
-Electron tests require a desktop session; network tests start local servers. The new runtime audit in `test/runtime-audit-v052.cjs` needs an Electron harness and is not part of the default test command. The photo preparation module still needs behavior and recovery tests. Mock and fixture results do not establish that a live marketplace transaction works.
+Electron tests require a desktop session; network tests start local servers. The desktop suite includes photo service, native file-input transport, repeated proxy authentication and environment storage isolation checks. Unit coverage includes interrupted photo claims, retained idempotency keys, file validation and ambiguous upload recovery. Mock and fixture results do not establish that a live marketplace transaction works.
 
 ## Build / 构建
 

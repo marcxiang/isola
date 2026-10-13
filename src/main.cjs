@@ -1,12 +1,16 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, session, safeStorage, Menu, net, dialog, powerSaveBlocker, powerMonitor } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, session, safeStorage, Menu, net, dialog, nativeImage, powerSaveBlocker, powerMonitor } = require('electron');
 const fs = require('node:fs'); const path = require('node:path'); const { randomUUID } = require('node:crypto');
 const { validate, normalizeURL, publicProfile, exportProfiles, importProfiles } = require('./model.cjs');
 const { createProxyRoute } = require('./proxy.cjs');
+const {ProxyAuthGuard}=require('./proxy-auth.cjs');
 const { BrowserAgent, publicSettings, saveSettings } = require('./ai.cjs');
 const { createControlOverlay } = require('./control-overlay.cjs');
 const { CommerceEngine } = require('./commerce-engine.cjs');
 const { VintedAdapter } = require('./vinted-adapter.cjs');
+const { VintedAccount } = require('./vinted-account.cjs');
 const commercePreparation = require('./commerce-preflight.cjs');
+const {inspectPublication}=require('./commerce-publication-service.cjs');
+const {createPhotoService}=require('./commerce-photo-service.cjs');
 const { SKUDeskClient } = require('./sku-desk.cjs');
 const { RequestGate } = require('./sku-transport.cjs');
 const {stopDraft,installUnloadGuard,closeContents}=require('./navigation-lifecycle.cjs');
@@ -17,6 +21,7 @@ let manager, profiles = [], quitting = false, quitPending=false, quitApproved=fa
 let commerceWindow, commerce, awakeId=null;
 const skuGate=new RequestGate({maxConcurrent:3,maxPerMinute:100});
 const windows = new Map(), locks = new Set(), routes = new Map();
+const photoService=createPhotoService({nativeImage,focusProfile:id=>{const w=windows.get(id);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}});
 const hasInstanceLock = app.requestSingleInstanceLock();
 if (!hasInstanceLock) app.quit();
 app.on('second-instance', () => { if (manager && !manager.isDestroyed()) { if (manager.isMinimized()) manager.restore(); manager.show(); manager.focus(); } });
@@ -51,7 +56,7 @@ function requireClosed(id) { if (windows.has(id) || locks.has(id)) throw Error('
 function requireCommerceUnlinked(id) {
   const stored=path.join(app.getPath('userData'),'commerce','commerce-state.json');
   const engine=commerce||(fs.existsSync(stored)?ensureCommerce():null);
-  if(engine&&(engine.active.has(id)||['plans','jobs','claims'].some(key=>engine.db[key].some(row=>row.profileId===id))))throw Error('该环境关联了运营计划或历史记录，不能删除或清除登录数据；请保留此环境并新建其他环境。');
+  if(engine&&(engine.active.has(id)||['plans','jobs','claims','photoPreparations'].some(key=>engine.db[key].some(row=>row.profileId===id))))throw Error('该环境关联了运营计划或历史记录，不能删除或清除登录数据；请保留此环境并新建其他环境。');
 }
 function sesFor(p) { return session.fromPartition('persist:environment-' + p.id); }
 function inputProfile(input) {
@@ -125,15 +130,16 @@ function closeBrowserWindow(w) {
   })().finally(()=>{w.closingPromise=null;});
   return w.closingPromise;
 }
-async function openListingPage(engine,planId) {
-  const plan=engine.plan(planId),profileId=plan.profileId,formURL='https://www.vinted.fr/items/new';
+async function openListingPage(engine,planId,{active=false}={}) {
+  const plan=engine.plan(planId),profileId=plan.profileId,formURL=active?engine.listingURL(plan):'https://www.vinted.fr/items/new';
+  if(!formURL)throw Error('没有可核对的在售商品回执地址，未打开网页。');
   if(engine.running||engine.ticking||engine.active.size)throw Error('请先停止运营调度，再打开刊登页。');
   if(!windows.has(profileId))await launch(profileId);
   const w=windows.get(profileId);if(!w||w.isDestroyed())throw Error('浏览器环境未能打开。');
   if(w.closingPromise||w.navigationPending)throw Error('该窗口正在切换或关闭页面，请稍后重试。');
   await stopPageAutomation(w);
   return engine.configure(async(_signal,guard)=>{
-    guard();if(engine.plan(planId).profileId!==profileId)throw Error('计划所属环境已改变，请重新核对。');
+    guard();if(engine.plan(planId).profileId!==profileId||active&&engine.listingURL(engine.plan(planId))!==formURL)throw Error('计划所属环境或在售商品已改变，请重新核对。');
     if(w.isDestroyed()||w.closingPromise||w.navigationPending)throw Error('浏览器窗口状态已改变，请重试。');
     w.navigationPending=true;
     try{
@@ -156,11 +162,13 @@ async function addTab(w, target) {
   const c = view.webContents; c.setAudioMuted(false); c.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   tab.unloadGuard=installUnloadGuard(w,tab,{showMessageBoxSync:(...args)=>dialog.showMessageBoxSync(...args),onState:()=>sendState(w),isAutomating:()=>!!w.aiAgent?.state.running||!!w.vintedDraftController||!!commerce?.active.has(w.profile.id)});
   c.once('destroyed',()=>{
+    tab.proxyAuth?.dispose();
     removeTab(w,tab);
     if(!w.isDestroyed()&&!w.tabs.length&&!w.closingPromise){w.closeApproved=true;w.close();}
   });
-  let authAttempts = 0;
-  c.on('login', (event, details, auth, callback) => { event.preventDefault(); if (auth.isProxy && auth.host === w.profile.proxy.host && Number(auth.port) === w.profile.proxy.port && authAttempts++ < 2) callback(w.profile.proxy.username, w.profile.proxy.password); else callback(); });
+  tab.proxyAuth=new ProxyAuthGuard(w.profile.proxy);
+  c.on('did-start-navigation',(_event,_url,isInPlace,isMainFrame)=>{if(isMainFrame&&!isInPlace)tab.proxyAuth.beginNavigation();});
+  c.on('login', (event, details, auth, callback) => { event.preventDefault();const credentials=tab.proxyAuth.credentials(details,auth);if(credentials)callback(credentials.username,credentials.password);else callback(); });
   c.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url)) addTab(w, url).catch(e => { tab.error = e.message; sendState(w); }); return { action: 'deny' }; });
   c.on('will-navigate', (e, url) => { if (!/^https?:\/\//.test(url)) e.preventDefault(); });
   c.on('page-title-updated', (_, title) => { tab.title = title; sendState(w); });
@@ -187,6 +195,13 @@ async function launch(id) {
     if (!s._isolaDownloads) { s._isolaDownloads = true; s.on('will-download', (_, item) => item.setSaveDialogOptions({ title: '保存下载文件 · Isola' })); }
     w = new BrowserWindow({ width: Math.min(p.width + 20, 1600), height: Math.min(p.height + 145, 1050), minWidth: 720, minHeight: 480, title: p.name + ' · Isola', backgroundColor: '#edf1f6', webPreferences: { preload: path.join(__dirname, 'browser-preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false } });
     w.profile = p; w.tabs = []; w.activeTab = null; w.controlOverlay=createControlOverlay(w,{isActive:tab=>tab.id===w.activeTab}); w.aiPanelOpen = false; w.aiAgent = new BrowserAgent(w,(tab,url)=>navigateTab(w,tab,url)); windows.set(id, w); w.on('resize', () => resizeViews(w));
+    // One request observer per profile session; successful requests release only
+    // their own authentication budget. Failed challenges cannot reset it.
+    const authRequests=new Map();
+    s.webRequest.onBeforeRequest((details,callback)=>{const tab=w.tabs.find(t=>!t.view.webContents.isDestroyed()&&t.view.webContents.id===details.webContentsId);if(tab?.proxyAuth)authRequests.set(details.id,{guard:tab.proxyAuth,generation:tab.proxyAuth.generation});callback({});});
+    s.webRequest.onCompleted(details=>{const request=authRequests.get(details.id);authRequests.delete(details.id);request?.guard.completed({url:details.url,statusCode:details.statusCode,generation:request.generation});});
+    s.webRequest.onErrorOccurred(details=>authRequests.delete(details.id));
+    w.once('closed',()=>{authRequests.clear();s.webRequest.onBeforeRequest(null);s.webRequest.onCompleted(null);s.webRequest.onErrorOccurred(null);});
     w.webContents.setWindowOpenHandler(() => ({ action: 'deny' })); w.webContents.on('will-navigate', e => e.preventDefault());
     w.on('close',e=>{w.vintedDraftController?.abort();if(w.closeApproved)return;e.preventDefault();void closeBrowserWindow(w).catch(error=>{log('window close stopped: '+error.message);const tab=w.tabs.find(t=>t.id===w.activeTab);if(tab){tab.error=error.message;sendState(w);}});});
     w.on('closed', () => { w.vintedDraftController?.abort();w.aiAgent.stop();commerce?.active.get(id)?.abort(); for (const t of [...w.tabs]) { if (!t.view.webContents.isDestroyed()) t.view.webContents.close(); } windows.delete(id); routes.delete(id); s.closeAllConnections().finally(() => route.close()).catch(() => {}); notify(); });
@@ -221,8 +236,16 @@ function register() {
   handle('info', () => ({ version: app.getVersion(), chromium: process.versions.chrome, platform: process.arch, dataPath: app.getPath('userData') }));
   handle('commerce-open',openCommerce);
   const desk=(name,fn)=>ipcMain.handle(name,(e,...args)=>{if(!commerceWindow||commerceWindow.isDestroyed()||e.sender!==commerceWindow.webContents)throw Error('无权访问运营工作台');return fn(ensureCommerce(),...args);});
+  desk('commerce-publication-inspect',(c,id)=>inspectPublication(c,id));
   desk('commerce-preflight',(c,id)=>commercePreparation.preflight(c,id));desk('commerce-prepare-draft',(c,id)=>commercePreparation.prepareDraft(c,id,{beforeFields:plan=>{const w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}}));
-  desk('commerce-open-listing',(c,id)=>openListingPage(c,id));
+  desk('commerce-account-inspect',(c,id)=>c.configure(async(signal,guard)=>{
+    const plan=c.plan(id),w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}
+    const result=await new VintedAccount(c.adapter).inspectAccount(plan.profileId,{signal});guard();
+    const account=c.bindMarketAccount(plan.profileId,result);c.event('info','已核对 '+account.username+' 的 Vinted 账号');c.persist();c.emit();
+    return {account,message:result.message};
+  }));
+  desk('commerce-open-listing',(c,id)=>openListingPage(c,id));desk('commerce-open-active-listing',(c,id)=>openListingPage(c,id,{active:true}));
+  desk('commerce-photos-inspect',(c,id)=>photoService.inspect(c,id));desk('commerce-photos-prepare',(c,id)=>photoService.prepare(c,id));desk('commerce-photos-preview',(c,id)=>photoService.preview(c,id));desk('commerce-photos-upload',(c,id,recheckOnly=false)=>photoService.upload(c,id,{recheckOnly}));
   desk('commerce-state',c=>c.state());desk('commerce-settings-save',(c,input)=>c.saveSettings(input));desk('commerce-connect',c=>c.connect());desk('commerce-sync',c=>c.sync());desk('commerce-plan-save',(c,input)=>c.savePlan(input));desk('commerce-plan-enabled',(c,id,enabled)=>c.setPlanEnabled(id,enabled));desk('commerce-run-once',c=>c.runOnce());desk('commerce-running',(c,enabled)=>c.setRunning(enabled));desk('commerce-resolve',(c,id,action,data)=>c.resolve(id,action,data));
   ipcMain.handle('ai-panel', (e,open) => { const w=browserWindow(e);w.aiPanelOpen=!!open;resizeViews(w);sendState(w);return w.aiPanelOpen; });
   ipcMain.handle('ai-settings', e => { browserWindow(e);return publicSettings(); });

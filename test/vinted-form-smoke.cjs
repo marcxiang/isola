@@ -23,7 +23,7 @@ const html=String.raw`<!doctype html><meta charset="utf-8"><title>Vinted form co
 <footer><button type="button" id="upload">Ajoute des photos</button><button type="button" id="save">Sauvegarder le brouillon</button><button type="submit" id="publish">Ajouter</button></footer>
 </form></main>
 <script>
-window.fixture={events:[],saves:0,publishes:0,uploads:0,categorySearch:'',semanticButtons:false,escapes:0,stuckMenu:false,brandMenuDelay:0,brandResultsDelay:0,brandReadyDelay:0,brandReadyAt:0,ignoredBrandClicks:0,recommendationClicks:0,normalizePrice:false,wrongPrice:false};
+window.fixture={events:[],saves:0,publishes:0,uploads:0,categorySearch:'',semanticButtons:false,escapes:0,stuckMenu:false,brandMenuDelay:0,brandResultsDelay:0,brandReadyDelay:0,brandReadyAt:0,ignoredBrandClicks:0,recommendationClicks:0,normalizePrice:false,wrongPrice:false,colorSuggestions:false};
 for(const kind of ['click','input','keydown'])document.addEventListener(kind,event=>{if(event.target.closest('main'))fixture.events.push({kind,trusted:event.isTrusted,id:event.target.id,label:event.target.textContent.slice(0,100),key:event.key||''});},true);
 const menu=document.querySelector('#menu'),cat=document.querySelector('#category'),condition=document.querySelector('#condition');
 function category(level){
@@ -31,7 +31,7 @@ function category(level){
  const search=menu.querySelector('input'),choices=menu.querySelector('#choices');search.value=fixture.categorySearch;
  function render(){choices.replaceChildren();if(fixture.categorySearch){choices.textContent='Résultats pour '+fixture.categorySearch;return;}
   if(level<2){const button=document.createElement(fixture.semanticButtons?'div':'button');if(fixture.semanticButtons){button.setAttribute('role','button');button.tabIndex=0;button.style.cssText='padding:16px;cursor:pointer';}else button.type='button';button.textContent=level===0?'Femmes':'Accessoires';button.onclick=()=>category(level+1);choices.append(button);}
-  else{choices.innerHTML='<label><input type="radio" name="category-choice">Autres accessoires</label>';choices.querySelector('input').onchange=()=>{cat.value='Autres accessoires';menu.replaceChildren();fixture.brandReadyAt=Date.now()+fixture.brandReadyDelay;};}}
+  else{choices.innerHTML='<label><input type="radio" name="category-choice">Autres accessoires</label>';choices.querySelector('input').onchange=()=>{cat.value='Autres accessoires';menu.replaceChildren();fixture.brandReadyAt=Date.now()+fixture.brandReadyDelay;const material=document.querySelector('#material');if(material)material.value='Plastique';};}}
  search.oninput=()=>{fixture.categorySearch=search.value;render();};render();
 }
 cat.onclick=()=>category(0);
@@ -46,8 +46,9 @@ brand.onclick=()=>{
  if(fixture.brandMenuDelay)setTimeout(open,fixture.brandMenuDelay);else open();
 };
 color.onclick=()=>{
- menu.classList.add('color-open');menu.innerHTML='<div role="group" aria-label="Couleur"><label><input id="color-black" type="checkbox" data-label="Noir">Noir</label><label><input type="checkbox" data-label="Blanc">Blanc</label></div>';
- for(const choice of menu.querySelectorAll('input')){choice.checked=color.value.split(', ').includes(choice.dataset.label);choice.onchange=()=>{color.value=[...menu.querySelectorAll('input:checked')].map(e=>e.dataset.label).join(', ');};}
+ const all='<label><input id="color-black" type="checkbox" data-label="Noir">Noir</label><label><input type="checkbox" data-label="Blanc">Blanc</label>';
+ menu.classList.add('color-open');menu.innerHTML='<div role="group" aria-label="Couleur">'+(fixture.colorSuggestions?'<div><div>Suggestions</div><ul><li><label><input id="suggested-black" type="checkbox" data-label="Noir">Noir</label></li></ul></div><div><div>Toutes les couleurs</div><ul><li>'+all+'</li></ul></div>':all)+'</div>';
+ for(const choice of menu.querySelectorAll('input')){choice.checked=color.value.split(', ').includes(choice.dataset.label);choice.onchange=()=>{const selected=new Set([...menu.querySelectorAll('input:checked')].map(e=>e.dataset.label));color.value=[...selected].join(', ');for(const same of menu.querySelectorAll('input'))same.checked=selected.has(same.dataset.label);};}
 };
 document.addEventListener('keydown',event=>{if(event.key==='Escape'){fixture.escapes++;if(!fixture.stuckMenu){menu.replaceChildren();menu.classList.remove('color-open');}}});
 document.querySelector('#price').addEventListener('input',event=>{if(fixture.wrongPrice)event.target.value='50.00';else if(fixture.normalizePrice)event.target.value=event.target.value.replace(',','.');});
@@ -93,6 +94,11 @@ module.exports=async function vintedFormSmoke(api,check){
       await c.loadURL(FORM);await c.executeJavaScript(`fixture.brandReadyDelay=600;fixture.brandMenuDelay=800;fixture.brandResultsDelay=800;document.querySelector('label[for="price"]').textContent='Prix Recommandation de prix En savoir plus sur les recommandations de prix et la façon dont elles sont calculées. Recommandation de prix Voir le prix de vente d’articles similaires';const suggestion=document.createElement('button');suggestion.type='button';suggestion.textContent='Recommandation de prix';suggestion.onclick=()=>fixture.recommendationClicks++;document.querySelector('#listing').append(suggestion);`);
       const result=await adapter.prepareFields(profile.id,{...input,brand:'Sans marque',color:'Noir',condition:'Neuf sans étiquette'});assert.deepEqual(result.filled.map(f=>f.field),['title','description','categoryPath','brand','condition','color','priceCents']);
       const actual=await c.executeJavaScript(`({brand:document.querySelector('#brand').value,price:document.querySelector('#price').value,ignored:fixture.ignoredBrandClicks,recommendations:fixture.recommendationClicks,brandClicks:fixture.events.filter(e=>e.kind==='click'&&e.id==='brand').length})`);assert.equal(actual.brand,'Sans marque');assert.equal(actual.price,'5,00');assert.equal(actual.ignored,0);assert.equal(actual.recommendations,0);assert.equal(actual.brandClicks,1);return {brandMenuDelayMs:800,brandResultDelayMs:800,brandClicks:actual.brandClicks,price:actual.price};
+    });
+    await check('Vinted local runtime targets Toutes les couleurs when photos add duplicate Suggestions and preserves recommended material',async()=>{
+      await c.loadURL(FORM);await c.executeJavaScript(`fixture.colorSuggestions=true;const label=document.createElement('label');label.htmlFor='material';label.textContent='Matériau (recommandé)';const field=document.createElement('input');field.id='material';field.readOnly=true;document.querySelector('#listing').append(label,field);`);
+      const result=await adapter.prepareFields(profile.id,{...input,color:'Noir'});assert.ok(result.filled.some(field=>field.field==='color'));assert.ok(result.filled.some(field=>field.field==='priceCents'));assert.equal(result.filled.some(field=>field.field==='material'),false);
+      const actual=await c.executeJavaScript(`({color:document.querySelector('#color').value,material:document.querySelector('#material').value,price:document.querySelector('#price').value,...fixture})`);assert.equal(actual.color,'Noir');assert.equal(actual.material,'Plastique');assert.equal(actual.price,'5,00');assert.equal(actual.events.filter(e=>e.kind==='click'&&e.id==='color-black').length,1);assert.equal(actual.events.some(e=>e.id==='suggested-black'||e.id==='material'),false);assert.equal(actual.escapes,1);assert.ok(actual.events.every(e=>e.trusted));await assert.rejects(adapter.prepareFields(profile.id,{...input,color:'Noir'}),{code:'EXISTING_DRAFT'});return {canonicalColorSelected:true,suggestionUntouched:true,materialPreserved:'Plastique',materialVerified:false};
     });
     await check('Vinted local runtime stops when the color overlay refuses to close',async()=>{
       await c.loadURL(FORM);await c.executeJavaScript('fixture.stuckMenu=true');const result=await adapter.prepareFields(profile.id,{color:'Noir',priceCents:500});assert.equal(result.filled.length,0);assert.match(result.unresolved.find(f=>f.field==='color').reason,/菜单尚未关闭/);assert.equal(await c.executeJavaScript(`document.querySelector('#price').value`),'');await c.executeJavaScript('fixture.stuckMenu=false;document.querySelector("#menu").replaceChildren();document.querySelector("#menu").classList.remove("color-open")');

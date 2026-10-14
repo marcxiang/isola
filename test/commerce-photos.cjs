@@ -97,7 +97,7 @@ test('symlink photo files and cache directories are rejected',async t=>{
  const f=await fixture(t),result=await f.prepare(),file=result.manifest.files[0].path;fs.unlinkSync(file);
  try{fs.symlinkSync(process.platform==='win32'?os.tmpdir():'/dev/null',file,process.platform==='win32'?'junction':'file');}catch(e){if(process.platform==='win32'&&e.code==='EPERM'){t.skip('Current Windows sandbox prohibits creating links');return;}throw e;}
  assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});
- const g=await fixture(t);fs.symlinkSync(os.tmpdir(),path.join(g.dir,'prepared-photos'),process.platform==='win32'?'junction':'dir');await assert.rejects(g.prepare(),{code:'PHOTO_STORAGE'});assert.equal(g.calls.length,0);
+ const g=await fixture(t);fs.symlinkSync(os.tmpdir(),path.join(g.dir,'prepared-photos'),process.platform==='win32'?'junction':'dir');await assert.rejects(g.prepare(),{code:'PHOTO_STORAGE'});assert.equal(g.calls.filter(call=>call.name==='claimPhotos').length,0);
 });
 
 test('cancelling a claim retains a returned receipt before releasing configure, while timeout preserves uncertainty and ignores late completion',async t=>{

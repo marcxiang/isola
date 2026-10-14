@@ -17,7 +17,7 @@ export function packageWindows(root,arch,out){
  fs.cpSync(runtime,target,{recursive:true});
  fs.renameSync(path.join(target,'electron.exe'),path.join(target,'Isola.exe'));
  const app=path.join(target,'resources/app');fs.mkdirSync(app,{recursive:true});
- for(const name of ['src','assets','package.json','LICENSE','README.md','WINDOWS.md','HANDOFF.md','CHANGELOG.md'])fs.cpSync(path.join(root,name),path.join(app,name),{recursive:true});
+ for(const name of ['src','assets','package.json','LICENSE','README.md','WINDOWS.md','DEVICE_PROFILES.md','HANDOFF.md','CHANGELOG.md'])fs.cpSync(path.join(root,name),path.join(app,name),{recursive:true});
  const defaultApp=path.join(target,'resources/default_app.asar');if(fs.existsSync(defaultApp))fs.unlinkSync(defaultApp);
  const exe=NtExecutable.from(binary),resources=NtExecutableResource.from(exe);
  const groups=Resource.IconGroupEntry.fromEntries(resources.entries);

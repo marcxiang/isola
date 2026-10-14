@@ -1,5 +1,7 @@
 # Development checkpoint
 
+Update 2026-10-14: source version 0.5.3-dev.3 adds persistent desktop/mobile OS and device profiles, a manager-only configuration preview and observed local device diagnostics. Electron is pinned to 44.7.2; Windows input waits for a real frame, uses trusted target-scoped mouse/touch and restores temporary throttling changes. See DEVICE_PROFILES.md for presets, Worker differences and engine/GPU limits. Windows now starts under the default Chromium sandbox. The sections below preserve historical checkpoints; use HANDOFF.md for the latest validation and open commerce work.
+
 Update 2026-10-14: source version 0.5.3-dev.2 connects operator-reviewed listing association through `commerce-association-service.cjs` and authenticated main/preload IPC. A main-only two-minute capability binds the original submission, plan, account and detail document; confirmation re-reads the page under the reader lock. The journal validates branded operator provenance and stages the full database through `projectPublicationReconciliation` before one persistence call. The supplier outbox remains unsent. Windows x64 packaging and filesystem compatibility are described in WINDOWS.md. The older checkpoint below describes the state before this integration; its live TEST evidence remains historical, not a new validation on this machine.
 
 Checkpoint: 2026-10-14, source version 0.5.3-dev.1. Read HANDOFF.md first when resuming on another computer. The last packaged app used for live publication is 0.5.2.

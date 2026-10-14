@@ -1,8 +1,12 @@
 import { packager } from '@electron/packager';
 import path from 'node:path';
 import fs from 'node:fs';
+import {createRequire} from 'node:module';
 import {packageWindows} from './package-windows.mjs';
 const root = path.resolve(import.meta.dirname, '..');
+// Electron 44 installs its checksum-verified runtime lazily on first require.
+// Building directly after npm ci must work before the first application start.
+createRequire(import.meta.url)('electron');
 const option = name => process.argv.find(value => value.startsWith(`--${name}=`))?.split('=')[1];
 const platform = option('platform') || process.env.ISOLA_PLATFORM || process.platform;
 const arch = option('arch') || process.env.ISOLA_ARCH || (platform === 'darwin' ? 'arm64' : 'x64');

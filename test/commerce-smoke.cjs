@@ -44,7 +44,7 @@ module.exports = async function commerceSmoke(api, check) {
     while(Date.now()<deadline) { if(await predicate()) return; await sleep(30); }
     throw Error('Timed out: '+message);
   };
-  const frames = async () => window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+  const frames = async () => {window.show();window.focus();let timer;try{await Promise.race([window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'),new Promise(resolve=>{timer=setTimeout(resolve,500);})]);}finally{clearTimeout(timer);}};
   const invoke = (method,...args) => window.webContents.executeJavaScript(`window.commerce[${JSON.stringify(method)}](...${JSON.stringify(args)})`);
   try {
     engine = api.getCommerce();

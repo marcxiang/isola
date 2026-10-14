@@ -6,7 +6,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 ## Project status / 当前状态
 
-The current development version is **0.5.3-dev.2**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. One real test item was published at €5 using 0.5.2. Operator-reviewed receipt association is now connected through the main process, with expiring single-use capabilities, a fresh detail read and one full database commit. It still requires matching photo evidence and live validation. It is not a completed unattended commerce system.
+The current development version is **0.5.3-dev.3**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. One real test item was published at €5 using 0.5.2. Operator-reviewed receipt association is now connected through the main process, with expiring single-use capabilities, a fresh detail read and one full database commit. It still requires matching photo evidence and live validation. It is not a completed unattended commerce system.
 
 - Environment management, persistent Chromium sessions, proxy configuration, AI click/scroll feedback, supplier catalog synchronization and listing plans are implemented.
 - Listing fields, photo upload and one guarded manual publication have been exercised on Vinted France. The live item was checked visually; application receipt association, buyer messages, offers, shipping labels and real supplier purchases still need end-to-end validation.
@@ -24,6 +24,12 @@ The current development version is **0.5.3-dev.2**. The multi-account operations
 - SKU Desk supplier connection, catalog/photo-set synchronization, per-environment listing plans and a durable commerce workflow engine.
 - Product-to-account sales distribution, combined filters, per-environment prices and sales targets, verified account names and actual listing receipt links.
 - Conservative handling of uncertain external results, purchase limits, bounded read retries, task leases and duplicate-operation prevention.
+
+## Device profiles / 设备与手机模拟
+
+Environment creation now supports Windows, macOS, Linux, Android and iOS browser compatibility profiles. Choose a Pixel 7, Galaxy S23, iPhone 13 or iPhone 14 Pro preset, then adjust the OS version, model, viewport, logical screen size, DPR, touch points, CPU, language, timezone and WebRTC policy. The preview shows generated UA and effective limits before saving. Profiles keep their settings across restarts and configuration copies.
+
+The local device check reports actual automation signals, page/Worker/iframe differences, mobile input/orientation, GPU, repeated Canvas and offline audio stability. It does not certify a human-operated or undetectable phone: the engine, GPU, fonts and media stack remain those of the host. Dedicated Worker platform and Shared/Service Worker identity may still reflect the host. iOS profiles retain Chromium rather than WebKit. See [DEVICE_PROFILES.md](DEVICE_PROFILES.md).
 
 ## Run locally / 本地开发
 

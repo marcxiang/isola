@@ -1,1 +1,30 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; frame-src 'self' about:"><title>指纹自检 · Isola</title><style>body{margin:0;background:#f6f8fc;color:#25364b;font:14px -apple-system,sans-serif}main{max-width:900px;margin:55px auto;padding:0 30px}small{color:#13806b;letter-spacing:3px}h1{font-size:32px}p{color:#7c8da3;line-height:1.8}table{border-collapse:collapse;width:100%;background:white;border-radius:12px;overflow:hidden}td{padding:15px 20px;border-bottom:1px solid #edf1f6;word-break:break-all}td:first-child{width:190px;color:#8090a5}h2{font-size:17px;margin-top:35px}.note{padding:18px;background:#eaf3ee;color:#386b5b;border-radius:10px;font-size:12px}</style></head><body><main><small>ISOLA / LOCAL DIAGNOSTICS</small><h1>看看这个环境的实际表现。</h1><p>以下数值由当前页面直接读取。这个页面不连接外部检测服务。</p><h2>当前页面实际参数</h2><table id="configured"></table><h2>系统默认项目</h2><table id="system"></table><h2>设备与自动控制检查</h2><table id="automation"></table><h2>跨上下文一致性</h2><table id="contexts"><tr><td>检查状态</td><td>正在读取 Worker 与 iframe…</td></tr></table><p class="note">本机原生模式保留系统参数；自定义模式可能出现跨上下文差异。此版本通过 Chromium 调试协议设置页面指纹。共享/Service Worker、跨域嵌入页面需另行检测；字体和底层设备信息可能与页面设置不同；这些设置不构成完整的系统身份伪装。Canvas、WebGL、AudioContext 未进行修改。</p></main><script src="device-probe.cjs"></script><script src="check.cjs"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; frame-src 'self' about:">
+<title>指纹自检 · Isola</title>
+<style>
+body{margin:0;background:#f6f8fc;color:#25364b;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1000px;margin:45px auto;padding:0 28px 55px}small{color:#13806b;letter-spacing:3px}h1{font-size:30px;margin-bottom:10px}p{color:#6c7d91;line-height:1.8}table{border-collapse:collapse;width:100%;background:white;border-radius:12px;overflow:hidden}td{padding:13px 18px;border-bottom:1px solid #edf1f6;overflow-wrap:anywhere;white-space:pre-wrap}td:first-child{width:205px;color:#71839b}h2{font-size:17px;margin-top:30px}.note{padding:17px;background:#eaf3ee;color:#386b5b;border-radius:10px;font-size:12px}.heading{display:flex;justify-content:space-between;gap:20px;align-items:center}button{background:#fff;border:1px solid #cbd8e2;border-radius:8px;color:#33596d;padding:9px 15px;cursor:pointer;white-space:nowrap}button:disabled{opacity:.55;cursor:wait}.summary{padding:16px 19px;background:#eaf0f7;border-radius:10px;line-height:1.8}.summary strong{display:block;color:#365270}.finding{border:1px solid #e1e8ef;border-radius:9px;background:#fff;padding:13px 16px;margin:9px 0}.finding b{font-weight:600}.finding p{margin:5px 0 0;font-size:12px}.badge{display:inline-block;margin-right:10px;border-radius:5px;padding:3px 7px;font-size:11px;background:#eaf0f7;color:#47627a}.badge.mismatch{background:#fff0da;color:#976323}.badge.limited,.badge.unavailable{background:#f0eef7;color:#756583}details{margin-top:20px;color:#607489}summary{cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:white;padding:18px;border-radius:9px;font-size:11px;line-height:1.6}@media(max-width:650px){main{padding:0 15px 30px;margin-top:25px}td{padding:11px}td:first-child{width:125px}h1{font-size:24px}}
+</style>
+</head>
+<body>
+<main>
+<small>ISOLA / LOCAL DIAGNOSTICS</small>
+<div class="heading"><h1>看看这个环境的实际表现。</h1><button id="rerun" type="button">重新检测</button></div>
+<p>直接读取本次页面的设备信号、自动控制迹象和渲染结果；不连接外部检测服务。手机配置属于桌面 Chromium 的移动端模拟。</p>
+<div id="summary" class="summary" role="status" aria-live="polite">正在读取环境参数…</div>
+<h2>环境一致性分析</h2><div id="findings"></div>
+<h2>当前页面实际参数</h2><table id="configured"></table>
+<h2>系统默认项目</h2><table id="system"></table>
+<h2>手机输入与屏幕</h2><table id="mobile"></table>
+<h2>设备与自动控制检查</h2><table id="automation"></table>
+<h2>跨上下文一致性</h2><table id="contexts"><tr><td>检查状态</td><td>正在读取 Worker 与 iframe…</td></tr></table>
+<h2>图形、字体与音频</h2><table id="rendering"></table>
+<h2>浏览器能力</h2><p>这里只检查 API 是否存在；没有申请或检查摄像头、麦克风、定位等权限，也没有枚举这些设备。</p><table id="capabilities"></table>
+<p class="note">本机原生模式保留系统参数；自定义模式可能出现跨上下文差异。此版本通过 Chromium 调试协议设置页面指纹。本页未检测 SharedWorker 和 Service Worker，其参数一致性未经验证；它们可能保留宿主机参数。跨域嵌入页面也需另行检测。字体和底层设备信息可能与页面设置不同；这些设置不构成完整的系统身份伪装。Canvas、WebGL、AudioContext 未进行修改。参数一致或未发现特定自动控制信号，都不能证明网站会认定为真人或真实手机。</p>
+<details><summary>查看本次实测明细（仅本地）</summary><pre id="raw"></pre></details>
+</main>
+<script src="device-probe.cjs"></script><script src="check.cjs"></script>
+</body>
+</html>

@@ -15,6 +15,7 @@ const {createPhotoService}=require('./commerce-photo-service.cjs');
 const { SKUDeskClient } = require('./sku-desk.cjs');
 const { RequestGate } = require('./sku-transport.cjs');
 const {stopDraft,installUnloadGuard,closeContents}=require('./navigation-lifecycle.cjs');
+const {buildFingerprintConfig,FINGERPRINT_PRESETS,DEVICE_PRESETS}=require('./fingerprint-config.cjs');
 app.setName('Isola');
 app.commandLine.appendSwitch('disable-quic');
 if (process.env.ISOLA_TEST_DATA) app.setPath('userData', process.env.ISOLA_TEST_DATA);
@@ -60,6 +61,9 @@ function requireCommerceUnlinked(id) {
   if(engine&&(engine.active.has(id)||['plans','jobs','claims','photoPreparations'].some(key=>engine.db[key].some(row=>row.profileId===id))))throw Error('该环境关联了运营计划或历史记录，不能删除或清除登录数据；请保留此环境并新建其他环境。');
 }
 function sesFor(p) { return session.fromPartition('persist:environment-' + p.id); }
+function fingerprintFor(p) {
+  return buildFingerprintConfig(p, { platform: process.platform, arch: process.arch, osVersion: process.getSystemVersion(), chromeVersion: process.versions.chrome, userAgent: app.userAgentFallback.replace(/ Isola\/[^ ]+| Electron\/[^ ]+/g, '') });
+}
 function inputProfile(input) {
   const previous = profiles.find(p => p.id === input.id);
   const password = input.clearPassword ? '' : input.proxy?.password || previous?.proxy.password || '';
@@ -83,15 +87,46 @@ async function configure(contents, p) {
   // Navigate locally first: CDP commands can otherwise wait forever for a renderer.
   await deadline(contents.loadURL('about:blank'), 10000, '初始化页面');
   contents.setUserAgent(sesFor(p).getUserAgent()); contents.debugger.attach('1.3');
-  if(p.fingerprintMode==='native')return;
+  const fingerprint=fingerprintFor(p);
+  if(!fingerprint.enabled)return;
   const send = (method, args) => deadline(contents.debugger.sendCommand(method, args), 8000, '指纹配置');
-  await send('Emulation.setTimezoneOverride', { timezoneId: p.timezone });
-  await send('Emulation.setLocaleOverride', { locale: p.language });
-  await send('Emulation.setDeviceMetricsOverride', { width: p.width, height: p.height, screenWidth: p.width, screenHeight: p.height, deviceScaleFactor: 1, mobile: false });
-  const version = process.versions.chrome, major = version.split('.')[0];
-  const userAgentMetadata = p.ua ? undefined : { brands: [{ brand: 'Chromium', version: major }], fullVersionList: [{ brand: 'Chromium', version }], platform: process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'Linux', platformVersion: process.getSystemVersion(), architecture: process.arch === 'arm64' ? 'arm' : 'x86', model: '', mobile: false, bitness: '64', wow64: false };
-  await send('Emulation.setUserAgentOverride', { userAgent: p.ua || sesFor(p).getUserAgent(), acceptLanguage: p.language, ...(userAgentMetadata ? { userAgentMetadata } : {}) });
-  if (p.hardwareConcurrency) await send('Emulation.setHardwareConcurrencyOverride', { hardwareConcurrency: p.hardwareConcurrency });
+  await send('Emulation.setTimezoneOverride', { timezoneId: fingerprint.timezone });
+  await send('Emulation.setLocaleOverride', { locale: fingerprint.language });
+  await send('Emulation.setDeviceMetricsOverride', fingerprint.deviceMetrics);
+  await send('Emulation.setTouchEmulationEnabled', fingerprint.touchEmulation);
+  await send('Emulation.setEmitTouchEventsForMouse', {enabled:!!(fingerprint.deviceMetrics.mobile&&fingerprint.touchEmulation.enabled),configuration:fingerprint.deviceMetrics.mobile?'mobile':'desktop'});
+  await send('Emulation.setUserAgentOverride', fingerprint.userAgentOverride);
+  if (fingerprint.hardwareConcurrency) await send('Emulation.setHardwareConcurrencyOverride', { hardwareConcurrency: fingerprint.hardwareConcurrency });
+  // Chromium does not propagate every page override to dedicated workers or
+  // out-of-process frames. Use child-target emulation before scripts start. Some
+  // values (notably WorkerNavigator.platform) remain host values in Chromium;
+  // the diagnostic page reports those differences without changing JS APIs.
+  // Service Worker Emulation commands can wait for startup while startup waits
+  // for the debugger. Resume them immediately and report actual data. Do not
+  // filter them out: Chromium can still pause a filtered worker without emitting
+  // the attached event, which would leave its registration waiting indefinitely.
+  const autoAttach={autoAttach:true,waitForDebuggerOnStart:true,flatten:true};
+  contents.debugger.on('message', (_event,method,params) => {
+    if(method!=='Target.attachedToTarget')return;
+    const childSession=params.sessionId;
+    const childSend=(name,args)=>deadline(contents.debugger.sendCommand(name,args,childSession),8000,'子页面指纹配置');
+    void (async()=>{
+      try {
+        if(params.targetInfo?.type==='service_worker')return;
+        await childSend('Emulation.setUserAgentOverride',fingerprint.userAgentOverride);
+        await childSend('Emulation.setTimezoneOverride',{timezoneId:fingerprint.timezone});
+        if(fingerprint.hardwareConcurrency)await childSend('Emulation.setHardwareConcurrencyOverride',{hardwareConcurrency:fingerprint.hardwareConcurrency});
+        // Locale is renderer-wide and inherited from the page. Reapplying it in
+        // a worker can fail with "Another locale override is already in effect".
+        await childSend('Target.setAutoAttach',autoAttach);
+      } catch(error) {
+        if(!contents.isDestroyed())log('child fingerprint configuration unavailable ('+params.targetInfo?.type+'): '+error.message);
+      } finally {
+        if(!contents.isDestroyed())await childSend('Runtime.runIfWaitingForDebugger',{}).catch(error=>log('child target resume failed: '+error.message));
+      }
+    })();
+  });
+  await send('Target.setAutoAttach',autoAttach);
 }
 async function stopPageAutomation(w) {
   w.vintedDraftController?.abort();w.aiAgent?.stop();
@@ -158,9 +193,10 @@ async function addTab(w, target) {
   if (w.tabs.length >= 20) throw Error('每个环境最多打开 20 个标签页');
   const view = new WebContentsView({ webPreferences: { session: sesFor(w.profile), contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, devTools: false } });
   const tab = { id: randomUUID(), view, title: '新标签页', url: '', error: '', loading: false };
+  tab.isInputVisible=()=>!w.isDestroyed()&&w.isVisible()&&!w.isMinimized()&&w.activeTab===tab.id;
   tab.controlFeedback=event=>w.controlOverlay.show(tab,event);
   w.tabs.push(tab); w.activeTab = tab.id; w.contentView.addChildView(view); resizeViews(w); sendState(w);
-  const c = view.webContents; c.setAudioMuted(false); c.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
+  const c = view.webContents; c.setAudioMuted(false); c.setWebRTCIPHandlingPolicy(fingerprintFor(w.profile).webRTCPolicy);
   tab.unloadGuard=installUnloadGuard(w,tab,{showMessageBoxSync:(...args)=>dialog.showMessageBoxSync(...args),onState:()=>sendState(w),isAutomating:()=>!!w.aiAgent?.state.running||!!w.vintedDraftController||!!commerce?.active.has(w.profile.id)});
   c.once('destroyed',()=>{
     tab.proxyAuth?.dispose();
@@ -189,9 +225,9 @@ async function launch(id) {
   try {
     const s = sesFor(p); route = await createProxyRoute(p.proxy); routes.set(id, route);
     await s.setProxy(route.config); await s.closeAllConnections();
-    const defaultUA=app.userAgentFallback.replace(/ Isola\/[^ ]+| Electron\/[^ ]+/g, '');
+    const fingerprint=fingerprintFor(p);
     const nativeLanguages=[...new Set([app.getLocale(),...app.getPreferredSystemLanguages()])].join(',');
-    s.setUserAgent(p.fingerprintMode==='native'?defaultUA:p.ua||defaultUA, p.fingerprintMode==='native'?nativeLanguages:p.language);
+    s.setUserAgent(fingerprint.userAgent, fingerprint.enabled?fingerprint.acceptLanguage:nativeLanguages);
     s.setPermissionRequestHandler((_, permission, callback) => callback(false)); s.setPermissionCheckHandler(() => false);
     if (!s._isolaDownloads) { s._isolaDownloads = true; s.on('will-download', (_, item) => item.setSaveDialogOptions({ title: '保存下载文件 · Isola' })); }
     w = new BrowserWindow({ width: Math.min(p.width + 20, 1600), height: Math.min(p.height + 145, 1050), minWidth: 720, minHeight: 480, title: p.name + ' · Isola', backgroundColor: '#edf1f6', webPreferences: { preload: path.join(__dirname, 'browser-preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false } });
@@ -235,6 +271,8 @@ function register() {
   handle('export', async ids => { const rows = ids?.length ? profiles.filter(p => ids.includes(p.id)) : profiles; const r = await dialog.showSaveDialog(manager, { defaultPath: 'Isola-profiles.json', filters: [{ name: 'JSON 配置', extensions: ['json'] }] }); if (r.canceled) return; fs.writeFileSync(r.filePath, JSON.stringify(exportProfiles(rows), null, 2), { mode: 0o600 }); return rows.length; });
   handle('import', async () => { const r = await dialog.showOpenDialog(manager, { filters: [{ name: 'JSON 配置', extensions: ['json'] }], properties: ['openFile'] }); if (r.canceled) return; if (fs.statSync(r.filePaths[0]).size > 2 * 1024 * 1024) throw Error('配置文件不能超过 2 MB'); const rows = importProfiles(JSON.parse(fs.readFileSync(r.filePaths[0], 'utf8'))); const before = profiles; profiles = [...profiles, ...rows]; try { save(); } catch (e) { profiles = before; throw e; } notify(); return rows.length; });
   handle('info', () => ({ version: app.getVersion(), chromium: process.versions.chrome, platform: process.platform, arch: process.arch, dataPath: app.getPath('userData') }));
+  handle('fingerprint-preview', input => fingerprintFor(validate({...input,id:undefined,name:'配置预览',url:'https://example.com',proxy:{type:'direct'}})));
+  handle('fingerprint-catalog', () => ({devices:DEVICE_PRESETS,systems:FINGERPRINT_PRESETS}));
   handle('commerce-open',openCommerce);
   const desk=(name,fn)=>ipcMain.handle(name,(e,...args)=>{if(!commerceWindow||commerceWindow.isDestroyed()||e.sender!==commerceWindow.webContents)throw Error('无权访问运营工作台');return fn(ensureCommerce(),...args);});
   desk('commerce-publication-inspect',(c,id)=>inspectPublication(c,id));

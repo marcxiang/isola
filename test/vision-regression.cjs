@@ -18,13 +18,17 @@ module.exports = async function visionRegression(api, check) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = 'http://127.0.0.1:' + server.address().port, allowedOrigins = new Set([origin]);
-  let profile, window, customProfile, customWindow;
+  let profile, window, customProfile, customWindow, originalThrottling;
   try {
     profile = api.saveProfile({ name: 'QA private visual input', url: origin, fingerprintMode: 'native', width: 1200, height: 760 });
     await api.launch(profile.id);
     window = api.windows.get(profile.id);
     const tab = window.tabs[0], c = tab.view.webContents;
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Pixel privacy checks need a painted foreground fixture on Windows.
+    // Production treats unavailable optional screenshots as text-only input.
+    window.show(); window.focus(); c.focus();
+    originalThrottling = c.getBackgroundThrottling(); c.setBackgroundThrottling(false);
+    await c.executeJavaScript('new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error("Vision fixture did not paint")),1500);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve(true)}));})');
     let capture;
     await check('visual input masks fields, editable text, open shadows, frames and canvas', async () => {
       const before = await c.executeJavaScript('document.documentElement.outerHTML');
@@ -81,6 +85,8 @@ module.exports = async function visionRegression(api, check) {
       return { viewport, nativeView: { width: bounds.width, height: bounds.height }, behavior: 'text-only fallback required' };
     });
   } finally {
+    const contents = window?.tabs[0]?.view.webContents;
+    if (contents && !contents.isDestroyed() && originalThrottling !== undefined) contents.setBackgroundThrottling(originalThrottling);
     for (const w of [window, customWindow]) if (w && !w.isDestroyed()) w.close();
     await new Promise(resolve => setTimeout(resolve, 200));
     for (const p of [profile, customProfile]) if (p) await api.deleteProfile(p.id);

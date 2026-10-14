@@ -27,11 +27,15 @@ const html=String.raw`<!doctype html><meta charset="utf-8"><title>Local single-p
 <script>window.fixture={publishes:0,clicks:[]};document.addEventListener('click',event=>fixture.clicks.push({id:event.target.id,label:event.target.textContent.trim(),trusted:event.isTrusted}));document.querySelector('#listing').onsubmit=event=>{event.preventDefault();fixture.publishes++;history.pushState(null,'','/items/77777-local-test');};</script>`;
 
 module.exports=async function publishSubmitSmoke(api,check){
- let profile,session,w;
+ let profile,session,w,originalThrottling;
  try{
   profile=api.saveProfile({name:'QA local guarded publication',url:FORM,fingerprintMode:'native',width:1180,height:900});session=api.sesFor(profile);
   session.protocol.handle('https',request=>[PHOTO,AVATAR,'https://fixture.test/replaced.png'].includes(request.url)?new Response(image,{headers:{'content-type':'image/png','cache-control':'no-store'}}):new Response(request.url===FORM?html:'Not found',{status:request.url===FORM?200:404,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}}));
   await api.launch(profile.id);w=api.windows.get(profile.id);const tab=w.tabs[0],contents=tab.view.webContents,adapter=new VintedAdapter({windows:api.windows});
+  // This is a manual, foreground publication fixture. Ensure a painted native
+  // surface before testing the unchanged atomic native-click boundary.
+  w.show();w.focus();contents.focus();originalThrottling=contents.getBackgroundThrottling();contents.setBackgroundThrottling(false);
+  await contents.executeJavaScript('new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error("Publication fixture did not paint")),1500);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve(true)}));})');
   const listing={title:'Article local de test',description:'Fixture locale uniquement.',categoryPath:['Maison','Entretien de la maison','Aspirateurs et nettoyage','Accessoires pour appareils de nettoyage'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'};
   function setup(){
    const plan={id:'local-plan',profileId:profile.id,productId:'local-product',sku:'LOCAL-ONLY',listing,listingPriceCents:500,currency:'EUR',enabled:true,completedCount:0,targetCount:1,activeListingId:null};
@@ -69,5 +73,5 @@ module.exports=async function publishSubmitSmoke(api,check){
    }
    return {blockedFinalChanges:3,nativeClicks:0,externalRequestsForwarded:0};
   });
- }finally{if(w&&!w.isDestroyed())w.close();await new Promise(resolve=>setTimeout(resolve,200));if(session)session.protocol.unhandle('https');if(profile)await api.deleteProfile(profile.id);}
+ }finally{if(w&&!w.isDestroyed()){const c=w.tabs[0]?.view.webContents;if(c&&!c.isDestroyed()&&originalThrottling!==undefined)c.setBackgroundThrottling(originalThrottling);w.close();}await new Promise(resolve=>setTimeout(resolve,200));if(session)session.protocol.unhandle('https');if(profile)await api.deleteProfile(profile.id);}
 };

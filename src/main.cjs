@@ -21,12 +21,14 @@ const { RequestGate } = require('./sku-transport.cjs');
 const {stopDraft,installUnloadGuard,closeContents}=require('./navigation-lifecycle.cjs');
 const {buildFingerprintConfig,FINGERPRINT_PRESETS,DEVICE_PRESETS}=require('./fingerprint-config.cjs');
 const {displayLayout,createDisplayController,getDisplayState}=require('./display-transform.cjs');
+const {profileManagerStatus,ACCOUNT_OBSERVATION_MAX_AGE_MS}=require('./manager-status.cjs');
 app.setName('Isola');
 app.commandLine.appendSwitch('disable-quic');
 if (process.env.ISOLA_TEST_DATA) app.setPath('userData', process.env.ISOLA_TEST_DATA);
 let manager, profiles = [], quitting = false, quitPending=false, quitApproved=false;
 let commerceView, commerceOwner, commerceLoading, managerLoading, workspacePage='environments', workspaceSequence=0;
-let commerce, commerceAccounts, awakeId=null;
+let commerce, commerceAccounts, awakeId=null, commerceLoadError=false, managerStatusTimer=null;
+const COMMERCE_PAGES=new Set(['overview','accounts','inventory','plans','jobs','settings']);
 const accountTabs=new Map();
 const skuGate=new RequestGate({maxConcurrent:3,maxPerMinute:100});
 const windows = new Map(), locks = new Set(), routes = new Map();
@@ -46,12 +48,27 @@ function save() {
   if (fs.existsSync(dataFile())) fs.copyFileSync(dataFile(), dataFile() + '.backup');
   const tmp = dataFile() + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(rows, null, 2), { mode: 0o600 }); fs.renameSync(tmp, dataFile());
 }
-function list() { return profiles.map(p => publicProfile(p, locks.has(p.id) ? 'starting' : windows.has(p.id) ? 'running' : 'closed')); }
-function notify() { if (manager && !manager.isDestroyed()) manager.webContents.send('profiles', list()); if(commerce)commerce.emit(); }
+function list() {return profiles.map(p=>{
+ const w=windows.get(p.id),windowOpen=!!w&&!w.isDestroyed(),activeTab=windowOpen?w.tabs.find(tab=>tab.id===w.activeTab):null;let vintedPage=false;
+ try{const url=new URL(activeTab?.view.webContents.getURL());vintedPage=url.origin==='https://www.vinted.fr'&&!url.username&&!url.password;}catch{}
+ return {...publicProfile(p,locks.has(p.id)?'starting':windowOpen?'running':'closed'),...profileManagerStatus({account:commerce?.accounts?.findByProfile(p.id),bound:commerce?.db.marketAccounts.find(row=>row.profileId===p.id),observation:commerce?.accountObservations.get(p.id),windowOpen,vintedPage,ai:w?.aiAgent?.state,activeCommerce:commerce?.active.has(p.id),activeAborted:commerce?.active.get(p.id)?.signal.aborted,hasDraft:!!w?.vintedDraftController,plans:commerce?.db.plans.filter(plan=>plan.profileId===p.id),jobs:commerce?.db.jobs.filter(job=>job.profileId===p.id),schedulerRunning:commerce?.running,unavailable:commerceLoadError||commerce?.storageFaulted()})};
+ });}
+function notifyManager(){
+ clearTimeout(managerStatusTimer);managerStatusTimer=null;
+ if(!manager||manager.isDestroyed())return;
+ manager.webContents.send('profiles',list());
+ // A one-shot local notification expires the earliest live observation. No
+ // network polling or credential reads are needed to keep a visible badge fresh.
+ const current=Date.now(),next=[...(commerce?.accountObservations.values()||[])].map(row=>Date.parse(row.checkedAt)+ACCOUNT_OBSERVATION_MAX_AGE_MS).filter(at=>Number.isFinite(at)&&at>current).sort((a,b)=>a-b)[0];
+ if(next!==undefined){managerStatusTimer=setTimeout(notifyManager,Math.min(2147483647,Math.max(1,next-current)));managerStatusTimer.unref();}
+}
+function invalidateAccountObservation(id){if(commerce?.accountObservations.delete(id))notifyManager();}
+function notify() {notifyManager();if(commerce)commerce.emit();}
 function commerceChanged(state){
   if(state.running&&awakeId===null)awakeId=powerSaveBlocker.start('prevent-app-suspension');
   if(!state.running&&awakeId!==null){powerSaveBlocker.stop(awakeId);awakeId=null;}
   if(commerceView&&!commerceView.webContents.isDestroyed())commerceView.webContents.send('commerce-state',state);
+  notifyManager();
 }
 function ensureCommerce(){
  if(!commerce){
@@ -61,6 +78,7 @@ function ensureCommerce(){
   const accounts=new AccountsStore({dir,profiles:list,seal,unseal,assertMutable:assertAccountMutable,onChange:()=>commerce?.emit()});
   commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedAdapter({windows,isBusy:id=>commerce?.active.has(id)||!!windows.get(id)?.closingPromise||!!windows.get(id)?.navigationPending}),accounts,seal,unseal,onChange:commerceChanged});
   commerceAccounts=new CommerceAccountService({engine:commerce,store:accounts,openPage:openAccountPage,login:new VintedLogin(commerce.adapter)});
+  commerceLoadError=false;
  }
  return commerce;
 }
@@ -88,7 +106,8 @@ async function showEnvironmentManager(){
   workspacePage='environments';if(commerceOwner===w&&commerceView&&!commerceView.webContents.isDestroyed())commerceView.setVisible(false);
   w.setTitle('Isola · 环境管理');showWorkspaceWindow(w);w.webContents.focus();return {page:workspacePage};
 }
-async function openCommerce(){
+async function openCommerce(page){
+  if(page!==undefined&&(typeof page!=='string'||!COMMERCE_PAGES.has(page)))throw Error('运营页面无效');
   const request=++workspaceSequence,engine=ensureCommerce(),w=manager&&!manager.isDestroyed()?manager:await createManager();
   if(managerLoading)await managerLoading;
   if(w.isDestroyed())throw Error('主窗口已关闭，请重新打开');
@@ -101,7 +120,7 @@ async function openCommerce(){
   }
   await commerceLoading;
   if(request!==workspaceSequence||w.isDestroyed()||commerceOwner!==w||!commerceView||commerceView.webContents.isDestroyed())return {page:workspacePage};
-  workspacePage='commerce';resizeWorkspace(w);commerceView.setVisible(true);w.setTitle('Isola · 账号与运营');showWorkspaceWindow(w);commerceView.webContents.focus();engine.emit();return {page:workspacePage};
+  workspacePage='commerce';resizeWorkspace(w);commerceView.setVisible(true);w.setTitle('Isola · 账号与运营');showWorkspaceWindow(w);commerceView.webContents.focus();engine.emit();if(page!==undefined)commerceView.webContents.send('commerce-page',page);return {page:workspacePage};
 }
 function profile(id) { const p = profiles.find(p => p.id === id); if (!p) throw Error('环境不存在'); return p; }
 function requireClosed(id) { if (windows.has(id) || locks.has(id)) throw Error('请先关闭该环境'); }
@@ -124,7 +143,7 @@ function inputProfile(input) {
   return p;
 }
 function saveProfile(input) { const p = inputProfile(input); requireClosed(p.id); const next = [...profiles]; const i = next.findIndex(x => x.id === p.id); if (i < 0) next.push(p); else next[i] = p; validateProfileIdentities(next);const previous = profiles; profiles = next; try { save(); } catch (e) { profiles = previous; throw e; } notify(); return publicProfile(p); }
-async function clearProfile(id) { requireClosed(id); requireCommerceUnlinked(id); const s = sesFor(profile(id)); locks.add(id); notify(); try { await s.clearStorageData(); await s.clearCache(); await s.clearAuthCache(); await s.closeAllConnections(); } finally { locks.delete(id); notify(); } }
+async function clearProfile(id) { requireClosed(id); requireCommerceUnlinked(id); const s = sesFor(profile(id)); locks.add(id);invalidateAccountObservation(id);notify(); try { await s.clearStorageData(); await s.clearCache(); await s.clearAuthCache(); await s.closeAllConnections(); } finally { locks.delete(id); notify(); } }
 async function deleteProfile(id) { await clearProfile(id); const previous = profiles; profiles = profiles.filter(p => p.id !== id); try { save(); } catch (e) { profiles = previous; throw e; }try{removeSettingsRecord({dir:app.getPath('userData'),profileId:id});}catch{log('environment model settings retained after deletion; identity reuse is blocked');}notify(); }
 function duplicateProfile(id) { const original = profile(id); return saveProfile({ ...original, id: randomUUID(), name: original.name + '（副本）', createdAt: new Date().toISOString(),lastOpenedAt:null,proxyCheck:null }); }
 function sendState(w) {
@@ -133,6 +152,7 @@ function sendState(w) {
 }
 function resizeViews(w) {
   if (w.isDestroyed()) return;
+  if(w.statusActiveTab!==w.activeTab){w.statusActiveTab=w.activeTab;invalidateAccountObservation(w.profile.id);}
   w.controlOverlay?.clear();
   const [width, height] = w.getContentSize();
   const pageWidth = Math.max(320,width-(w.aiPanelOpen?350:0));
@@ -286,17 +306,17 @@ async function addTab(w, target) {
     if(!w.isDestroyed()&&!w.tabs.length&&!w.closingPromise){w.closeApproved=true;w.close();}
   });
   tab.proxyAuth=new ProxyAuthGuard(w.profile.proxy);
-  c.on('did-start-navigation',(_event,_url,isInPlace,isMainFrame)=>{if(isMainFrame&&!isInPlace)tab.proxyAuth.beginNavigation();});
+  c.on('did-start-navigation',(_event,_url,isInPlace,isMainFrame)=>{if(isMainFrame){invalidateAccountObservation(w.profile.id);if(!isInPlace)tab.proxyAuth.beginNavigation();}});
   c.on('login', (event, details, auth, callback) => { event.preventDefault();const credentials=tab.proxyAuth.credentials(details,auth);if(credentials)callback(credentials.username,credentials.password);else callback(); });
   c.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url)) addTab(w, url).catch(e => { tab.error = e.message; sendState(w); }); return { action: 'deny' }; });
   c.on('will-navigate', (e, url) => { if (!/^https?:\/\//.test(url)) e.preventDefault(); });
   c.on('page-title-updated', (_, title) => { tab.title = title; sendState(w); });
   c.on('did-navigate', () => { tab.aiContext = null; });
-  for (const event of ['did-navigate', 'did-navigate-in-page']) c.on(event, () => { tab.url = c.getURL(); sendState(w); });
+  for (const event of ['did-navigate', 'did-navigate-in-page']) c.on(event, () => {invalidateAccountObservation(w.profile.id);tab.url = c.getURL(); sendState(w); });
   c.on('did-start-loading', () => { tab.loading = true; sendState(w); });
   c.on('did-stop-loading', () => { tab.loading = false; sendState(w); });
   c.on('did-fail-load', (e, code, description, url, isMain) => { if (isMain && code !== -3) { tab.error = description; sendState(w); } });
-  c.on('render-process-gone', () => { tab.error = '页面进程退出，请重新加载'; sendState(w); });
+  c.on('render-process-gone', () => {invalidateAccountObservation(w.profile.id);tab.error = '页面进程退出，请重新加载'; sendState(w); });
   c.debugger.on('detach', (_, reason) => { if (!quitting && !c.isDestroyed() && reason !== 'target closed') { tab.error = '指纹配置连接中断，请关闭并重新启动此环境'; c.stop(); view.setVisible(false); sendState(w); } });
   try { await configure(c, w.profile, tab); await navigateTab(w, tab, target || localFile('check.html')); } catch (e) { tab.error = e.message; sendState(w); throw e; }
   return tab;
@@ -314,6 +334,7 @@ async function launch(id) {
     if (!s._isolaDownloads) { s._isolaDownloads = true; s.on('will-download', (_, item) => item.setSaveDialogOptions({ title: '保存下载文件 · Isola' })); }
     w = new BrowserWindow({ width: Math.min(p.width + 20, 1600), height: Math.min(p.height + 145, 1050), minWidth: 720, minHeight: 480, title: p.name + ' · Isola', backgroundColor: '#edf1f6', webPreferences: { preload: path.join(__dirname, 'browser-preload.cjs'),partition:'isola-toolbar-'+p.id,contextIsolation: true, sandbox: true, nodeIntegration: false } });
     w.profile = p; w.tabs = []; w.activeTab = null; w.controlOverlay=createControlOverlay(w,{isActive:tab=>tab.id===w.activeTab}); w.aiPanelOpen = false; w.aiAgent = new BrowserAgent(w,(tab,url)=>navigateTab(w,tab,url)); windows.set(id, w); w.on('resize', () => resizeViews(w));
+    const emitAI=w.aiAgent.emit.bind(w.aiAgent);w.aiAgent.emit=()=>{emitAI();notifyManager();};
     // One request observer per profile session; successful requests release only
     // their own authentication budget. Failed challenges cannot reset it.
     const authRequests=new Map();
@@ -323,7 +344,7 @@ async function launch(id) {
     w.once('closed',()=>{authRequests.clear();s.webRequest.onBeforeRequest(null);s.webRequest.onCompleted(null);s.webRequest.onErrorOccurred(null);});
     w.webContents.setWindowOpenHandler(() => ({ action: 'deny' })); w.webContents.on('will-navigate', e => e.preventDefault());
     w.on('close',e=>{w.vintedDraftController?.abort();if(w.closeApproved)return;e.preventDefault();void closeBrowserWindow(w).catch(error=>{log('window close stopped: '+error.message);const tab=w.tabs.find(t=>t.id===w.activeTab);if(tab){tab.error=error.message;sendState(w);}});});
-    w.on('closed', () => { w.vintedDraftController?.abort();w.aiAgent.stop();commerce?.active.get(id)?.abort(); for (const t of [...w.tabs]) { if (!t.view.webContents.isDestroyed()) t.view.webContents.close(); } windows.delete(id); routes.delete(id); s.closeAllConnections().finally(() => route.close()).catch(() => {}); notify(); });
+    w.on('closed', () => { w.vintedDraftController?.abort();w.aiAgent.stop();commerce?.active.get(id)?.abort();invalidateAccountObservation(id); for (const t of [...w.tabs]) { if (!t.view.webContents.isDestroyed()) t.view.webContents.close(); } windows.delete(id); routes.delete(id); s.closeAllConnections().finally(() => route.close()).catch(() => {}); notify(); });
     // The toolbar is usable even while a tab is starting or a proxy is unavailable.
     await w.loadFile(path.join(__dirname, 'browser.html')); await addTab(w, p.url);
     const openedBefore=p.lastOpenedAt;p.lastOpenedAt=new Date().toISOString();try{save();}catch{p.lastOpenedAt=openedBefore;log('recent-open metadata could not be saved');}
@@ -427,8 +448,8 @@ function createManager() {
   w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));w.webContents.on('will-navigate',e=>e.preventDefault());
   w.on('resize',()=>resizeWorkspace(w));
   w.on('close',e=>{if(!quitting&&commerce?.db.settings.backgroundEnabled){e.preventDefault();w.hide();}});
-  w.on('closed',()=>{closeCommerceView(w);if(manager===w){manager=null;managerLoading=null;workspacePage='environments';workspaceSequence++;}});
-  const loading=w.loadFile(path.join(__dirname,'index.html')).then(()=>w);managerLoading=loading;
+  w.on('closed',()=>{closeCommerceView(w);if(manager===w){manager=null;managerLoading=null;workspacePage='environments';workspaceSequence++;clearTimeout(managerStatusTimer);managerStatusTimer=null;}});
+  const loading=w.loadFile(path.join(__dirname,'index.html')).then(()=>{notifyManager();return w;});managerLoading=loading;
   void loading.finally(()=>{if(managerLoading===loading)managerLoading=null;}).catch(()=>{});return loading;
 }
 const ready = app.whenReady().then(async () => {
@@ -438,6 +459,7 @@ const ready = app.whenReady().then(async () => {
     app.userAgentFallback=app.userAgentFallback.replace(/ Isola\/[^ ]+| Electron\/[^ ]+/g, '');
     fs.mkdirSync(app.getPath('userData'), { recursive: true });
     if (fs.existsSync(dataFile())) {const loaded=JSON.parse(fs.readFileSync(dataFile(), 'utf8'));validateProfileIdentities(loaded);const checked=loaded.map(p => validate({ ...p, proxy: { ...p.proxy, password: p.proxy.password ? safeStorage.decryptString(Buffer.from(p.proxy.password, 'base64')) : '' } }));validateProfileIdentities(checked);profiles=checked;}
+    if(['commerce-state.json','commerce-accounts.json'].some(name=>fs.existsSync(path.join(app.getPath('userData'),'commerce',name)))){try{ensureCommerce();}catch{commerceLoadError=true;log('运营状态未能读取，原文件已保留；请在账号与运营检查。');}}
     register(); Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'Isola', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] }, { label: '编辑', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }, { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'front' }] }]));
     powerMonitor.on('suspend',()=>{for(const w of windows.values()){w.vintedDraftController?.abort();w.aiAgent?.stop();w.controlOverlay.clear();}if(commerce){commerce.configController?.abort();if(commerce.running||commerce.ticking||commerce.active.size){commerce.setRunning(false);commerce.event('warning','系统进入睡眠，队列已暂停；唤醒后请核对任务再启动。');commerce.persist();commerce.emit();}}});
     await createManager(); return true;

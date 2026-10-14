@@ -652,6 +652,9 @@
   function updateProductInfo(resetPrice=false) {const product=find(state.products,planForm.elements.productId.value);$('#plan-product-info').textContent=product?`SKU ${product.sku || '—'} · 库存 ${product.stock ?? '待核对'} · 采购价 ${currency(product.priceCents)} · 可用图片 ${product.photoSetsAvailable ?? '待核对'} 套`:'选择货盘商品后查看库存和图片。';if(resetPrice){planForm.elements.listingPrice.value='';planForm.elements.minOffer.value='';for(const field of Object.values(listingFields))planForm.elements[field].value='';} }
 
   document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener('click',()=>changePage(button.dataset.page)));
+  const workspaceMenu=$('#workspace-commerce-menu'),workspaceToggle=$('#workspace-commerce-toggle');
+  workspaceToggle?.addEventListener('click',()=>{workspaceMenu.hidden=!workspaceMenu.hidden;workspaceToggle.setAttribute('aria-expanded',String(!workspaceMenu.hidden));});
+  api.onPage?.(page=>{if(workspaceMenu)workspaceMenu.hidden=false;workspaceToggle?.setAttribute('aria-expanded','true');changePage(page);});
   $('#workspace-environments').addEventListener('click',()=>{void api.showEnvironments().catch(error=>toast(cleanError(error)));});
   document.querySelectorAll('[data-close]').forEach(button=>button.addEventListener('click',()=>document.getElementById(button.dataset.close).close()));
   $('#new-account').addEventListener('click',()=>editAccount());

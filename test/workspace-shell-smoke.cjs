@@ -23,11 +23,20 @@ module.exports=async function workspaceShellSmoke(api,check){
   });
   await check('both directions use the sidebar while keeping environment filters and an unsaved operations form',async()=>{
    await deskJS(`document.querySelector('#workspace-environments').click();true`);await until(()=>api.getWorkspacePage()==='environments','home sidebar switch');
-   await homeJS(`document.querySelector('#search').value='shell retained search';document.querySelector('#search').dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#commerce-open').click();true`);await until(()=>api.getWorkspacePage()==='commerce','operations sidebar switch');
+   await homeJS(`document.querySelector('#search').value='shell retained search';document.querySelector('#search').dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#commerce-open').click();document.querySelector('[data-commerce-page="overview"]').click();true`);await until(()=>api.getWorkspacePage()==='commerce','operations sidebar switch');
    await deskJS(`document.querySelector('[data-page="settings"]').click();const form=document.querySelector('#settings-form');form.elements.baseURL.value='http://127.0.0.1:9/unsaved-shell';form.dispatchEvent(new Event('input',{bubbles:true}));true`);
    await deskJS('window.commerce.showEnvironments()');assert.equal(view.getVisible(),false);assert.equal(view.webContents.isDestroyed(),false);assert.equal(await homeJS('document.querySelector("#search").value'),'shell retained search');
    await homeJS('window.isola.openCommerce()');assert.equal(api.getCommerceView(),view);assert.equal(await deskJS('document.querySelector("#settings-form").elements.baseURL.value'),'http://127.0.0.1:9/unsaved-shell');assert.equal(await deskJS('document.querySelector("#page-settings").hidden'),false);
    return {homeFilterPreserved:true,unsavedFormPreserved:true,noReload:true};
+  });
+  await check('workspace page navigation accepts only stored routes and preserves hidden environment drafts',async()=>{
+   const before=BrowserWindow.getAllWindows().length;
+   await api.showEnvironmentManager();await homeJS(`document.querySelector('#new').click();document.querySelector('#form').elements.name.value='unsaved workspace environment';true`);
+   for(const page of ['accounts','overview','inventory','plans','jobs','settings']){await homeJS(`window.isola.openCommerce(${JSON.stringify(page)})`);await until(()=>deskJS(`document.querySelector('#page-${page}').hidden===false`),'route '+page);assert.equal(api.getCommerceView(),view);}
+   await deskJS(`document.querySelector('#workspace-commerce-toggle').click();true`);assert.equal(await deskJS(`document.querySelector('#workspace-commerce-menu').hidden`),true);await homeJS(`window.isola.openCommerce('accounts')`);await until(()=>deskJS(`document.querySelector('#page-accounts').hidden===false`),'account center route');assert.equal(await deskJS(`document.querySelector('#workspace-commerce-menu').hidden`),false);
+   for(const page of ['',null,{},'../index.html','__proto__','https://outside.invalid/'])await assert.rejects(homeJS(`window.isola.openCommerce(${JSON.stringify(page)})`),/运营页面无效/);
+   assert.equal(api.getCommerceView(),view);assert.equal(BrowserWindow.getAllWindows().length,before);await api.showEnvironmentManager();assert.equal(await homeJS(`document.querySelector('#editor').hidden`),false);assert.equal(await homeJS(`document.querySelector('#form').elements.name.value`),'unsaved workspace environment');await homeJS(`document.querySelector('#cancel').click();true`);
+   return {allowedRoutes:6,invalidRoutesRejected:true,environmentDraftPreserved:true};
   });
   await check('operations content resizes with the manager and latest sidebar switch wins',async()=>{
    manager.setContentSize(1180,780);await until(()=>{const [width,height]=manager.getContentSize(),bounds=view.getBounds();return bounds.x===0&&bounds.y===0&&bounds.width===width&&bounds.height===height;},'full content view bounds');

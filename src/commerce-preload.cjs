@@ -2,6 +2,11 @@
 const {contextBridge, ipcRenderer} = require('electron');
 contextBridge.exposeInMainWorld('commerce', {
   showEnvironments: () => ipcRenderer.invoke('commerce-home'),
+  onPage: fn => {
+    if(typeof fn!=='function')return ()=>{};
+    const listener=(_event,page)=>{if(['overview','accounts','inventory','plans','jobs','settings'].includes(page))fn(page);};
+    ipcRenderer.on('commerce-page',listener);return ()=>ipcRenderer.removeListener('commerce-page',listener);
+  },
   state: () => ipcRenderer.invoke('commerce-state'),
   saveSettings: input => ipcRenderer.invoke('commerce-settings-save', input),
   connect: () => ipcRenderer.invoke('commerce-connect'),

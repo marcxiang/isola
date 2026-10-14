@@ -1,5 +1,8 @@
-const $ = s => document.querySelector(s), form = $('#form'), dialog = $('#editor');
-$('#commerce-open').onclick=()=>run(()=>window.isola.openCommerce());
+const $ = s => document.querySelector(s), form = $('#form'), editor = $('#editor');
+const isEditorOpen=()=>!editor.hidden;
+$('#commerce-open').onclick=()=>{const expanded=$('#commerce-open').getAttribute('aria-expanded')!=='true';$('#commerce-open').setAttribute('aria-expanded',String(expanded));$('#commerce-submenu').hidden=!expanded;};
+for(const item of document.querySelectorAll('[data-commerce-page]'))item.onclick=()=>run(()=>window.isola.openCommerce(item.dataset.commercePage));
+$('#editor-open-accounts').onclick=()=>run(()=>window.isola.openCommerce('accounts'));
 let profiles = [], selected = new Set(), runtimeInfo = {}, currentWindowType = 'normal';
 const profileWindowType=p=>p.windowType==='automation'?'automation':'normal';
 function toast(t) { $('#toast').textContent = t; $('#toast').style.display = 'block'; clearTimeout(window.toastTimer); window.toastTimer = setTimeout(() => $('#toast').style.display = 'none', 6500); }
@@ -10,14 +13,21 @@ function selection(){const visible=matches();$('#selection').textContent='已选
 function node(tag,cls,value){const element=document.createElement(tag);if(cls)element.className=cls;if(value!==undefined&&value!==null)element.textContent=String(value);return element;}
 function dateLabel(value){const date=new Date(value||'');return Number.isFinite(date.getTime())?date.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'尚未打开';}
 function hasProxyCheck(profile){const check=profile.proxyCheck;return typeof check?.ip==='string'&&/^[0-9a-f:.]{2,64}$/i.test(check.ip)&&Number.isFinite(new Date(check.checkedAt||'').getTime());}
+function activityCell(kind,status){
+ const fallback=kind==='vinted'?{state:'unbound',label:'未验证',detail:'尚未关联账号或核验当前登录。'}:{state:'idle',label:'未运行',detail:'当前没有运行中的自动化任务。'},value=status&&typeof status==='object'?status:fallback;
+ const cell=node('td',kind==='vinted'?'vinted-status-cell':'automation-status-cell'),badge=node('span','status-badge',value.label||fallback.label);badge.dataset.status=value.state||fallback.state;cell.append(badge);
+ if(value.detail)cell.append(node('div','status-detail',value.detail));
+ if(kind==='vinted'&&value.checkedAt&&Number.isFinite(new Date(value.checkedAt).getTime()))cell.append(node('div','status-checked-at','核验 '+dateLabel(value.checkedAt)));
+ cell.title=[value.label,value.detail,kind==='vinted'&&value.checkedAt?'核验时间：'+dateLabel(value.checkedAt):''].filter(Boolean).join('\n');return cell;
+}
 function menuPosition(details,menu){if(!details.open)return;for(const other of document.querySelectorAll('.more[open]'))if(other!==details)other.open=false;const rect=details.getBoundingClientRect();menu.style.left=Math.max(10,Math.min(innerWidth-186,rect.right-176))+'px';menu.style.top=Math.max(10,Math.min(rect.bottom+6,innerHeight-menu.offsetHeight-12))+'px';}
 function render(){
- const rows=$('#rows');rows.replaceChildren();$('#total').textContent=profiles.length;$('#running').textContent=profiles.filter(p=>p.status==='running'||p.running&&p.status!=='starting').length;$('#proxied').textContent=profiles.filter(p=>p.proxy?.type&&p.proxy.type!=='direct').length;
+ const rows=$('#rows'),automation=currentWindowType==='automation';rows.replaceChildren();document.querySelector('.environment-table').classList.toggle('has-automation-status',automation);for(const header of document.querySelectorAll('[data-automation-column]'))header.hidden=!automation;$('#total').textContent=profiles.length;$('#running').textContent=profiles.filter(p=>p.status==='running'||p.running&&p.status!=='starting').length;$('#proxied').textContent=profiles.filter(p=>p.proxy?.type&&p.proxy.type!=='direct').length;
  for(const type of ['normal','automation']){const tab=$('#window-type-'+type),active=type===currentWindowType;tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;$('#'+type+'-count').textContent=profiles.filter(p=>profileWindowType(p)===type).length;}$('#environment-list').setAttribute('aria-labelledby','window-type-'+currentWindowType);
  const group=$('#group-filter'),previous=group.value;group.replaceChildren(new Option('全部分组',''));for(const name of [...new Set(profiles.map(p=>p.group).filter(Boolean))].sort())group.add(new Option(name,name));group.value=previous;
  const visible=matches(),visibleIds=new Set(visible.map(p=>p.id)),categoryCount=profiles.filter(p=>profileWindowType(p)===currentWindowType).length;selected=new Set([...selected].filter(id=>visibleIds.has(id)));$('#visible-count').textContent=visible.length+' / '+categoryCount+' 个'+(currentWindowType==='automation'?'自动化窗口':'正常窗口');
  const checkedIPs=new Map();for(const profile of profiles)if(hasProxyCheck(profile)){const ip=profile.proxyCheck.ip.toLowerCase();checkedIPs.set(ip,(checkedIPs.get(ip)||0)+1);}
- if(!visible.length){const row=node('tr','empty-row'),cell=node('td'),message=node('div','empty',categoryCount?'没有找到匹配环境。试试调整搜索或筛选条件。':'这个分类还没有环境。点击「新建环境」，选择窗口用途并创建独立会话。');cell.colSpan=9;cell.append(message);row.append(cell);rows.append(row);}
+ if(!visible.length){const row=node('tr','empty-row'),cell=node('td'),message=node('div','empty',categoryCount?'没有找到匹配环境。试试调整搜索或筛选条件。':'这个分类还没有环境。点击「新建环境」，选择窗口用途并创建独立会话。');cell.colSpan=automation?11:9;cell.append(message);row.append(cell);rows.append(row);}
  for(const p of visible){
   const running=p.status==='running'||p.running===true,starting=p.status==='starting',proxy=p.proxy||{type:'direct'},row=node('tr','row'+(selected.has(p.id)?' selected':''));
   row.dataset.profileId=String(p.id);row.dataset.isolationId=String(p.isolationId||p.id);row.dataset.state=p.status||(running?'running':'closed');row.dataset.fingerprintMode=p.fingerprintMode||'custom';row.dataset.operatingSystem=p.operatingSystem||'native';row.dataset.windowType=profileWindowType(p);
@@ -39,7 +49,7 @@ function render(){
   const clear=button('清理浏览数据',async()=>{more.open=false;if(running||starting)throw Error('请先关闭环境');if(confirm('清理「'+p.name+'」的 Cookie、站点存储和缓存？此操作无法撤销，环境配置会保留。')){await window.isola.clear(p.id);toast('浏览数据已清理');}});
   const remove=button('删除环境',async()=>{more.open=false;if(running||starting)throw Error('请先关闭环境');if(confirm('删除「'+p.name+'」及其 Cookie、站点存储和缓存？此操作无法撤销。'))await window.isola.delete(p.id);},'danger-action');
   clear.disabled=remove.disabled=running||starting;clear.title=remove.title=running||starting?'请先关闭环境窗口。':'';
-  menu.append(duplicate,test,clear,remove);more.append(summary,menu);more.addEventListener('toggle',()=>menuPosition(more,menu));actions.append(more);actionCell.append(actions);row.append(checkCell,idCell,detail,groupCell,device,proxyCell,opened,notesCell,actionCell);rows.append(row);
+  menu.append(duplicate,test,clear,remove);more.append(summary,menu);more.addEventListener('toggle',()=>menuPosition(more,menu));actions.append(more);actionCell.append(actions);row.append(checkCell,idCell,detail);if(automation)row.append(activityCell('vinted',p.vintedStatus),activityCell('automation',p.automationStatus));row.append(groupCell,device,proxyCell,opened,notesCell,actionCell);rows.append(row);
  }
  selection();
 }
@@ -47,12 +57,14 @@ const osNames={native:'当前电脑',windows:'Windows',macos:'macOS',linux:'Linu
 const osDefaults={native:{osVersion:'',architecture:'x86'},windows:{osVersion:'11',architecture:'x86'},macos:{osVersion:'14.0',architecture:'arm'},linux:{osVersion:'6.8.0',architecture:'x86'},android:{osVersion:'14',architecture:'arm'},ios:{osVersion:'17.0',architecture:'arm'}};
 const osVersions={native:[],windows:['11','10'],macos:['15.0','14.0','13.0'],linux:['6.8.0','6.1.0'],android:['15','14','13'],ios:['18.0','17.0','16.0']};
 const fingerprintFields=['deviceModel','operatingSystem','osVersion','architecture','width','height','screenWidth','screenHeight','deviceScaleFactor','maxTouchPoints','hardwareConcurrency','language','timezone','ua','webRTCPolicy','fingerprintMode'];
-let previewSerial=0,previewTimer,deviceCatalog={};
+let previewSerial=0,previewTimer,deviceCatalog={},editorSession=0,proxyTestSerial=0,savePending=false;
 function previewRow(label,value){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=String(value??'跟随系统');$('#fingerprint-preview').append(dt,dd);}
 function renderFingerprintPreview(result,error){
  const mode=form.elements.fingerprintMode.value,os=form.elements.operatingSystem.value,summary=result?.summary||{};
  $('#fingerprint-device-title').textContent=mode==='native'?'当前电脑 · 原生':osNames[os]||os;
  $('#fingerprint-preview').replaceChildren();
+ previewRow('用途',form.elements.windowType.value==='automation'?'自动化窗口':'正常窗口');
+ const proxyType=form.elements.type.value;previewRow('代理',proxyType==='direct'?'使用系统网络':proxyType.toUpperCase()+' · '+(form.elements.host.value||'待填写主机')+(form.elements.port.value?':'+form.elements.port.value:''));
  if(runtimeInfo.chromium)previewRow('实际内核','Chromium '+runtimeInfo.chromium);
  if(runtimeInfo.platform)previewRow('宿主',({darwin:'macOS',win32:'Windows',linux:'Linux'}[runtimeInfo.platform]||runtimeInfo.platform)+(runtimeInfo.arch?' / '+runtimeInfo.arch:''));
  previewRow('系统',mode==='native'?'跟随当前电脑':(osNames[os]||os)+' '+form.elements.osVersion.value);
@@ -79,7 +91,7 @@ function renderFingerprintPreview(result,error){
 }
 function scheduleFingerprintPreview(){
  clearTimeout(previewTimer);const serial=++previewSerial;renderFingerprintPreview();
- previewTimer=setTimeout(async()=>{if(!dialog.open||typeof window.isola.fingerprintPreview!=='function')return;try{const result=await window.isola.fingerprintPreview(input());if(serial===previewSerial&&dialog.open)renderFingerprintPreview(result);}catch(error){if(serial===previewSerial&&dialog.open)renderFingerprintPreview(null,error.message.replace(/^Error invoking remote method '[^']+': Error: /,''));}},180);
+ previewTimer=setTimeout(async()=>{if(!isEditorOpen()||typeof window.isola.fingerprintPreview!=='function')return;try{const settings=Object.fromEntries(fingerprintFields.map(key=>[key,form.elements.namedItem(key).value]));const result=await window.isola.fingerprintPreview(settings);if(serial===previewSerial&&isEditorOpen())renderFingerprintPreview(result);}catch(error){if(serial===previewSerial&&isEditorOpen())renderFingerprintPreview(null,error.message.replace(/^Error invoking remote method '[^']+': Error: /,''));}},180);
 }
 function updateVersionList(){const os=form.elements.operatingSystem.value;$('#os-versions').replaceChildren(...(osVersions[os]||[]).map(value=>new Option(value,value)));form.elements.osVersion.placeholder=os==='native'?'跟随当前电脑':'例如 '+(osDefaults[os]?.osVersion||'14');}
 function modeChanged(){
@@ -107,23 +119,32 @@ form.elements.operatingSystem.onchange=()=>{
 };
 $('#device-preset').onchange=e=>applyDevicePreset(e.target.value);
 for(const key of fingerprintFields.filter(key=>!['fingerprintMode','operatingSystem'].includes(key)))form.elements.namedItem(key).addEventListener('input',()=>{$('#device-preset').value='keep';scheduleFingerprintPreview();});
+for(const key of ['windowType','type','host','port'])form.elements.namedItem(key).addEventListener('input',scheduleFingerprintPreview);
+const editorFields=$('#editor-fields'),editorAnchors=[...document.querySelectorAll('#editor-nav a')];
+function updateEditorNavigation(){const top=editorFields.getBoundingClientRect().top;let active='editor-basic';for(const section of editorFields.querySelectorAll('.editor-section'))if(section.getBoundingClientRect().top<=top+42)active=section.id;for(const anchor of editorAnchors){if(anchor.getAttribute('href')==='#'+active)anchor.setAttribute('aria-current','location');else anchor.removeAttribute('aria-current');}}
+for(const anchor of editorAnchors)anchor.onclick=event=>{event.preventDefault();if(!isEditorOpen())return;const section=document.getElementById(anchor.getAttribute('href').slice(1));if(!section||!editorFields.contains(section))return;editorFields.scrollTo({top:Math.max(0,section.getBoundingClientRect().top-editorFields.getBoundingClientRect().top+editorFields.scrollTop-20),behavior:'instant'});updateEditorNavigation();};
+editorFields.addEventListener('scroll',updateEditorNavigation,{passive:true});
+function openEditor(){editor.hidden=false;$('#environment-list-page').hidden=true;document.body.classList.add('editing-environment');editorFields.scrollTop=0;$('#editor-summary').scrollTop=0;updateEditorNavigation();$('#heading').focus({preventScroll:true});scheduleFingerprintPreview();}
+function closeEditor(saved=false){if(savePending&&!saved){toast('正在保存环境，请稍候。');return;}const wasOpen=isEditorOpen();editorSession++;proxyTestSerial++;clearTimeout(previewTimer);previewSerial++;editor.hidden=true;$('#environment-list-page').hidden=false;document.body.classList.remove('editing-environment');form.reset();form.elements.id.value='';form.elements.password.value='';form.elements.username.value='';form.elements.clearPassword.checked=false;$('#test-result').textContent='';$('#test').disabled=false;if(wasOpen)$('#new').focus({preventScroll:true});}
+function setSavePending(pending){savePending=pending;form.querySelector('[type=submit]').disabled=pending;for(const id of ['new','cancel','editor-cancel','environment-home'])$('#'+id).disabled=pending;}
 function edit(p) {
+ if(savePending){toast('环境正在保存，请稍候。');return;}editorSession++;proxyTestSerial++;clearTimeout(previewTimer);previewSerial++;$('#test').disabled=false;
  form.reset();form.elements.id.value='';for(const [k,v] of Object.entries(p||{}))if(k!=='proxy'&&form.elements.namedItem(k)){const field=form.elements.namedItem(k);if(field.tagName==='SELECT'&&![...field.options].some(option=>option.value===String(v)))field.add(new Option(String(v),String(v)));field.value=v;}
  form.elements.windowType.value=p?profileWindowType(p):currentWindowType;
  for(const [k,v] of Object.entries(p?.proxy||{}))if(k!=='password'&&form.elements.namedItem(k))form.elements.namedItem(k).value=k==='port'&&!v?'':v;
  if(p&&!p.fingerprintMode)form.elements.fingerprintMode.value='custom';if(p&&!p.screenWidth)form.elements.screenWidth.value=p.width;if(p&&!p.screenHeight)form.elements.screenHeight.value=p.height;
- form.elements.password.placeholder=p?.proxy.hasPassword?'已保存，留空保持不变':'未设置';$('#heading').textContent=p?'编辑环境':'新建环境';$('#test-result').textContent='';$('#device-preset').value='keep';modeChanged();dialog.showModal();scheduleFingerprintPreview();
+ form.elements.password.placeholder=p?.proxy.hasPassword?'已保存，留空保持不变':'未设置';$('#heading').textContent=p?'编辑环境':'新建环境';editor.dataset.mode=p?'edit':'create';$('#test-result').textContent='';$('#device-preset').value='keep';modeChanged();openEditor();
 }
 function input(){const d=Object.fromEntries(new FormData(form));for(const key of fingerprintFields)d[key]=form.elements.namedItem(key).value;return {...d,clearPassword:form.elements.clearPassword.checked,proxy:{type:d.type,host:d.host,port:d.port,username:d.username,password:d.password}};}
 function selectWindowType(type){if(!['normal','automation'].includes(type))return;currentWindowType=type;selected.clear();render();}
 for(const type of ['normal','automation']){const tab=$('#window-type-'+type);tab.onclick=()=>selectWindowType(type);tab.onkeydown=e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();const next=e.key==='Home'?'normal':e.key==='End'?'automation':type==='normal'?'automation':'normal';selectWindowType(next);$('#window-type-'+next).focus();};}
-$('#new').onclick = () => edit(); $('#cancel').onclick = () => dialog.close(); $('#search').oninput = render; $('#group-filter').onchange = render; $('#status-filter').onchange = render;
+$('#new').onclick = () => edit();for(const id of ['cancel','editor-cancel','environment-home'])$('#'+id).onclick=()=>closeEditor();document.addEventListener('keydown',event=>{if(event.key==='Escape'&&isEditorOpen()){event.preventDefault();closeEditor();}});$('#search').oninput = render; $('#group-filter').onchange = render; $('#status-filter').onchange = render;
 $('#select-all').onchange = e => { for (const p of matches()) e.target.checked ? selected.add(p.id) : selected.delete(p.id); render(); };
-form.onsubmit = e => { e.preventDefault(); run(async () => { const submit = form.querySelector('[type=submit]'); submit.disabled = true; try { const value=input();await window.isola.save(value);selectWindowType(value.windowType);dialog.close();toast('环境已保存'); } finally { submit.disabled = false; } }); };
-$('#test').onclick = () => run(async () => { $('#test').disabled = true; $('#test-result').textContent = '检测中…'; try { const r = await window.isola.test(input()); $('#test-result').textContent = `出口 IP：${r.ip} · ${r.ms} ms`; } catch (e) { $('#test-result').textContent = '检测失败：' + e.message; } finally { $('#test').disabled = false; } });
+form.onsubmit = e => {e.preventDefault();if(savePending||!isEditorOpen())return;const session=editorSession;run(async()=>{const value=input();setSavePending(true);try{await window.isola.save(value);selectWindowType(value.windowType);if(session===editorSession&&isEditorOpen())closeEditor(true);toast('环境已保存');}finally{value.password='';value.proxy.password='';setSavePending(false);}});};
+$('#test').onclick=()=>run(async()=>{const ticket=++proxyTestSerial,session=editorSession;$('#test').disabled=true;$('#test-result').textContent='检测中…';const value=input();try{const result=await window.isola.test(value);if(ticket===proxyTestSerial&&session===editorSession&&isEditorOpen())$('#test-result').textContent=`出口 IP：${result.ip} · ${result.ms} ms`;}catch(error){if(ticket===proxyTestSerial&&session===editorSession&&isEditorOpen())$('#test-result').textContent='检测失败：'+error.message;}finally{value.password='';value.proxy.password='';if(ticket===proxyTestSerial)$('#test').disabled=false;}});
 for (const [id, action] of [['batch-launch', 'launch'], ['batch-stop', 'stop']]) $("#" + id).onclick = () => run(async () => { const ids=matches().filter(p=>selected.has(p.id)).map(p=>p.id);if (!ids.length) throw Error('请先选择当前列表中的环境'); $("#" + id).disabled = true; try { const failures = await window.isola.batch(ids, action); toast(failures.length ? failures.map(f => f.name + '：' + f.error).join('；') : '批量操作完成'); } finally { $("#" + id).disabled = false; } });
 $('#export').onclick = () => run(async () => { const n = await window.isola.export([...selected]); if (n !== undefined) toast(`已导出 ${n} 个环境配置，不包含凭据和浏览数据`); });
 $('#import').onclick = () => run(async () => { const n = await window.isola.import(); if (n !== undefined) toast(`已导入 ${n} 个环境，请重新填写代理凭据`); });
 window.isola.onChange(p => { profiles = p; render(); });
 async function loadDeviceCatalog(){if(typeof window.isola.fingerprintCatalog!=='function')return;const catalog=await window.isola.fingerprintCatalog();deviceCatalog=catalog.devices||{};const group=document.createElement('optgroup');group.label='手机型号预设';for(const key of ['pixel7','galaxy-s23','iphone13','iphone14pro']){const preset=deviceCatalog[key];if(preset)group.append(new Option(preset.label,key));}$('#device-preset').append(group);}
-run(async () => { profiles = await window.isola.list(); render(); const info = await window.isola.info();runtimeInfo=info;$('#runtime-engine').textContent='Chromium '+info.chromium;render();if(dialog.open)scheduleFingerprintPreview(); await loadDeviceCatalog(); $('#app-version').textContent = `v${info.version} / ${{darwin:'macOS',win32:'Windows',linux:'Linux'}[info.platform]||info.platform}`; $('#app-info').textContent = `Isola ${info.version} · Chromium ${info.chromium} · ${info.platform} · 本地数据：${info.dataPath}`; });
+run(async () => { profiles = await window.isola.list(); render(); const info = await window.isola.info();runtimeInfo=info;$('#runtime-engine').textContent='Chromium '+info.chromium;render();if(isEditorOpen())scheduleFingerprintPreview(); await loadDeviceCatalog(); $('#app-version').textContent = `v${info.version} / ${{darwin:'macOS',win32:'Windows',linux:'Linux'}[info.platform]||info.platform}`; $('#app-info').textContent = `Isola ${info.version} · Chromium ${info.chromium} · ${info.platform} · 本地数据：${info.dataPath}`; });

@@ -16,7 +16,7 @@ module.exports=async function(api,check){
   });
   await check('mobile configuration persists through the real manager save and edit bridge',async()=>{
    await js(`document.querySelector('#form [name=name]').value='QA Android editor';document.querySelector('#form').requestSubmit();`);
-   await waitFor(`!document.querySelector('#editor').open`);profile=api.list().find(row=>row.name==='QA Android editor');assert.ok(profile);assert.equal(profile.operatingSystem,'android');assert.equal(profile.deviceScaleFactor,2.625);assert.equal(profile.screenWidth,412);assert.equal(profile.deviceModel,'Pixel 7');assert.equal(profile.maxTouchPoints,5);assert.equal(profile.hardwareConcurrency,8);
+   await waitFor(`document.querySelector('#editor').hidden`);profile=api.list().find(row=>row.name==='QA Android editor');assert.ok(profile);assert.equal(profile.operatingSystem,'android');assert.equal(profile.deviceScaleFactor,2.625);assert.equal(profile.screenWidth,412);assert.equal(profile.deviceModel,'Pixel 7');assert.equal(profile.maxTouchPoints,5);assert.equal(profile.hardwareConcurrency,8);
    await js(`Array.from(document.querySelectorAll('.row')).find(row=>row.textContent.includes('QA Android editor')).querySelectorAll('.actions>button')[1].click()`);
    assert.equal(await js(`document.querySelector('#form [name=operatingSystem]').value`),'android');assert.equal(await js(`document.querySelector('#form [name=deviceScaleFactor]').value`),'2.625');await js(`document.querySelector('#cancel').click()`);
   });
@@ -41,10 +41,10 @@ module.exports=async function(api,check){
     assert.equal(await js(`document.querySelector('#form [name=${scenario.field}]').disabled`),false,scenario.field+' must be editable after main-process validation rejects dormant data');
     assert.equal(await js(`document.querySelector('#form [name=fingerprintMode]').value`),'native');
     await js(`(()=>{const field=document.querySelector('#form [name=${scenario.field}]');field.value=${JSON.stringify(scenario.corrected)};field.dispatchEvent(new Event('input'));document.querySelector('#form').requestSubmit();})()`);
-    await waitFor(`!document.querySelector('#editor').open`);
+    await waitFor(`document.querySelector('#editor').hidden`);
     const saved=api.list().find(row=>row.name===name);assert.ok(saved);correctionProfiles.push(saved);assert.equal(saved.fingerprintMode,'native');assert.equal(saved.operatingSystem,scenario.preset);assert.equal(saved[scenario.field],scenario.corrected);
    }
    return {nativeModePreserved:true,dormantSettingsCorrectable:['Windows 12 → 11','Android x86 → ARM']};
   });
- }finally{await js(`document.querySelector('#editor').close()`);for(const saved of correctionProfiles)await api.deleteProfile(saved.id);if(profile)await api.deleteProfile(profile.id);}
+ }finally{await js(`if(!document.querySelector('#editor').hidden)document.querySelector('#cancel').click()`);for(const saved of correctionProfiles)await api.deleteProfile(saved.id);if(profile)await api.deleteProfile(profile.id);}
 };

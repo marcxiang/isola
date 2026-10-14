@@ -10,8 +10,11 @@
 <body>
   <aside class="sidebar">
     <div class="brand"><span>◈</span><div><b>Isola</b><small>本机浏览器工作空间</small></div></div>
-    <nav aria-label="运营导航">
+    <nav class="workspace-navigation" aria-label="运营导航">
       <button type="button" id="workspace-environments" class="nav-item"><span>▦</span> 环境管理</button>
+      <button type="button" id="workspace-commerce-toggle" class="nav-item workspace-commerce-toggle" aria-expanded="true" aria-controls="workspace-commerce-menu"><span>◎</span> 账号与运营 <span class="nav-arrow" aria-hidden="true">⌄</span></button>
+    </nav>
+    <nav id="workspace-commerce-menu" class="sidebar-submenu" aria-label="账号与运营">
       <button type="button" data-page="overview" class="nav-item active" aria-current="page"><span>▦</span> 商品运营</button>
       <button type="button" data-page="accounts" class="nav-item"><span>◎</span> 账号中心 <b id="nav-account-count" hidden>0</b></button>
       <button type="button" data-page="plans" class="nav-item"><span>▤</span> 上架计划</button>

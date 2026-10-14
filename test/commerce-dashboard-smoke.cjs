@@ -92,7 +92,7 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       changed.jobs[0].state='completed';await update(changed);assert.equal(await js(`document.querySelector('[data-plan-id="review"]').dataset.operation`),'target_reached');
       changed.faulted=true;await update(changed);assert.equal(await js(`document.querySelector('[data-plan-id="listed"]').dataset.operation`),'attention');
       await update(fixture);window.setSize(1050,760);await frames();
-      assert.equal(await js('document.documentElement.scrollWidth<=innerWidth'),true);assert.deepEqual(errors,[]);
+      const width=await js('({viewport:innerWidth,total:document.documentElement.scrollWidth,overflow:Array.from(document.querySelectorAll("body *")).filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,12).map(e=>({tag:e.tagName,id:e.id,classes:e.className,right:e.getBoundingClientRect().right,width:e.getBoundingClientRect().width}))})');assert.equal(width.total<=width.viewport,true,JSON.stringify(width));assert.deepEqual(errors,[]);
       return {fulfillmentBeforeTarget:true,faultedStopsExecution:true,minimumWidthFits:true};
     });
   }finally{window.destroy();fs.rmSync(dir,{recursive:true,force:true});}

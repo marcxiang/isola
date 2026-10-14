@@ -6,6 +6,7 @@ const ORIGIN='https://www.vinted.fr',FORM_URL=ORIGIN+'/items/new';
 const VERSION=1,MAX_PROOF_AGE_MS=15000,MAX_RECEIPT_AGE_MS=30000;
 const FIELD_KEYS=Object.freeze(['title','description','categoryPath','priceCents','condition','brand','color','parcel']);
 const issuedProofs=new WeakSet();
+const reviewedOrigins=new WeakSet();
 const clone=value=>JSON.parse(JSON.stringify(value));
 const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
 const digest=value=>createHash('sha256').update(JSON.stringify(canonical(value))??'undefined').digest('hex');
@@ -121,11 +122,24 @@ function validatePublicationReceipt(record,evidence,{now=Date.now(),freshness=tr
  const seller=account(evidence.seller,facts.profileId,{verified:true});exact(seller,facts.account,'实际卖家');
  if(evidence.ownedByCurrentAccount!==true)fail('PUBLICATION_RECEIPT_UNVERIFIED','尚未确认刊登属于当前账号');
  const identity=listingIdentity(evidence.listingId,evidence.url),origin=object(evidence.origin,'原提交归属');
- if(origin.kind!=='observed_submission_navigation'||origin.submissionId!==record.id||origin.formDocumentKey!==facts.documentKey)fail('PUBLICATION_RECEIPT_UNATTRIBUTED','此刊登尚未与原提交建立可验证关联');
+ const reviewed=origin.kind==='operator_reviewed_listing';
+ if((origin.kind!=='observed_submission_navigation'&&!reviewed)||origin.submissionId!==record.id||origin.formDocumentKey!==facts.documentKey)fail('PUBLICATION_RECEIPT_UNATTRIBUTED','此刊登尚未与原提交建立可验证关联');
+ if(reviewed){
+  if(!reviewedOrigins.has(origin))fail('PUBLICATION_RECEIPT_UNATTRIBUTED','操作员关联必须来自主进程的一次性核对');
+  string(origin.reviewId,'核对编号');string(origin.listingDocumentKey,'详情页面编号');string(origin.tabId,'详情标签编号');
+  fresh(origin.reviewedAt,now,MAX_RECEIPT_AGE_MS);
+ }
  if(evidence.priceKind!=='item'||evidence.priceCents!==facts.fields.priceCents||evidence.currency!==facts.currency)fail('PUBLICATION_RECEIPT_INVALID','实际单品售价或币种与计划不一致');
  exact(evidence.title,facts.fields.title,'实际刊登标题');
  if(evidence.photos?.verified!==true||evidence.photos?.count!==facts.photos.count||evidence.photos?.signature!==facts.photos.signature)fail('PUBLICATION_RECEIPT_INVALID','实际刊登照片与本次上传不一致');
- return {...identity,verified:true,profileId:facts.profileId,memberId:facts.account.memberId,priceCents:facts.fields.priceCents,currency:facts.currency,title:facts.fields.title,imageCount:facts.photos.count,photoSignature:facts.photos.signature,observedAt:evidence.observedAt};
+ return {...identity,verified:true,profileId:facts.profileId,memberId:facts.account.memberId,priceCents:facts.fields.priceCents,currency:facts.currency,title:facts.fields.title,imageCount:facts.photos.count,photoSignature:facts.photos.signature,observedAt:evidence.observedAt,...(reviewed?{origin:clone(origin)}:{})};
+}
+
+// Main-only: called after consuming a review capability and re-reading the same
+// listing document. A renderer-created origin can never pass the WeakSet check.
+function operatorReviewedEvidence(record,evidence,{reviewId,documentKey,tabId},now=Date.now()){
+ const origin=Object.freeze({kind:'operator_reviewed_listing',submissionId:record.id,formDocumentKey:record.proof.facts.documentKey,reviewId,listingDocumentKey:documentKey,tabId,reviewedAt:new Date(now).toISOString()});
+ reviewedOrigins.add(origin);return {...evidence,origin};
 }
 
 function validateSaleClosure(record,evidence,{now=Date.now(),freshness=true}={}){
@@ -153,6 +167,7 @@ function restorePublicationState(input,{now=Date.now()}={}){
    const receipt=object(record.receipt,'已发布回执'),facts=record.proof.facts;listingIdentity(receipt.listingId,receipt.url);
    if(receipt.verified!==true||receipt.profileId!==facts.profileId||receipt.memberId!==facts.account.memberId||receipt.priceCents!==facts.fields.priceCents||receipt.currency!==facts.currency||receipt.title!==facts.fields.title||receipt.imageCount!==facts.photos.count||receipt.photoSignature!==facts.photos.signature)fail('PUBLICATION_CORRUPT','已发布回执与提交记录不一致');
    if(timestamp(receipt.observedAt,'刊登结果')<Date.parse(record.submittedAt))fail('PUBLICATION_CORRUPT','刊登结果早于本次提交');
+   if(receipt.origin){const o=object(receipt.origin,'关联来源');if(o.kind!=='operator_reviewed_listing'||o.submissionId!==record.id||o.formDocumentKey!==facts.documentKey)fail('PUBLICATION_CORRUPT','操作员关联来源无效');for(const key of ['reviewId','listingDocumentKey','tabId'])string(o[key],key);if(timestamp(o.reviewedAt,'关联核对')<Date.parse(record.submittedAt)||Math.abs(Date.parse(o.reviewedAt)-Date.parse(receipt.observedAt))>MAX_RECEIPT_AGE_MS)fail('PUBLICATION_CORRUPT','操作员关联时间无效');}
   }else if(record.receipt)fail('PUBLICATION_CORRUPT','未核对完成的刊登含有完成回执');
   if(record.closedSale){validateSaleClosure(record,record.closedSale,{freshness:false});if(orders.has(record.closedSale.orderId))fail('PUBLICATION_CORRUPT','成交编号重复关联刊登');orders.add(record.closedSale.orderId);}
   const cycle=digest([record.proof.facts.planId,record.proof.facts.cycle]);
@@ -224,8 +239,9 @@ class PublicationJournal{
   if(error&&this.get(id).state!=='published')fail('PUBLICATION_UNKNOWN_RESULT','原发布动作结果尚未确认，请只读核对，不能重试点击',true);
   return this.get(id);
  }
- reconcile(id,evidence){
+ reconcile(id,evidence,{guard=()=>{}}={}){
   return this._atomic(state=>{
+   guard();
    const record=state.submissions.find(record=>record.id===id);if(!record)fail('PUBLICATION_NOT_FOUND','找不到原刊登提交记录');
    if(!['dispatching','uncertain','published'].includes(record.state)||record.attemptCount!==1)fail('PUBLICATION_NOT_SUBMITTED','当前记录尚未提交，不能认定已经刊登');
    const receipt=validatePublicationReceipt(record,evidence,{now:this._now()});
@@ -245,4 +261,4 @@ class PublicationJournal{
  }
 }
 
-module.exports={buildPublicationProof,validatePublicationReceipt,restorePublicationState,PublicationJournal,FIELD_KEYS,FORM_URL,MAX_PROOF_AGE_MS,MAX_RECEIPT_AGE_MS};
+module.exports={buildPublicationProof,validatePublicationReceipt,operatorReviewedEvidence,restorePublicationState,PublicationJournal,FIELD_KEYS,FORM_URL,MAX_PROOF_AGE_MS,MAX_RECEIPT_AGE_MS};

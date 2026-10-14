@@ -17,7 +17,7 @@ document.querySelector('#save').onclick=()=>fixture.saves++;document.querySelect
 module.exports=async function photoTransportSmoke(api,check){
   let profile,w,session,dir;
   try{
-    dir=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'isola-photo-electron-')));
+    dir=require('node:fs').realpathSync(await fs.mkdtemp(path.join(os.tmpdir(),'isola-photo-electron-')));
     const jpeg=nativeImage.createFromBitmap(Buffer.from([0x20,0x40,0x90,0xff,0x20,0x40,0x90,0xff,0x20,0x40,0x90,0xff,0x20,0x40,0x90,0xff]),{width:2,height:2}).toJPEG(85),file=path.join(dir,'fixture.jpg');await fs.writeFile(file,jpeg);
     profile=api.saveProfile({name:'QA local photo transport',url:FORM,fingerprintMode:'native',width:1180,height:900});session=api.sesFor(profile);
     session.protocol.handle('https',request=>{const route=new URL(request.url).pathname;return route==='/items/new'?new Response(html,{headers:{'content-type':'text/html; charset=utf-8'}}):/^\/fixture-photo\/\d+\.jpg$/.test(route)?new Response(jpeg,{headers:{'content-type':'image/jpeg'}}):new Response('Not found',{status:404});});

@@ -1,4 +1,5 @@
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
 const path = require('node:path');
 const {createHash} = require('node:crypto');
 const {problem} = require('./commerce-engine.cjs');
@@ -27,7 +28,8 @@ async function verifyFile(file) {
   if (!file || typeof file.path !== 'string' || !path.isAbsolute(file.path) || file.path.includes('\0') || !/\.jpe?g$/i.test(file.path) || !/^[a-f0-9]{64}$/i.test(file.sha256 || '')) throw problem('PHOTO_MANIFEST_INVALID','照片清单必须包含绝对 JPEG 路径和 SHA-256');
   try {
   const stat = await fs.lstat(file.path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 4 || stat.size > MAX_BYTES || await fs.realpath(file.path) !== file.path) throw problem('PHOTO_MANIFEST_INVALID','照片文件类型、路径或大小无效');
+  const realPath=process.platform==='win32'?fsSync.realpathSync(file.path):await fs.realpath(file.path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 4 || stat.size > MAX_BYTES || realPath !== file.path) throw problem('PHOTO_MANIFEST_INVALID','照片文件类型、路径或大小无效');
   const bytes = await fs.readFile(file.path);
   if (bytes.length !== stat.size || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff || bytes.at(-2) !== 0xff || bytes.at(-1) !== 0xd9 || createHash('sha256').update(bytes).digest('hex') !== file.sha256.toLowerCase()) throw problem('PHOTO_HASH_MISMATCH','照片内容与已准备的 JPEG 清单不一致');
   return Object.freeze({path:file.path,sha256:file.sha256.toLowerCase(),bytes:bytes.length,...(Number.isSafeInteger(file.width)&&file.width>0?{width:file.width}:{}),...(Number.isSafeInteger(file.height)&&file.height>0?{height:file.height}:{})});

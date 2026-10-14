@@ -10,6 +10,7 @@ const { VintedAdapter } = require('./vinted-adapter.cjs');
 const { VintedAccount } = require('./vinted-account.cjs');
 const commercePreparation = require('./commerce-preflight.cjs');
 const {inspectPublication,submitPublication}=require('./commerce-publication-service.cjs');
+const associationService=require('./commerce-association-service.cjs').createAssociationService();
 const {createPhotoService}=require('./commerce-photo-service.cjs');
 const { SKUDeskClient } = require('./sku-desk.cjs');
 const { RequestGate } = require('./sku-transport.cjs');
@@ -233,10 +234,12 @@ function register() {
   handle('batch', async (ids, action) => { if (!Array.isArray(ids) || ids.length > 100 || !['launch', 'stop'].includes(action)) throw Error('批量操作无效'); const failures = []; for (const id of new Set(ids)) { try { if (action === 'launch') await launch(id); else windows.get(id)?.close(); } catch (e) { failures.push({ name: profiles.find(p => p.id === id)?.name || id, error: e.message }); } } return failures; });
   handle('export', async ids => { const rows = ids?.length ? profiles.filter(p => ids.includes(p.id)) : profiles; const r = await dialog.showSaveDialog(manager, { defaultPath: 'Isola-profiles.json', filters: [{ name: 'JSON 配置', extensions: ['json'] }] }); if (r.canceled) return; fs.writeFileSync(r.filePath, JSON.stringify(exportProfiles(rows), null, 2), { mode: 0o600 }); return rows.length; });
   handle('import', async () => { const r = await dialog.showOpenDialog(manager, { filters: [{ name: 'JSON 配置', extensions: ['json'] }], properties: ['openFile'] }); if (r.canceled) return; if (fs.statSync(r.filePaths[0]).size > 2 * 1024 * 1024) throw Error('配置文件不能超过 2 MB'); const rows = importProfiles(JSON.parse(fs.readFileSync(r.filePaths[0], 'utf8'))); const before = profiles; profiles = [...profiles, ...rows]; try { save(); } catch (e) { profiles = before; throw e; } notify(); return rows.length; });
-  handle('info', () => ({ version: app.getVersion(), chromium: process.versions.chrome, platform: process.arch, dataPath: app.getPath('userData') }));
+  handle('info', () => ({ version: app.getVersion(), chromium: process.versions.chrome, platform: process.platform, arch: process.arch, dataPath: app.getPath('userData') }));
   handle('commerce-open',openCommerce);
   const desk=(name,fn)=>ipcMain.handle(name,(e,...args)=>{if(!commerceWindow||commerceWindow.isDestroyed()||e.sender!==commerceWindow.webContents)throw Error('无权访问运营工作台');return fn(ensureCommerce(),...args);});
   desk('commerce-publication-inspect',(c,id)=>inspectPublication(c,id));
+  desk('commerce-published-inspect',(c,id)=>associationService.inspect(c,id));
+  desk('commerce-published-associate',(c,id,token)=>associationService.associate(c,id,token));
   desk('commerce-publication-submit',(c,id)=>submitPublication(c,id,{beforeSubmit:plan=>{const w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}}));
   desk('commerce-preflight',(c,id)=>commercePreparation.preflight(c,id));desk('commerce-prepare-draft',(c,id)=>commercePreparation.prepareDraft(c,id,{beforeFields:plan=>{const w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}}));
   desk('commerce-account-inspect',(c,id)=>c.configure(async(signal,guard)=>{

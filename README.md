@@ -1,19 +1,19 @@
 # Isola
 
-Isola is an experimental macOS browser built with Electron. It provides isolated browsing environments, proxy configuration, visible AI page control, and a supplier operations workbench.
+Isola is an experimental macOS and Windows browser built with Electron. It provides isolated browsing environments, proxy configuration, visible AI page control, and a supplier operations workbench.
 
-Isola 是一个基于 Electron 的 macOS 浏览器项目，支持独立浏览器环境、代理配置、可见的 AI 页面控制和货盘运营工作台。
+Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独立浏览器环境、代理配置、可见的 AI 页面控制和货盘运营工作台。
 
 ## Project status / 当前状态
 
-The current development version is **0.5.3-dev.1**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. A real test item has now been published once at €5. Its local publication record remains uncertain because Vinted redirected to the owner profile; receipt association is the next unfinished integration. This checkpoint also saves the reader, projection and association UI under development. It is not a completed unattended commerce system.
+The current development version is **0.5.3-dev.2**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. One real test item was published at €5 using 0.5.2. Operator-reviewed receipt association is now connected through the main process, with expiring single-use capabilities, a fresh detail read and one full database commit. It still requires matching photo evidence and live validation. It is not a completed unattended commerce system.
 
 - Environment management, persistent Chromium sessions, proxy configuration, AI click/scroll feedback, supplier catalog synchronization and listing plans are implemented.
 - Listing fields, photo upload and one guarded manual publication have been exercised on Vinted France. The live item was checked visually; application receipt association, buyer messages, offers, shipping labels and real supplier purchases still need end-to-end validation.
 - Supplier photo claims persist their request identity and receipt, download and validate image files, and expose previews in the workbench. Uploads are bound to the current profile and page; uncertain results are checked without selecting the files again. The France new-item page has received the test photo successfully.
 - The commerce adapter still blocks unattended business actions. Do not remove this guard merely to make the workflow run.
 
-商品销售分布、账号核验和照片流程已接入；真实法国站 TEST 商品已按 5 欧元成功发布一次。运营台仍保留待核对记录，禁止重复发布；回执关联正在开发。消息、报价、面单及采购流程尚未跑通。办公室请先看 [HANDOFF.md](HANDOFF.md)，版本记录见 [CHANGELOG.md](CHANGELOG.md)，技术说明见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+商品销售分布、账号核验和照片流程已接入；真实法国站 TEST 商品已按 5 欧元成功发布一次。原刊登关联后端现已接通，但原电脑的 TEST 状态仍待现场核对，禁止重复发布。消息、报价、面单及采购流程尚未跑通。办公室请先看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
 
 ## Features / 功能
 
@@ -27,7 +27,7 @@ The current development version is **0.5.3-dev.1**. The multi-account operations
 
 ## Run locally / 本地开发
 
-Use macOS and **Node.js 24** (the locked build dependencies require at least Node.js 22.12.0).
+Use macOS or Windows and **Node.js 24**.
 
 ```sh
 git clone https://github.com/marcxiang/isola.git
@@ -54,7 +54,13 @@ Electron tests require a desktop session; network tests start local servers. The
 npm run package
 ```
 
-The packaging script targets macOS Apple Silicon by default. For an Intel build:
+The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). Windows:
+
+```sh
+npm run package:windows
+```
+
+The portable Windows folder is `dist/Isola-win32-x64`. Extract the entire distributed ZIP, then open `Isola.exe`; keep its DLLs and resource folders together. See [WINDOWS.md](WINDOWS.md). For an Intel Mac build:
 
 ```sh
 ISOLA_ARCH=x64 npm run package
@@ -64,7 +70,7 @@ Intel builds have not been tested on an Intel Mac. Development builds are not Ap
 
 ## Data and limits / 数据与边界
 
-- Application data lives in `~/Library/Application Support/Isola/`. Do not commit that directory: it contains browsing sessions, profile configuration and commerce state.
+- Application data lives in `~/Library/Application Support/Isola/` on macOS and `%APPDATA%\Isola\` on Windows. Do not commit that directory: it contains browsing sessions, profile configuration and commerce state. Windows photo files inherit the user-data directory ACL; POSIX mode bits are checked only on POSIX systems. Both platforms verify file type, link identity and JPEG hashes.
 - Stored credentials use Electron `safeStorage`; encrypted values are not a portable cross-machine credential backup. Reconfigure credentials and log in on a new computer.
 - The application does not include a modified Chromium engine and does not guarantee undetectable automation or bypass website security checks. Fingerprint diagnostics report observations, not universal pass/fail certification.
 - Background work requires the application, its environments, a wakeful computer and network connectivity. Cross-device business-state synchronization and distributed task locking are not implemented.

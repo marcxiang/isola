@@ -168,7 +168,7 @@ module.exports = async function commerceSmoke(api, check) {
       wrongWindow=new BrowserWindow({show:false,width:400,height:300,webPreferences:{preload:path.resolve(__dirname,'../src/commerce-preload.cjs'),contextIsolation:true,sandbox:true,nodeIntegration:false}});
       await wrongWindow.loadURL('about:blank');
       assert.equal(await wrongWindow.webContents.executeJavaScript('typeof window.commerce.state'),'function');
-      for(const method of ['state','runOnce','preflight','prepareDraft','openListing','openActiveListing','inspectAccount','inspectPublication','submitPublication','inspectPhotos','preparePhotos','photoPreview','uploadPhotos'])await assert.rejects(wrongWindow.webContents.executeJavaScript(`window.commerce.${method}()`),/无权访问运营工作台/);
+      for(const method of ['state','runOnce','preflight','prepareDraft','openListing','openActiveListing','inspectAccount','inspectPublication','submitPublication','inspectPublishedListing','associatePublishedListing','inspectPhotos','preparePhotos','photoPreview','uploadPhotos'])await assert.rejects(wrongWindow.webContents.executeJavaScript(`window.commerce.${method}()`),/无权访问运营工作台/);
       await assert.rejects(wrongWindow.webContents.executeJavaScript(`window.commerce.saveSettings({baseURL:'http://127.0.0.1:9',clearToken:true})`),/无权访问运营工作台/);
       assert.equal(engine.db.settings.baseURL,baseURL);assert.equal(engine.unseal(engine.db.encryptedToken),replacement);assert.equal(engine.db.jobs.length,1);
       wrongWindow.destroy();wrongWindow=null;
@@ -179,6 +179,9 @@ module.exports = async function commerceSmoke(api, check) {
       const before=requests.length;
       await assert.rejects(invoke('submitPublication',{planId:plan.id,verified:true,manifest:{path:'/private/fixture.jpg'}}),/编号无效/);
       await assert.rejects(invoke('submitPublication',plan.id),/先核对.*账号/);
+      await assert.rejects(invoke('inspectPublishedListing',{planId:plan.id,verified:true}),/编号无效/);
+      await assert.rejects(invoke('associatePublishedListing',plan.id,'forged-review-token'),/凭证/);
+      await assert.rejects(invoke('inspectPublishedListing',plan.id),/已提交/);
       assert.equal(engine.db.publications.submissions.length,0);assert.equal(engine.db.plans[0].activeListingId,null);assert.equal(requests.length,before);
       return {untrustedProofRejected:true,noMutation:true};
     });

@@ -28,7 +28,7 @@ function saved(f){return JSON.parse(fs.readFileSync(f.engine.file,'utf8'));}
 test('preparation persists exact request before claiming, saves private JPEGs, and returns only a sanitized public summary',async t=>{
  let f;f=await fixture(t,{client:{claimPhotos:async(payload,options)=>{const row=saved(f).photoPreparations[0];assert.equal(row.state,'claiming');assert.deepEqual(row.payload,{productId:product.id,setId:set.id});assert.deepEqual(payload,row.payload);assert.equal(options.idempotencyKey,row.idempotencyKey);assert.ok(fs.existsSync(path.join(f.dir,'prepared-photos',row.id)));return receipt;}}});
  const result=await f.prepare();assert.equal(result.summary.ready,true);assert.equal(result.manifest.count,2);assert.equal(result.manifest.claimId,'claim-1');assert.equal(f.engine.db.claims.length,1);assert.equal(f.engine.db.jobs.length,0);assert.equal(f.plan.enabled,false);
- for(const file of result.manifest.files){assert.equal(fs.statSync(file.path).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(file.path)).mode&0o777,0o700);assert.equal(file.width,10);assert.equal(file.height,20);assert.match(file.sha256,/^[a-f0-9]{64}$/);}
+ for(const file of result.manifest.files){if(process.platform!=='win32'){assert.equal(fs.statSync(file.path).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(file.path)).mode&0o777,0o700);}assert.equal(file.width,10);assert.equal(file.height,20);assert.match(file.sha256,/^[a-f0-9]{64}$/);}
  const publicJSON=JSON.stringify([result.summary,f.engine.state().photoPreparations]);for(const secret of ['fixture-token',baseURL,'/photos/images/','prepared-photos','idempotencyKey','payload','receipt','fileName'])assert.equal(publicJSON.includes(secret),false);
  assert.ok(f.calls.filter(c=>c.name==='download').every(c=>c.args[1].maxBytes===MAX_IMAGE_BYTES));assert.deepEqual(readPreparedPhotos(f.engine,f.plan.id),result);
 });
@@ -87,9 +87,17 @@ test('JPEG structure, size, pixel limits and injected decoder failure cannot pro
  const missing=await fixture(t);await assert.rejects(preparePhotos(missing.engine,missing.plan.id),{code:'PHOTO_DECODER'});assert.equal(missing.calls.length,0);
 });
 
-test('modified files, excessive permissions and symlink cache directories never produce trusted files',async t=>{
- for(const mutate of [(file)=>fs.writeFileSync(file,jpeg(10,20,7)),file=>fs.chmodSync(file,0o644),file=>{fs.unlinkSync(file);fs.symlinkSync('/dev/null',file); }]){const f=await fixture(t),result=await f.prepare();mutate(result.manifest.files[0].path);assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,1);}
- const f=await fixture(t);fs.symlinkSync(os.tmpdir(),path.join(f.dir,'prepared-photos'));await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,0);
+test('modified photo bytes never produce trusted files',async t=>{
+ const f=await fixture(t),result=await f.prepare();fs.writeFileSync(result.manifest.files[0].path,jpeg(10,20,7));assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,1);
+});
+test('excessive POSIX photo permissions never produce trusted files',{skip:process.platform==='win32'?'Windows uses inherited user-data ACLs, not POSIX mode bits':false},async t=>{
+ const f=await fixture(t),result=await f.prepare();fs.chmodSync(result.manifest.files[0].path,0o644);assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});
+});
+test('symlink photo files and cache directories are rejected',async t=>{
+ const f=await fixture(t),result=await f.prepare(),file=result.manifest.files[0].path;fs.unlinkSync(file);
+ try{fs.symlinkSync(process.platform==='win32'?os.tmpdir():'/dev/null',file,process.platform==='win32'?'junction':'file');}catch(e){if(process.platform==='win32'&&e.code==='EPERM'){t.skip('Current Windows sandbox prohibits creating links');return;}throw e;}
+ assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});
+ const g=await fixture(t);fs.symlinkSync(os.tmpdir(),path.join(g.dir,'prepared-photos'),process.platform==='win32'?'junction':'dir');await assert.rejects(g.prepare(),{code:'PHOTO_STORAGE'});assert.equal(g.calls.length,0);
 });
 
 test('cancelling a claim retains a returned receipt before releasing configure, while timeout preserves uncertainty and ignores late completion',async t=>{

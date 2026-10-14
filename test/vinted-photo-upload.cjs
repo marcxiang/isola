@@ -10,7 +10,7 @@ const {createTrustedPhotoManifest}=require('../src/vinted-photo-upload.cjs');
 const FORM='https://www.vinted.fr/items/new';
 
 async function manifestFixture(t){
-  const dir=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'isola-photo-test-')));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  const dir=require('node:fs').realpathSync(await fs.mkdtemp(path.join(os.tmpdir(),'isola-photo-test-')));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
   const bytes=Buffer.from([0xff,0xd8,0xff,0xe0,1,2,3,4,0xff,0xd9]),file=path.join(dir,'photo.jpg');await fs.writeFile(file,bytes);
   return {dir,bytes,file,input:{claimId:'claim-test',profileId:'p1',productId:'test',setId:'set1',count:1,files:[{path:file,sha256:createHash('sha256').update(bytes).digest('hex'),width:1,height:1}]}};
 }
@@ -63,10 +63,15 @@ test('main-process manifest rejects duplicates, invalid counts, relative paths a
 test('main-process manifest rejects modified file bytes or mismatching JPEG hash',async t=>{
   const {input,file}=await manifestFixture(t);await assert.rejects(createTrustedPhotoManifest({...input,files:[{...input.files[0],sha256:'0'.repeat(64)}]}),{code:'PHOTO_HASH_MISMATCH'});await fs.writeFile(file,'not an image');await assert.rejects(createTrustedPhotoManifest(input),{code:'PHOTO_HASH_MISMATCH'});
 });
-test('main-process manifest rejects symbolic links and directories',async t=>{
-  const {input,file,dir}=await manifestFixture(t),link=path.join(dir,'linked.jpg'),folder=path.join(dir,'folder.jpg');await fs.symlink(file,link);await fs.mkdir(folder);
-  for(const candidate of [link,folder])await assert.rejects(createTrustedPhotoManifest({...input,files:[{...input.files[0],path:candidate}]}),{code:'PHOTO_MANIFEST_INVALID'});
+test('main-process manifest rejects directories',async t=>{
+ const {input,dir}=await manifestFixture(t),folder=path.join(dir,'folder.jpg');await fs.mkdir(folder);await assert.rejects(createTrustedPhotoManifest({...input,files:[{...input.files[0],path:folder}]}),{code:'PHOTO_MANIFEST_INVALID'});
 });
+test('main-process manifest rejects symbolic links',async t=>{
+ const {input,file,dir}=await manifestFixture(t),link=path.join(dir,'linked.jpg');
+ try{await fs.symlink(process.platform==='win32'?dir:file,link,process.platform==='win32'?'junction':'file');}catch(e){if(process.platform==='win32'&&e.code==='EPERM'){t.skip('Current Windows sandbox prohibits creating links');return;}throw e;}
+ await assert.rejects(createTrustedPhotoManifest({...input,files:[{...input.files[0],path:link}]}),{code:'PHOTO_MANIFEST_INVALID'});
+});
+
 test('trusted upload uses the exact CDP input and verifies stable stored thumbnails, then retries read-only',async t=>{
   const {input}=await manifestFixture(t),manifest=await createTrustedPhotoManifest(input),f=uploadFixture();
   const result=await f.adapter.uploadPhotos('p1',manifest);assert.equal(result.verified,true);assert.equal(result.uncertain,false);assert.equal(result.receipt.thumbnailCount,1);assert.equal(result.receipt.serverStoredCount,1);assert.equal(result.published,false);assert.equal(result.saved,false);assert.equal(result.canUpload,false);assert.equal(result.canCheck,true);assert.equal(f.countWrites(),1);assert.deepEqual(f.commands.find(command=>command.method==='DOM.setFileInputFiles').args,{files:[input.files[0].path],objectId:'file-input-1'});assert.equal(f.w.vintedDraftController,null);assert.equal(f.contents.listenerCount('did-start-navigation'),0);

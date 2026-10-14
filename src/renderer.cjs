@@ -29,7 +29,7 @@ function render() {
   }
   selection();
 }
-function modeChanged(){const native=form.elements.fingerprintMode.value==='native';for(const key of ['ua','language','timezone','hardwareConcurrency'])form.elements.namedItem(key).disabled=native;$('#mode-hint').textContent=native?'使用当前 Mac 的真实语言、时区、CPU、屏幕与 GPU。下方宽高仅设置初始窗口大小；Cookie 与代理仍按环境隔离。':'自定义参数作用于页面，Worker 或 iframe 可能仍显示本机值；请用指纹自检检查一致性。';}
+function modeChanged(){const native=form.elements.fingerprintMode.value==='native';for(const key of ['ua','language','timezone','hardwareConcurrency'])form.elements.namedItem(key).disabled=native;$('#mode-hint').textContent=native?'使用当前电脑 的真实语言、时区、CPU、屏幕与 GPU。下方宽高仅设置初始窗口大小；Cookie 与代理仍按环境隔离。':'自定义参数作用于页面，Worker 或 iframe 可能仍显示本机值；请用指纹自检检查一致性。';}
 form.elements.fingerprintMode.onchange=modeChanged;
 function edit(p) {
   form.reset(); for (const [k, v] of Object.entries(p || {})) if (k !== 'proxy' && form.elements.namedItem(k)) form.elements.namedItem(k).value = v;
@@ -45,4 +45,4 @@ for (const [id, action] of [['batch-launch', 'launch'], ['batch-stop', 'stop']])
 $('#export').onclick = () => run(async () => { const n = await window.isola.export([...selected]); if (n !== undefined) toast(`已导出 ${n} 个环境配置，不包含凭据和浏览数据`); });
 $('#import').onclick = () => run(async () => { const n = await window.isola.import(); if (n !== undefined) toast(`已导入 ${n} 个环境，请重新填写代理凭据`); });
 window.isola.onChange(p => { profiles = p; render(); });
-run(async () => { profiles = await window.isola.list(); render(); const info = await window.isola.info(); $('#app-version').textContent = `v${info.version} / macOS`; $('#app-info').textContent = `Isola ${info.version} · Chromium ${info.chromium} · ${info.platform} · 本地数据：${info.dataPath}`; });
+run(async () => { profiles = await window.isola.list(); render(); const info = await window.isola.info(); $('#app-version').textContent = `v${info.version} / ${{darwin:'macOS',win32:'Windows',linux:'Linux'}[info.platform]||info.platform}`; $('#app-info').textContent = `Isola ${info.version} · Chromium ${info.chromium} · ${info.platform} · 本地数据：${info.dataPath}`; });

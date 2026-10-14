@@ -4,6 +4,7 @@ const {createHash}=require('node:crypto');
 const {performance:clock}=require('node:perf_hooks');
 const {PublicationJournal,buildPublicationProof,FORM_URL}=require('./vinted-publication.cjs');
 const {VintedPublicationEvidence,FIELD_SPECS,probePublicationForm}=require('./vinted-publication-evidence.cjs');
+const {projectPublicationReconciliation}=require('./commerce-publication-reconcile.cjs');
 const {probeAccountDOM,memberURL}=require('./vinted-account.cjs');
 const journals=new WeakMap();
 const clone=value=>JSON.parse(JSON.stringify(value));
@@ -18,7 +19,12 @@ function publicationJournal(engine){
  let owned=journals.get(engine);
  if(owned){ensure(equal(engine.db.publications,owned.snapshot),'PUBLICATION_STORAGE_CHANGED','刊登记录已被另一操作改变，已停止提交');return owned.journal;}
  owned={journal:null,snapshot:null};
- const journal=new PublicationJournal({state:engine.db.publications,persist:async state=>{owned.snapshot=clone(state);engine.db.publications=state;await engine.persist();engine.emit?.();},dispatchEnabled:true});
+ const journal=new PublicationJournal({state:engine.db.publications,persist:async state=>{
+  const before=engine.db,staged=state.submissions.some(row=>row.state==='published')?projectPublicationReconciliation(before,state).db:{...before,publications:state};
+  engine.db=staged;
+  try{await engine.persist();}catch(error){engine.db=before;engine.faulted=true;throw error;}
+  owned.snapshot=clone(state);engine.emit?.();
+ },dispatchEnabled:true});
  engine.db.publications=journal.state();owned.journal=journal;owned.snapshot=clone(engine.db.publications);journals.set(engine,owned);return journal;
 }
 

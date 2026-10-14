@@ -89,11 +89,15 @@ function cacheDirectory(engine,record,create=false){
  if(create){privateDirectory(root);privateDirectory(dir);}else for(const entry of [root,dir]){const stat=fs.lstatSync(entry);if(!stat.isDirectory()||stat.isSymbolicLink())throw failure('PHOTO_STORAGE','照片目录已改变');}
  return dir;
 }
-function syncDirectory(directory){const fd=fs.openSync(directory,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
+// Windows cannot FlushFileBuffers on a directory handle. The file itself is
+// still fsynced before rename; POSIX additionally flushes the parent directory.
+function syncDirectory(directory){if(process.platform==='win32')return;const fd=fs.openSync(directory,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
 function assetPath(dir,asset,index){if(!object(asset)||asset.index!==index||!/^[a-f0-9]{64}$/.test(asset.sha256||'')||asset.fileName!==String(index).padStart(2,'0')+'-'+asset.sha256+'.jpg'||!Number.isSafeInteger(asset.size)||asset.size<1||asset.size>MAX_IMAGE_BYTES||![asset.width,asset.height].every(n=>Number.isInteger(n)&&n>0&&n<=1200))throw failure('PHOTO_STORAGE','照片文件清单无效');return path.join(dir,asset.fileName);}
 function readAsset(dir,asset,index){
- const name=assetPath(dir,asset,index),fd=fs.openSync(name,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
- try{const stat=fs.fstatSync(fd);if(!stat.isFile()||stat.size!==asset.size||(stat.mode&0o077)!==0)throw failure('PHOTO_STORAGE','照片文件大小或私有权限已改变');const bytes=fs.readFileSync(fd);if(hash(bytes)!==asset.sha256)throw failure('PHOTO_STORAGE','本地照片内容校验失败');const size=jpegSize(bytes);if(size.width!==asset.width||size.height!==asset.height)throw failure('PHOTO_STORAGE','照片尺寸与清单不一致');return name;}finally{fs.closeSync(fd);}
+ const name=assetPath(dir,asset,index),before=fs.lstatSync(name);
+ if(!before.isFile()||before.isSymbolicLink())throw failure('PHOTO_STORAGE','照片文件不是常规文件');
+ const fd=fs.openSync(name,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+ try{const stat=fs.fstatSync(fd);if(!stat.isFile()||stat.dev!==before.dev||stat.ino!==before.ino||stat.size!==asset.size||(process.platform!=='win32'&&(stat.mode&0o077)!==0))throw failure('PHOTO_STORAGE','照片文件大小或私有权限已改变');const bytes=fs.readFileSync(fd);if(hash(bytes)!==asset.sha256)throw failure('PHOTO_STORAGE','本地照片内容校验失败');const size=jpegSize(bytes);if(size.width!==asset.width||size.height!==asset.height)throw failure('PHOTO_STORAGE','照片尺寸与清单不一致');return name;}finally{fs.closeSync(fd);}
 }
 function writeAsset(dir,asset,index,bytes){
  const target=assetPath(dir,asset,index),tmp=path.join(dir,'.'+randomUUID()+'.tmp');let fd;

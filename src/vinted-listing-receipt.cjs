@@ -108,7 +108,7 @@ class VintedListingReceipt {
   ensure(after.account?.memberId===initial.memberId&&after.documentKey===raw.documentKey,'LISTING_ACCOUNT_CHANGED','读取商品详情期间当前账号发生变化');
   return {...view,documentKey:raw.documentKey};
  }
- async collect({record,expectedAccount},{signal}={}){
+ async collect({record,expectedAccount},{signal,withEvidence}={}){
   const summary={checks:[],blockers:[],listingId:null,url:null,photoSignatureMatched:false,verified:false,needsOriginAssociation:true,reconciled:false,menuOpened:false,menuClosed:false};
   let controller,w,contents,timer,timedOut=false;const cancel=()=>controller?.abort(),navigation=(_event,_url,_inPlace,mainFrame)=>{if(mainFrame!==false)cancel();};
   try{
@@ -132,7 +132,9 @@ class VintedListingReceipt {
    ensure(Date.parse(summary.checkedAt)>=Date.parse(record.submittedAt),'LISTING_RECORD_TIME','详情核对时间早于原提交记录');
    const evidence=summary.verified?{verified:true,mappingVerified:true,publicationStatus:'published',observedAt:summary.checkedAt,profileId:facts.profileId,listingId:identity.listingId,url:identity.url,title:facts.fields.title,priceKind:'item',priceCents:second.priceCents,currency:'EUR',account:{profileId:facts.profileId,memberId:initial.memberId,profileURL:initial.profileURL,verified:true},seller:{profileId:facts.profileId,...second.seller,verified:true},ownedByCurrentAccount:true,photos:{verified:true,count:facts.photos.count,signature:second.signature}}:null;
    summary.message=summary.verified?'详情表面已核对；尚未关联原提交，也未更新运营记录。':'详情核对未通过；没有关联刊登或改动页面。';
-   return {summary,evidence};
+   const binding={documentKey:second.documentKey,tabId:context.tab.id};
+   if(evidence&&withEvidence){context.guard();return await withEvidence({summary,evidence,binding},context.guard);}
+   return {summary,evidence,binding};
   }catch(error){summary.verified=false;summary.code=timedOut?'LISTING_RECEIPT_TIMEOUT':error.code||'LISTING_RECEIPT_FAILED';const detail=timedOut?'商品详情读取超时，未关联原提交':String(error.message||'详情核对失败').slice(0,700);summary.checks.push({name:'详情核验',ok:false,detail});summary.blockers=summary.checks.filter(check=>!check.ok).map(check=>check.detail);summary.checkedAt=new Date(this.now()).toISOString();summary.message='详情核对未通过；没有关联刊登或改动页面。';return {summary,evidence:null};}
   finally{controller?.abort();clearTimeout(timer);signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigation);contents?.removeListener?.('destroyed',cancel);contents?.removeListener?.('render-process-gone',cancel);if(w&&controller&&w.vintedDraftController===controller)w.vintedDraftController=null;}
  }

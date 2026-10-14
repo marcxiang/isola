@@ -1,0 +1,83 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const {buildPublicationProof,PublicationJournal,FORM_URL}=require('../src/vinted-publication.cjs');
+const {projectPublicationReconciliation:project}=require('../src/commerce-publication-reconcile.cjs');
+const NOW=Date.parse('2026-10-14T12:00:00.000Z'),at=new Date(NOW).toISOString(),clone=value=>JSON.parse(JSON.stringify(value));
+async function fixture(){
+ const profileId='profile-1',listing={title:'Local test accessory',description:'Local fixture only.',categoryPath:['Maison','Accessoires'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'};
+ const plan={id:'plan-1',profileId,productId:'product-1',sku:'TEST',enabled:true,completedCount:0,targetCount:2,activeListingId:null,status:'ready',currency:'EUR',listingPriceCents:500,listing,updatedAt:at};
+ const account={profileId,memberId:'123',profileURL:'https://www.vinted.fr/member/123'},claim={id:'claim-1',setId:'set-1',profileId,productId:plan.productId,images:[{id:'image-1'}],listings:[]},documentKey='100.2';
+ const input={plan,product:{id:plan.productId,sku:plan.sku,stock:1},claim,expectedAccount:account,evidence:{profileId,tabId:'tab-1',documentKey,url:FORM_URL,observedAt:at,challenge:false,account:{...account,verified:true},form:{documentKey,complete:true,invalidFields:[],unknownFields:[],fields:Object.entries({...listing,priceCents:500}).map(([field,value])=>({field,value,verified:true}))},photos:{documentKey,profileId,productId:plan.productId,claimId:claim.id,setId:claim.setId,count:1,signature:'a'.repeat(64),verified:true,busy:false,errorCount:0},publication:{documentKey,count:1,observed:true,label:'Ajouter',enabled:true}}};
+ const journal=new PublicationJournal({persist:()=>{},now:()=>NOW,dispatchEnabled:true}),proof=buildPublicationProof(input,{now:NOW}),record=await journal.prepare(proof);await journal.dispatchOnce(record.id,proof,async()=>{});
+ const job={id:'job-1',type:'listing',dedupeKey:'listing:plan-1:0',planId:plan.id,profileId,productId:plan.productId,payload:{cycle:0},state:'needs_review',step:'pending',operation:null,mutationPending:false,result:null,error:'Old blocker',retryAt:at,createdAt:at,updatedAt:at};
+ const db={version:1,plans:[plan],claims:[claim],jobs:[job],marketAccounts:[account],publications:journal.state(),sales:[],encryptedToken:'PRIVATE-UNCHANGED'};
+ const evidence={verified:true,mappingVerified:true,publicationStatus:'published',observedAt:at,profileId,account:{...account,verified:true},seller:{...account,verified:true},ownedByCurrentAccount:true,listingId:'98765',url:'https://www.vinted.fr/items/98765',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:documentKey},priceKind:'item',priceCents:500,currency:'EUR',title:listing.title,photos:{verified:true,count:1,signature:'a'.repeat(64)}};
+ await journal.reconcile(record.id,evidence);
+ return {db,next:journal.state(),journal,record,evidence,run(source=db,next=journal.state()){return project(source,next,{now:NOW});}};
+}
+
+test('one staged snapshot includes publication, active listing, claim link, old job completion and an unsent supplier association',async()=>{
+ const f=await fixture(),before=clone(f.db),nextBefore=clone(f.next),result=f.run(),db=result.db;
+ assert.deepEqual(f.db,before);assert.deepEqual(f.next,nextBefore);assert.equal(result.changed,true);assert.equal(db.publications.submissions[0].state,'published');
+ assert.equal(db.plans[0].activeListingId,'98765');assert.equal(db.plans[0].status,'listed');assert.equal(db.plans[0].completedCount,0);assert.equal(db.claims[0].listings.length,1);assert.equal(db.claims[0].listings[0].submissionId,f.record.id);
+ assert.equal(db.jobs[0].state,'completed');assert.equal(db.jobs[0].step,'publication_reconciled');assert.equal(db.jobs[0].result.externalId,'98765');assert.equal(db.jobs[0].mutationPending,false);assert.equal(db.jobs[0].operation,null);
+ assert.deepEqual(result.completedJobIds,['job-1']);assert.deepEqual(result.reconciledSubmissionIds,[f.record.id]);
+ const sync=db.publicationSupplierSync[0];assert.equal(sync.state,'pending');assert.equal(sync.attemptCount,0);assert.equal(sync.operation,null);assert.equal(sync.receipt,null);assert.deepEqual(sync.payload,{action:'published',platform:'Vinted',listingId:'98765',listingUrl:'https://www.vinted.fr/items/98765'});
+ assert.equal(db.encryptedToken,before.encryptedToken);assert.deepEqual(db.sales,[]);
+});
+
+test('reapplying an identical validated receipt is byte-for-byte idempotent',async()=>{
+ const f=await fixture(),first=f.run(),again=project(first.db,first.db.publications,{now:NOW+5000});assert.equal(again.changed,false);assert.deepEqual(again.db,first.db);assert.deepEqual(again.completedJobIds,[]);assert.equal(again.db.claims[0].listings.length,1);assert.equal(again.db.publicationSupplierSync.length,1);
+});
+
+test('a paused plan stays paused in enablement and a manual publication needs no preexisting listing job',async()=>{
+ const f=await fixture();f.db.plans[0].enabled=false;f.db.jobs=[];const result=f.run();assert.equal(result.db.plans[0].enabled,false);assert.equal(result.db.plans[0].status,'listed');assert.deepEqual(result.completedJobIds,[]);
+});
+
+test('an uncertain snapshot creates no active listing, claim link, job result or supplier operation',async()=>{
+ const f=await fixture(),result=project(f.db,f.db.publications,{now:NOW});assert.equal(result.db.plans[0].activeListingId,null);assert.equal(result.db.claims[0].listings.length,0);assert.equal(result.db.jobs[0].result,null);assert.deepEqual(result.db.publicationSupplierSync,[]);
+});
+
+test('plan identity, cycle, price and all original fields must still agree; any conflict leaves input unchanged',async()=>{
+ const changes=[db=>db.plans=[],db=>db.plans.push(clone(db.plans[0])),db=>db.plans[0].profileId='wrong',db=>db.plans[0].productId='wrong',db=>db.plans[0].sku='wrong',db=>db.plans[0].completedCount=1,db=>db.plans[0].targetCount=0,db=>db.plans[0].currency='USD',db=>db.plans[0].listingPriceCents=600,db=>db.plans[0].listing.categoryPath=['Other'],db=>db.plans[0].listing.parcel='Petit',db=>db.plans[0].activeListingId='999',db=>db.plans.push({...clone(db.plans[0]),id:'other-plan',activeListingId:'98765'})];
+ for(const change of changes){const f=await fixture();change(f.db);const before=clone(f.db);assert.throws(()=>f.run(),{code:'PUBLICATION_PROJECTION_CONFLICT'},String(change));assert.deepEqual(f.db,before);}
+});
+
+test('account and claim identity, uniqueness, image count and existing link ownership fail closed',async()=>{
+ const changes=[db=>db.marketAccounts=[],db=>db.marketAccounts.push(clone(db.marketAccounts[0])),db=>db.marketAccounts[0].memberId='999',db=>db.marketAccounts[0].profileURL='https://www.vinted.fr/member/999',db=>db.claims=[],db=>db.claims.push(clone(db.claims[0])),db=>db.claims[0].profileId='wrong',db=>db.claims[0].productId='wrong',db=>db.claims[0].setId='wrong',db=>db.claims[0].images=[],db=>db.claims[0].listings=null,db=>db.claims[0].listings.push({listingId:'98765',url:'https://other.test/items/98765'}),db=>db.claims[0].listings.push({listingId:'98765',url:'https://www.vinted.fr/items/98765',cycle:2}),db=>db.claims.push({...clone(db.claims[0]),id:'other-claim',listings:[{listingId:'98765',url:'https://www.vinted.fr/items/98765'}]})];
+ for(const change of changes){const f=await fixture();change(f.db);assert.throws(()=>f.run(),{code:'PUBLICATION_PROJECTION_CONFLICT'},String(change));}
+});
+
+test('an existing same claim link is enriched once without duplication; conflicting metadata is never overwritten',async()=>{
+ const f=await fixture();f.db.claims[0].listings.push({listingId:'98765',url:'https://www.vinted.fr/items/98765-local',createdAt:at});const result=f.run();assert.equal(result.db.claims[0].listings.length,1);assert.equal(result.db.claims[0].listings[0].submissionId,f.record.id);assert.equal(result.db.claims[0].listings[0].url,'https://www.vinted.fr/items/98765-local');
+ for(const value of [{submissionId:'other'},{planId:'other'},{cycle:1}]){const g=await fixture();g.db.claims[0].listings.push({listingId:'98765',url:'https://www.vinted.fr/items/98765',...value});assert.throws(()=>g.run(),{code:'PUBLICATION_PROJECTION_CONFLICT'});}
+});
+
+test('only the original cycle unsubmitted listing job can complete; unrelated jobs remain untouched',async()=>{
+ const f=await fixture(),others=[{...clone(f.db.jobs[0]),id:'older-job',dedupeKey:'listing:plan-1:9',payload:{cycle:9},operation:{kind:'unknown'},mutationPending:true,state:'uncertain'},{...clone(f.db.jobs[0]),id:'offer-job',type:'offer',dedupeKey:'offer:1'},{...clone(f.db.jobs[0]),id:'other-plan-job',planId:'other-plan',dedupeKey:'listing:other-plan:0'}];f.db.jobs.push(...others);const result=f.run();assert.deepEqual(result.db.jobs.slice(1),others);
+ const changes=[job=>job.profileId='wrong',job=>job.productId='wrong',job=>job.dedupeKey='wrong',job=>job.payload.claimId='wrong',job=>job.accountMemberId='999',job=>job.operation={kind:'claim'},job=>job.mutationPending=true,job=>job.result={externalId:'other'},job=>job.state='running',job=>job.state='uncertain',job=>job.state='completed'];
+ for(const change of changes){const g=await fixture();change(g.db.jobs[0]);assert.throws(()=>g.run(),{code:'PUBLICATION_PROJECTION_CONFLICT'},String(change));}
+ const g=await fixture();g.db.jobs.push({...clone(g.db.jobs[0]),id:'duplicate'});assert.throws(()=>g.run(),{code:'PUBLICATION_PROJECTION_CONFLICT'});
+});
+
+test('reuse of a claim with older unmapped history is explicitly pending review, never assumed supplier-synced',async()=>{
+ const f=await fixture();f.db.claims[0].listings.push({listingId:'12345',url:'https://www.vinted.fr/items/12345',createdAt:at});const result=f.run();assert.equal(result.db.claims[0].listings.length,2);const sync=result.db.publicationSupplierSync[0];assert.equal(sync.state,'needs_review');assert.equal(sync.submissionId,null);assert.equal(sync.payload.listingId,'12345');assert.equal(sync.receipt,null);assert.equal(sync.attemptCount,0);assert.equal(result.pendingSupplierSyncIds.length,1);
+});
+
+test('existing supplier association cannot silently change identity, payload or become a fabricated completed request',async()=>{
+ const changes=[row=>row.id='other',row=>row.submissionId='other',row=>row.claimId='other',row=>row.profileId='other',row=>row.productId='other',row=>row.payload.listingId='999',row=>row.state='synced',row=>row.attemptCount=1,row=>row.receipt={ok:true},row=>row.operation={idempotencyKey:'old'}];
+ for(const change of changes){const f=await fixture(),db=f.run().db;change(db.publicationSupplierSync[0]);assert.throws(()=>project(db,db.publications,{now:NOW}),{code:'PUBLICATION_PROJECTION_CONFLICT'},String(change));}
+ const f=await fixture(),db=f.run().db;db.publicationSupplierSync.push(clone(db.publicationSupplierSync[0]));assert.throws(()=>project(db,db.publications,{now:NOW}),{code:'PUBLICATION_PROJECTION_CONFLICT'});
+});
+
+test('projection cannot create a published record without its original durable attempted submission or delete history',async()=>{
+ const f=await fixture();f.db.publications.submissions=[];assert.throws(()=>f.run(),{code:'PUBLICATION_PROJECTION_CONFLICT'});
+ const g=await fixture(),next=clone(g.next);next.submissions=[];assert.throws(()=>g.run(g.db,next),{code:'PUBLICATION_PROJECTION_CONFLICT'});
+ const h=await fixture(),db=h.run().db,changed=clone(db.publications);changed.submissions[0].receipt.listingId='999';changed.submissions[0].receipt.url='https://www.vinted.fr/items/999';assert.throws(()=>project(db,changed,{now:NOW}),{code:'PUBLICATION_PROJECTION_CONFLICT'});
+});
+
+test('sale closure cannot be committed as a partial publication-only transaction or reactivate an already closed listing',async()=>{
+ const f=await fixture(),db=f.run().db;await f.journal.releaseAfterSale(f.record.id,{verified:true,profileId:'profile-1',memberId:'123',listingId:'98765',orderId:'order-1',paid:true,cancelled:false,quantity:1,priceCents:500,currency:'EUR',observedAt:at});
+ assert.throws(()=>project(db,f.journal.state(),{now:NOW}),{code:'PUBLICATION_SALE_PROJECTION_REQUIRED'});
+ db.publications=f.journal.state();db.plans[0].completedCount=1;db.plans[0].activeListingId=null;db.plans[0].status='fulfilling';const result=project(db,db.publications,{now:NOW});assert.equal(result.db.plans[0].activeListingId,null);assert.equal(result.db.plans[0].status,'fulfilling');assert.equal(result.db.plans[0].completedCount,1);
+});

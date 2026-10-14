@@ -8,6 +8,7 @@
   const jobDialog = $('#job-dialog');
   const preflightDialog = $('#preflight-dialog');
   const photoDialog = $('#plan-photos-dialog');
+  const associationDialog = $('#publication-association-dialog');
   const reviewStates = new Set(['needs_review', 'pending_review', 'waiting_review', 'review', 'unknown', 'uncertain', 'blocked', 'failed', 'error']);
   const completedStates = new Set(['completed', 'complete', 'done', 'succeeded']);
   const cancelledStates = new Set(['cancelled', 'canceled', 'rejected']);
@@ -23,6 +24,7 @@
   const photoReports = new Map();
   const publicationAttempts = new Map();
   let publicationReviewedPlan = '';
+  let associationPlanId = '', associationReport = null, associationReviewToken = '', associationError = '', associationResult = null;
   const listingFields = {title:'listingTitle',description:'listingDescription',categoryPath:'listingCategoryPath',condition:'listingCondition',brand:'listingBrand',size:'listingSize',color:'listingColor',parcel:'listingParcel'};
   const listingNames = {title:'商品标题',description:'商品描述',categoryPath:'分类路径',condition:'成色',brand:'品牌',size:'尺码',color:'颜色',parcel:'包裹规格',price:'价格',photos:'图片'};
   const pending = new Set();
@@ -101,6 +103,7 @@
     state = {...state,...incoming,settings:{...state.settings,...incoming.settings},connection:{...state.connection,...incoming.connection},readiness:{...state.readiness,...incoming.readiness}};
     for (const key of ['profiles','products','photoSets','photoPreparations','plans','jobs','events','publications']) if (!Array.isArray(state[key])) state[key]=[];
     reconcilePublicationAttempts();
+    if(associationReport){const record=openPublication(associationPlanId);if(!record||record.id!==associationReport.submissionId||record.state!=='uncertain'||record.attemptCount!==1)associationReviewToken='';}
     $('#load-error').hidden = !state.faulted;
     if (state.faulted) $('#load-error').textContent = '运营数据无法安全写入，外部操作已停止。请检查本机存储后重新打开应用。';
     renderSummary(); renderPlans(); renderInventory(); renderJobs(); renderEvents(); renderConnection(); renderControls();
@@ -108,6 +111,7 @@
     if (jobDialog.open && selectedJobId) renderJobDetail();
     if (photoDialog.open && selectedPhotoPlanId) renderPhotoReport();
     if (preflightDialog.open && reportKind==='publication') renderPageReport();
+    if (associationDialog.open) renderAssociationReport();
   }
   function renderControls() {
     const active = !!state.running;
@@ -131,6 +135,7 @@
     $('#publication-submit').disabled=!publicationVisible||!canSubmitPublication(selectedPlanId)||checking;
     $('#publication-submit').textContent=pending.has(`plan-publication-${selectedPlanId}`)?'正在提交并核对…':'发布商品';
     renderPublicationResult();
+    renderAssociationControls();
     $('#preflight-fill').disabled = checking || !!state.faulted || !selectedPlanId || reportKind==='preflight'&&pageReport?.readyForFields!==true;
     $('#preflight-edit').disabled = checking || !selectedPlanId;
     renderPhotoControls();
@@ -203,6 +208,7 @@
       result.append(el('div','report-status warn',attempt?.pending?'正在提交，尚未确认发布结果。':'发布结果待核对，请勿重复点击发布。'),el('p','field-hint',message));
       const id=attempt?.submissionId||record?.id;if(id)result.append(el('p','field-hint',`提交记录：${id}`));
       if(attempt?.clickIssued===true)result.append(el('p','field-hint','已发送一次页面点击；目前没有已验证的发布成功回执。'));
+      if(canInspectAssociation(selectedPlanId)){const inspect=makeButton('核对原刊登',()=>openAssociation(selectedPlanId));inspect.disabled=pageActionPending()||!!state.running||!!state.configBusy||!!state.faulted;result.append(inspect);}
       return;
     }
     if(pageReport?.readyForPublication===true)result.append(el('p','publication-submit-note',pageReport.manualPublicationEnabled===false?'当前版本尚未启用手动发布。':canSubmitPublication(selectedPlanId)?'点击「发布商品」会将本计划商品刊登到当前已核对的 Vinted 账号。提交后需核对真实刊登回执。':'发布前请确认计划已启用、账号和本机照片已核对，并暂停后台调度。资料变更后须重新核对发布条件。'));
@@ -217,6 +223,56 @@
       publicationAttempts.set(id,{pending:false,submissionId:typeof result?.submissionId==='string'?result.submissionId:'',clickIssued:result?.clickIssued===true,message:typeof result?.message==='string'?result.message:'本次提交需要核对原网页和提交记录，请勿重复点击。'});
     }catch(error){publicationAttempts.set(id,{pending:false,message:`${cleanError(error)} 请核对原网页和提交记录，不要重复点击发布。`});}
     finally{reconcilePublicationAttempts();renderPageReport();renderControls();renderPlans();renderDistribution();}
+  }
+  function canInspectAssociation(id) {
+    const record=openPublication(id);return !!record&&record.state==='uncertain'&&record.attemptCount===1&&typeof api.inspectPublishedListing==='function';
+  }
+  function canAssociateListing() {
+    const record=openPublication(associationPlanId);
+    return associationDialog.open&&canInspectAssociation(associationPlanId)&&typeof api.associatePublishedListing==='function'&&associationReport?.readyForAssociation===true&&associationReport.photoSignatureMatched===true&&associationReport.planId===associationPlanId&&associationReport.submissionId===record.id&&associationReviewToken.length>0&&associationReviewToken.length<=4096&&!associationResult&&!associationError&&!pageActionPending()&&!state.running&&!state.configBusy&&!state.faulted;
+  }
+  function renderAssociationControls() {
+    const blocked=pageActionPending()||!!state.running||!!state.configBusy||!!state.faulted;
+    $('#publication-association-inspect').disabled=blocked||!canInspectAssociation(associationPlanId)||!!associationResult;
+    $('#publication-association-inspect').textContent=pending.has(`plan-publication-inspect-${associationPlanId}`)?'正在读取…':'重新读取当前商品';
+    $('#publication-association-confirm').disabled=!canAssociateListing();
+    $('#publication-association-confirm').textContent=pending.has(`plan-publication-associate-${associationPlanId}`)?'正在保存关联…':'关联已核对刊登';
+    $('#publication-association-confirmation').hidden=!canAssociateListing();
+  }
+  function renderAssociationReport() {
+    const detail=$('#publication-association-detail'),plan=find(state.plans,associationPlanId),record=openPublication(associationPlanId);detail.replaceChildren();
+    detail.append(el('p','report-plan',`${plan?.name||productName(plan?.productId)} · ${profileName(plan?.profileId)}`));
+    if(record)detail.append(el('p','field-hint',`原提交记录：${record.id}`));
+    if(associationResult){detail.append(el('div','report-status good','已保存本机关联。'),el('p','field-hint',`在售商品编号：${associationResult.listingId}`),el('p','field-hint','本次仅记录已核对的刊登，没有重新发布或提交采购。'));renderAssociationControls();return;}
+    if(associationError)detail.append(el('div','form-error',associationError));
+    if(!associationReport){if(!associationError)detail.append(el('p','report-loading','正在读取对应环境的当前商品页…'));renderAssociationControls();return;}
+    const report=associationReport,grid=el('dl','detail-grid');
+    if(typeof report.listingId==='string')grid.append(el('dt','','当前商品编号'),el('dd','',report.listingId));
+    const url=listingReceiptURL({activeListingId:report.listingId,activeListingUrl:report.url});if(url)grid.append(el('dt','','当前商品地址'),el('dd','',url));
+    grid.append(el('dt','','照片自动对应'),el('dd','',report.photoSignatureMatched===true?'图片回执匹配':'尚未自动确认，当前不能关联刊登'));detail.append(grid);
+    if(Array.isArray(report.checks)){const checks=el('div','report-checks');for(const item of report.checks.slice(0,60)){const row=el('div','report-check'),body=el('div');body.append(el('b','',typeof item.name==='string'?item.name:'检查项'));if(typeof item.detail==='string')body.append(el('p','',item.detail));row.append(badge(item.ok===true?'已通过':'待核对',item.ok===true?'good':'warn'),body);checks.append(row);}detail.append(checks);}
+    reportList(detail,'仍需处理',report.blockers,'warning');if(typeof report.message==='string')detail.append(el('p','field-hint',report.message));
+    if(!record||record.id!==report.submissionId||record.state!=='uncertain')detail.append(el('p','photo-result-warning','原提交记录状态已改变，不能使用这次检查关联。'));
+    renderAssociationControls();
+  }
+  async function openAssociation(id) {
+    if(pageActionPending()||!canInspectAssociation(id)||state.running||state.configBusy||state.faulted)return;
+    associationPlanId=String(id);associationReport=null;associationReviewToken='';associationError='';associationResult=null;
+    if(preflightDialog.open)preflightDialog.close();renderAssociationReport();if(!associationDialog.open)associationDialog.showModal();await inspectAssociation();
+  }
+  async function inspectAssociation() {
+    const id=associationPlanId;if(pageActionPending()||!canInspectAssociation(id)||state.running||state.configBusy||state.faulted)return;
+    associationReport=null;associationReviewToken='';associationError='';associationResult=null;renderAssociationReport();
+    try{const report=await request(`plan-publication-inspect-${id}`,()=>api.inspectPublishedListing(id));if(associationPlanId===id){if(report?.planId!==id||report?.submissionId!==openPublication(id)?.id)throw Error('检查结果与原提交记录不匹配，请重新读取当前商品。');const {reviewToken,...details}=report;associationReport=details;associationReviewToken=associationDialog.open&&typeof reviewToken==='string'?reviewToken:'';}}
+    catch(error){if(associationPlanId===id)associationError=cleanError(error);}
+    finally{if(associationPlanId===id)renderAssociationReport();renderControls();}
+  }
+  async function associateListing() {
+    if(!canAssociateListing())return;
+    const id=associationPlanId,token=associationReviewToken,listingId=associationReport.listingId;associationReviewToken='';
+    try{const result=await request(`plan-publication-associate-${id}`,()=>api.associatePublishedListing(id,token));if(associationPlanId===id){if(result?.associated!==true||String(result.listingId)!==String(listingId))throw Error('本机关联返回结果需要核对，请重新读取状态。');associationResult={listingId:String(result.listingId)};}}
+    catch(error){if(associationPlanId===id)associationError=`${cleanError(error)} 请核对原记录；本页面不会重新发布商品。`;}
+    finally{if(associationPlanId===id)renderAssociationReport();renderControls();renderDistribution();}
   }
   function showPlanJobs(id) {
     jobPlanFilter=String(id);$('#job-filter').value='';renderJobs();changePage('jobs');
@@ -257,6 +313,7 @@
         edit.disabled=disabled;open.disabled=disabled||!find(state.profiles,plan.profileId);photos.disabled=checking||!!state.faulted;actions.append(edit,open,photos,records);
         if(typeof api.inspectAccount==='function'){const accountCheck=makeButton('核对账号',()=>request(`plan-preflight-account-${plan.id}`,()=>api.inspectAccount(plan.id),result=>result?.account?.username?`已核对账号：${result.account.username}`:'账号核对完成，请查看环境记录'));accountCheck.disabled=disabled||!!state.running;actions.append(accountCheck);}
         if(typeof api.inspectPublication==='function'){const publication=makeButton('核对发布条件',()=>inspectPlan(plan.id,'publication'));publication.disabled=disabled||!!state.running;actions.append(publication);}
+        if(canInspectAssociation(plan.id)){const original=makeButton('核对原刊登',()=>openAssociation(plan.id));original.disabled=disabled||!!state.running;actions.append(original);}
         if(operation.job)actions.append(el('small','distribution-updated',`最近任务：${jobNames[operation.job.type]||operation.job.type} · ${when(operation.job.updatedAt||operation.job.createdAt,true)}`));
         row.append(heading,metrics,next);
         const url=listingReceiptURL(plan);if(url){const receipt=el('p','distribution-receipt');receipt.append(el('span','','刊登回执地址：'),el('code','',url));row.append(receipt);if(typeof api.openActiveListing==='function'){const view=makeButton('查看在售商品',()=>request(`plan-open-${plan.id}`,()=>api.openActiveListing(plan.id),'已在对应环境打开在售商品'));view.disabled=disabled;actions.prepend(view);}}
@@ -530,6 +587,9 @@
   $('#preflight-edit').addEventListener('click',()=>{const plan=find(state.plans,selectedPlanId);if(plan){preflightDialog.close();editPlan(plan);}});
   $('#preflight-fill').addEventListener('click',()=>{if(selectedPlanId)void inspectPlan(selectedPlanId,'draft');});
   $('#publication-submit').addEventListener('click',()=>{void submitPublication();});
+  $('#publication-association-inspect').addEventListener('click',()=>{void inspectAssociation();});
+  $('#publication-association-confirm').addEventListener('click',()=>{void associateListing();});
+  associationDialog.addEventListener('close',()=>{if(!associationDialog.open)associationReviewToken='';});
   for(const action of ['inspect','prepare','upload','preview'])$('#photo-'+action).addEventListener('click',()=>{if(selectedPhotoPlanId)void runPhotoAction(selectedPhotoPlanId,action).catch(error=>toast(cleanError(error)));});
   $('#new-plan').addEventListener('click',()=>editPlan());$('#overview-new-plan').addEventListener('click',()=>editPlan());
   for(const [id,event] of [['distribution-search','input'],['distribution-profile','change'],['distribution-status','change']])$('#'+id).addEventListener(event,()=>{distributionLimit=100;renderDistribution();});

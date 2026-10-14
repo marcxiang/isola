@@ -1,6 +1,6 @@
 # Development checkpoint
 
-Checkpoint: 2026-10-14, development version 0.5.2.
+Checkpoint: 2026-10-14, source version 0.5.3-dev.1. Read HANDOFF.md first when resuming on another computer. The last packaged app used for live publication is 0.5.2.
 
 ## Photo preparation
 
@@ -20,7 +20,7 @@ Saving or publishing requires a separate verified flow. A thumbnail alone does n
 
 ## Commerce integration
 
-The adapter readiness guard and incomplete polling remain in place. Publishing, messages, offers, labels and procurement still need real page evidence and durable receipts. Verify account/listing identity, price, quantity and buyer/order identity at the relevant steps. An accepted offer is not a paid sale. Procurement requires a verified paid order, matching shipping label, exact supplier quote and authorized purchase limits. Unknown results must be reconciled instead of replayed with fresh identifiers.
+The adapter readiness guard and incomplete polling remain in place. One manual publication has live page evidence; its durable result mapping remains unfinished. Messages, offers, labels and procurement still need real page evidence and durable receipts. Verify account/listing identity, price, quantity and buyer/order identity at the relevant steps. An accepted offer is not a paid sale. Procurement requires a verified paid order, matching shipping label, exact supplier quote and authorized purchase limits. Unknown results must be reconciled instead of replayed with fresh identifiers.
 
 Supplier photo claims use fixed set IDs and idempotency keys. Do not assume a retention window unless the supplier contract states one. A supplier claim supports one immutable listing association; later image reuse needs separate local history. The user confirmed the TEST package fits the Moyen shoe-box-size option. No exact dimensions or weight have been invented. Other products require their own parcel confirmation.
 
@@ -40,6 +40,16 @@ The workbench groups catalog products by sales environment, separates enabled pl
 
 The manual `submitPublication(planId)` bridge resolves the stored plan, supplier product and local photo manifest in the main process. `src/vinted-publish-submit.cjs` uses the publication journal and the existing window lock; the renderer cannot supply a proof or file path. The workbench exposes the action after a successful check, displays uncertain submissions and prevents repeat clicks. Candidate navigation is saved as evidence to investigate, never treated as a publication receipt. Background marketplace capabilities remain separate and gated by their own verification.
 
+## Receipt association checkpoint (not integrated)
+
+Vinted redirected the real submission to the owner profile with a success modal rather than directly to an item URL. The current navigation capture therefore did not establish a journal receipt. The existing submission remains `uncertain`, attempt count 1; do not reset it or publish the same item again.
+
+`src/vinted-listing-receipt.cjs` is a new standalone reader. It checks the current account and detail page twice, scopes owner controls and the standalone item price, and hashes loaded main-image URLs. It does not reconcile a journal or invent submission provenance. Full image URLs may differ between upload thumbnails and listing CDN variants; a digest mismatch must stay unresolved until a truthful image-identity or explicit review design is implemented.
+
+`src/commerce-publication-reconcile.cjs` is a new pure projection. Once a trusted journal receipt exists, it stages the active listing, claim history, matching original-cycle unsubmitted job and supplier association outbox in a single database snapshot. It does not send supplier requests. It is not yet wired into journal persistence. The supplier outbox has no worker and currently accepts only unsent pending/needs_review records.
+
+The association dialog and five UI fixtures are saved in this checkpoint. Production preload/main do not yet expose `inspectPublishedListing` or `associatePublishedListing`, so the new action remains hidden. Integration needs a main-only, short-lived review capability tied to the plan, original submission and current listing document, with a fresh re-read before the atomic write. The journal currently recognizes only observed submission navigation; add a distinct truthful operator-reviewed provenance rather than fabricating navigation.
+
 ## Runtime audit
 
 `src/proxy-auth.cjs` replaces the lifetime authentication counter. It releases successful URL attempts while limiting repeated failed credentials and rotating realms. Credentials are restricted to the configured proxy host and port. Main-process request completion is tied to the tab and navigation generation.
@@ -48,7 +58,7 @@ The Electron audit passed repeated navigation authentication, 35 successful chal
 
 ## Validation record
 
-The latest 2026-10-14 source passed 356 unit tests and 36 focused Electron desktop checks covering the commerce bridge, operations dashboard, publication UI, evidence and trusted native single-submit flow. This includes seven publication UI checks and three native submit checks. An earlier full desktop checkpoint passed 163 checks, including photo transport, proxy/storage audits, navigation and AI-control regressions; the focused run overlaps and is not added to that total. Independent review reproduced and verified fixes for account/photo changes at the last click boundary and late execution after a dispatch timeout. Real France evidence covers eight filled fields, one uploaded image, current-account binding and 15 read-only prepublication checks. The updated app was launched, but the Mac locked before the new real-page test could continue; no publish, buyer message, offer, label or purchase has been executed.
+The latest 2026-10-14 source passed 356 unit tests and 36 focused Electron desktop checks covering the commerce bridge, operations dashboard, publication UI, evidence and trusted native single-submit flow. This includes seven publication UI checks and three native submit checks. An earlier full desktop checkpoint passed 163 checks, including photo transport, proxy/storage audits, navigation and AI-control regressions; the focused run overlaps and is not added to that total. Independent review reproduced and verified fixes for account/photo changes at the last click boundary and late execution after a dispatch timeout. Real France evidence covers eight filled fields, one uploaded image, current-account binding and 15 read-only prepublication checks. After the Mac was unlocked, TEST was submitted exactly once through the guarded application button. Vinted displayed “Article en vente” and the owner profile showed one active item at €5. The actual item page showed the expected title, description, condition, black color, photo and owner controls. The separate €5.95 buyer total was not mistaken for the €5 item price. No buyer message, offer acceptance, shipping-label retrieval or purchase has been executed. Current checkpoint validation is 383/383 unit tests and 41/41 focused Electron checks; details are in HANDOFF.md.
 
 ## Contributions
 

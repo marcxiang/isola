@@ -38,6 +38,7 @@ await require(path.join(root,'test/pointer-feedback.cjs'))(api,check);
 await require(path.join(root,'test/commerce-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-dashboard-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-publication-ui-smoke.cjs'))(api,check);
+await require(path.join(root,'test/commerce-association-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-photo-service-smoke.cjs'))(api,check);
 await require(path.join(root,'test/vinted-photo-smoke.cjs'))(api,check);
 await require(path.join(root,'test/runtime-audit-v052.cjs'))(api,check);

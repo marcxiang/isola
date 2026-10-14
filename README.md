@@ -6,14 +6,14 @@ Isola 是一个基于 Electron 的 macOS 浏览器项目，支持独立浏览器
 
 ## Project status / 当前状态
 
-The current development version is **0.5.2**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. It is a development snapshot, not a completed unattended commerce system.
+The current development version is **0.5.3-dev.1**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. A real test item has now been published once at €5. Its local publication record remains uncertain because Vinted redirected to the owner profile; receipt association is the next unfinished integration. This checkpoint also saves the reader, projection and association UI under development. It is not a completed unattended commerce system.
 
 - Environment management, persistent Chromium sessions, proxy configuration, AI click/scroll feedback, supplier catalog synchronization and listing plans are implemented.
-- Listing-field preparation has been exercised on the Vinted France new-item page. Publishing, buyer messages, offers, shipping labels and real supplier purchases have not completed end-to-end validation.
+- Listing fields, photo upload and one guarded manual publication have been exercised on Vinted France. The live item was checked visually; application receipt association, buyer messages, offers, shipping labels and real supplier purchases still need end-to-end validation.
 - Supplier photo claims persist their request identity and receipt, download and validate image files, and expose previews in the workbench. Uploads are bound to the current profile and page; uncertain results are checked without selecting the files again. The France new-item page has received the test photo successfully.
 - The commerce adapter still blocks unattended business actions. Do not remove this guard merely to make the workflow run.
 
-商品销售分布、账号核验、照片领取、下载、预览与网页上传已接入；真实法国站的 TEST 表单已通过发布前 15 项核对。正式发布、消息、报价、面单及采购流程尚未跑通，不能用于正式无人值守运营。详细接续事项见 [DEVELOPMENT.md](DEVELOPMENT.md)。
+商品销售分布、账号核验和照片流程已接入；真实法国站 TEST 商品已按 5 欧元成功发布一次。运营台仍保留待核对记录，禁止重复发布；回执关联正在开发。消息、报价、面单及采购流程尚未跑通。办公室请先看 [HANDOFF.md](HANDOFF.md)，版本记录见 [CHANGELOG.md](CHANGELOG.md)，技术说明见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 ## Features / 功能
 

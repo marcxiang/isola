@@ -84,6 +84,9 @@ module.exports = async function commerceSmoke(api, check) {
     await check('commerce connects and syncs catalog through actual localhost SKU Desk transport',async()=>{
       await window.webContents.executeJavaScript(`document.querySelector('#connect').click()`);
       await waitFor(()=>engine.connection.status==='connected','SKU account connection');
+      // Connection state is emitted before the renderer's request finally
+      // releases its controls. Wait for the actual sync action to be usable.
+      await waitFor(()=>window.webContents.executeJavaScript(`!document.querySelector('#sync').disabled`),'sync control after connection');
       await window.webContents.executeJavaScript(`document.querySelector('[data-page="inventory"]').click();document.querySelector('#sync').click()`);
       await waitFor(()=>engine.db.products.length===2&&engine.db.photoSets.length===3,'catalog and photo sets sync');await frames();
       const state=await invoke('state');assert.equal(state.connection.account,'QA SKU Desk');assert.equal(state.products[0].priceCents,790);assert.equal(state.products[0].stock,12);assert.equal(state.photoSets[1].claimedByMe,true);

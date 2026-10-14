@@ -65,7 +65,21 @@ Electron tests require a desktop session; network tests start local servers. The
 npm run package
 ```
 
-The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). Windows:
+The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). The latest 0.5.3-dev.6 source currently lives on `codex/windows-association-v053`, while `main` remains at the earlier checkpoint. Check out the development branch before building the latest version.
+
+For a local Apple Silicon development build on macOS 13 or later:
+
+```sh
+git switch codex/windows-association-v053
+npm ci
+npm run package -- --platform=darwin --arch=arm64
+codesign --force --deep --sign - dist/Isola-darwin-arm64/Isola.app
+codesign --verify --deep --strict dist/Isola-darwin-arm64/Isola.app
+```
+
+The last two commands apply and verify a local ad-hoc signature. They do not provide Developer ID signing or Apple notarization. Do not modify `app.asar` or its integrity metadata after packaging; Electron 44 validates the embedded digest. Before running tests on a fresh install, initialize the lazy runtime once with `node -e "require('electron')"`; do not start the first build and tests concurrently.
+
+Windows:
 
 ```sh
 npm run package:windows

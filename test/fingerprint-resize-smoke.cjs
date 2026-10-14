@@ -32,6 +32,15 @@ module.exports = async function fingerprintResize(api, check) {
     while (Date.now() < until) { if (predicate()) return; await pause(40); }
     throw Error(label + ' did not settle');
   }
+  async function focusInput(targetWindow=window,tab=targetWindow.tabs.find(row=>row.id===targetWindow.activeTab)) {
+    // A macOS test app can remain inactive after resize even when its window is
+    // visible. Establish the actual foreground precondition before checking a
+    // foreground-only overlay; do not weaken the production focus boundary.
+    if(process.platform==='darwin')require('electron').app.focus({steal:true});
+    targetWindow.show();targetWindow.focus();
+    await waitFor(()=>!targetWindow.isDestroyed()&&targetWindow.isFocused(),'Foreground input window');
+    tab?.view.webContents.focus();
+  }
   async function settle(targetWindow = window) {
     // Native bounds alone are insufficient: the newest CDP metrics must also be
     // acknowledged. Inactive views intentionally remain not-ready for input.
@@ -127,7 +136,7 @@ module.exports = async function fingerprintResize(api, check) {
     for (const presetId of ['pixel7', 'iphone13','windows-desktop']) {
       const preset = presetId==='windows-desktop'?{operatingSystem:'windows',deviceModel:'',width:1280,height:800,screenWidth:1280,screenHeight:800,deviceScaleFactor:1,maxTouchPoints:0}:DEVICE_PRESETS[presetId];
       profile = api.saveProfile({ ...preset, name: 'QA fixed viewport ' + presetId, fingerprintMode: 'custom', language: 'fr-FR', timezone: 'Europe/Paris', url: origin + '/' + presetId });
-      await api.launch(profile.id); window = api.windows.get(profile.id); window.show(); window.focus();
+      await api.launch(profile.id); window = api.windows.get(profile.id); await focusInput();
       const first = window.tabs[0]; first.view.webContents.setBackgroundThrottling(false);
       await settle(); const baseline = await read(first, true); expectedIdentity(baseline, preset);
       const original = window.getBounds();
@@ -173,7 +182,7 @@ module.exports = async function fingerprintResize(api, check) {
         return { stages, graphics: final.graphics, graphicsScope: 'Actual host WebGL observation, not a selected phone GPU', clientHintsScope: preset.operatingSystem === 'ios' ? 'iOS compatibility on Chromium; UA-CH deliberately absent' : 'Measured Chromium Android model hints' };
       });
       await check(presetId+' native mouse input hits near and far CSS targets through the scaled view',async()=>{
-        window.setSize(820,620,false);await settle();window.show();window.focus();first.view.webContents.focus();await pause(100);
+        window.setSize(820,620,false);await settle();await focusInput(window,first);
         const c=first.view.webContents;await bounded(c.capturePage({x:0,y:0,width:1,height:1}),'First input frame');const values=[];
         for(const id of ['near','far']){
           await reset(first);const css=await point(first,id),scale=getDisplayState(c).scale,p={x:Math.round(css.x*scale),y:Math.round(css.y*scale)};
@@ -183,14 +192,23 @@ module.exports = async function fingerprintResize(api, check) {
       });
       await check(presetId+' AI mouse or touch and its visible overlay use the same noncentral scale mapping',async()=>{
         const c=first.view.webContents,values=[];
+        const lifecycle=[];
+        const state=()=>{const surface=window.controlOverlay.getWindow();return {focused:window.isFocused(),visible:window.isVisible(),minimized:window.isMinimized(),activeTab:window.activeTab===first.id,display:getDisplayState(c),overlayExists:!!surface&&!surface.isDestroyed(),overlayVisible:!!surface&&!surface.isDestroyed()&&surface.isVisible()};};
+        const listeners=['focus','blur','resize','show','hide','minimize'].map(name=>{const listener=()=>{lifecycle.push({event:name,time:Date.now(),...state()});if(lifecycle.length>40)lifecycle.shift();};window.on(name,listener);return [name,listener];});
+        try{
         for(const [id,size] of [['near',[1180,940]],['far',[780,580]]]){
-          window.setSize(...size,false);await settle();window.focus();await pause(80);await reset(first);let shown;
+          window.setSize(...size,false);await settle();await focusInput(window,first);await reset(first);let shown,feedbackError;
+          const before=state();
           await aiClick(first,id,{onProgress:async event=>{
             if(event.stage!=='preparing')return;
-            const surface=window.controlOverlay.getWindow();
-            shown=surface?{visible:surface.isVisible(),bounds:surface.getBounds(),parent:window.getContentBounds(),view:first.view.getBounds(),scale:getDisplayState(c).scale,event,render:await surface.webContents.executeJavaScript('({pointer:document.querySelector("#pointer").style.transform,rect:{x:parseFloat(document.querySelector("#target").style.left),y:parseFloat(document.querySelector("#target").style.top),width:parseFloat(document.querySelector("#target").style.width),height:parseFloat(document.querySelector("#target").style.height)}})')}:null;
+            try{
+              const surface=window.controlOverlay.getWindow();
+              shown=surface?{visible:surface.isVisible(),bounds:surface.getBounds(),parent:window.getContentBounds(),view:first.view.getBounds(),scale:getDisplayState(c).scale,event,atProgress:state(),render:await surface.webContents.executeJavaScript('({pointer:document.querySelector("#pointer").style.transform,rect:{x:parseFloat(document.querySelector("#target").style.left),y:parseFloat(document.querySelector("#target").style.top),width:parseFloat(document.querySelector("#target").style.width),height:parseFloat(document.querySelector("#target").style.height)}})')}:null;
+            }catch(error){feedbackError=error;}
           }});
-          assert.ok(shown?.visible,'A real app overlay was displayed');
+          const diagnostic=JSON.stringify({presetId,id,before,after:state(),shown,lifecycle,feedbackError:feedbackError?.stack});
+          assert.ok(!feedbackError,'Overlay progress inspection failed: '+diagnostic);
+          assert.ok(shown?.visible,'A real app overlay was displayed: '+diagnostic);
           const match=/translate\(([-.\d]+)px,\s*([-.\d]+)px\)/.exec(shown.render.pointer);assert.ok(match,'Rendered pointer coordinates');
           for(const [index,key] of [[1,'x'],[2,'y']])assert.ok(Math.abs(Number(match[index])-shown.event.point[key]*shown.scale)<0.1,'Overlay point '+key);
           for(const key of ['x','y','width','height'])assert.ok(Math.abs(shown.render.rect[key]-shown.event.rect[key]*shown.scale)<0.1,'Overlay rect '+key);
@@ -199,6 +217,7 @@ module.exports = async function fingerprintResize(api, check) {
         }
         if(presetId==='pixel7'){window.setSize(1180,940,false);await settle();window.controlOverlay.clear();values.push({screenshot:await screenshot(window,'resize-window-large.png')});}
         return values;
+        }finally{for(const [name,listener] of listeners)window.removeListener(name,listener);}
       });
       await check(presetId+' unavailable or changed display version sends no late pointer input',async()=>{
         const c=first.view.webContents,originalSend=c.debugger.sendCommand,commands=[];let release,entered=false;
@@ -238,7 +257,7 @@ module.exports = async function fingerprintResize(api, check) {
       await api.launch(a.id);await api.launch(b.id);const wa=api.windows.get(a.id),wb=api.windows.get(b.id),ta=wa.tabs[0],tb=wb.tabs[0];
       await settle(wa);await settle(wb);const before=await read(tb),bounds=tb.view.getBounds(),display=getDisplayState(tb.view.webContents);
       for(const [width,height] of [[740,560],[1320,1000],[900,680]]){wa.setSize(width,height,false);await settle(wa);assert.deepEqual((await read(tb)).identity,before.identity);assert.deepEqual((await read(tb)).outer,before.outer);assert.deepEqual(tb.view.getBounds(),bounds);assert.deepEqual(getDisplayState(tb.view.webContents),display);}
-      wb.show();wb.focus();await pause(100);await reset(tb);await aiClick(tb,'far');const clicked=await receipt(tb,'far',DEVICE_PRESETS.iphone13);assert.deepEqual(tb.view.getBounds(),bounds);assert.deepEqual(getDisplayState(tb.view.webContents),display);
+      await focusInput(wb,tb);await reset(tb);await aiClick(tb,'far');const clicked=await receipt(tb,'far',DEVICE_PRESETS.iphone13);assert.deepEqual(tb.view.getBounds(),bounds);assert.deepEqual(getDisplayState(tb.view.webContents),display);
       const result={bounds,display,identity:before.identity,clicked};await close(a,wa);await close(b,wb);return result;
     });
   } finally {

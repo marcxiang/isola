@@ -56,7 +56,7 @@ test('sales runtime only enables implemented listing and emits no synthetic sale
 });
 
 test('listing execution needs its exact live controller, unique task and matching profile lease',async()=>{
- const changes=[f=>f.engine.active.delete('profile-1'),f=>f.engine.active.set('profile-1',new AbortController()),f=>f.engine.leases.release(f.context.lease),f=>f.context.controller.abort(),f=>f.context.job.state='queued',f=>f.context.plan.enabled=false,f=>f.context.job.payload.cycle=1,f=>f.engine.db.jobs.push(clone(f.context.job)),f=>f.engine.configPending=1,f=>f.engine.faulted=true];
+ const changes=[f=>f.engine.active.delete('profile-1'),f=>f.engine.active.set('profile-1',new AbortController()),f=>f.engine.leases.release(f.context.lease),f=>f.context.controller.abort(),f=>f.context.job.state='queued',f=>f.context.plan.enabled=false,f=>f.context.job.payload.cycle=1,f=>f.context.plan.listingRevision=1,f=>f.context.job.payload.listingRevision=1,f=>f.engine.db.jobs.push(clone(f.context.job)),f=>f.engine.configPending=1,f=>f.engine.faulted=true];
  for(const change of changes){const f=fixture();change(f);await assert.rejects(f.run(),{code:'STOPPED'},String(change));assert.equal(f.calls.length,0);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);}
 });
 
@@ -167,4 +167,11 @@ test('automatic launch holds the global UI owner across asynchronous startup',as
 test('a closed profile that fails to open never starts catalog or photo work',async()=>{
  const f=fixture();f.windows.clear();f.runtime.ensureProfile=async()=>{};
  await assert.rejects(f.run(),{code:'PAGE_BUSY'});assert.equal(f.calls.length,0);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);
+});
+
+test('an archived withdrawal cannot make a later revision failure look like another uncertain publication',async()=>{
+ const f=fixture({hooks:{catalog:async()=>{throw failure('READ_TIMEOUT','Catalog read timed out');}}}),plan=f.context.plan,job=f.context.job;
+ plan.listingRevision=1;job.payload.listingRevision=1;job.dedupeKey='listing:'+plan.id+':0:r1';
+ f.engine.db.publications.submissions.push({id:'old-submission',state:'uncertain',attemptCount:1,proof:{facts:{planId:plan.id,cycle:0,listingRevision:0}},closedWithdrawal:{kind:'operator_confirmed_deletion'}});
+ await assert.rejects(f.run(),error=>error.code==='READ_TIMEOUT'&&error.ambiguous!==true);assert.equal(f.calls.some(row=>row.name==='catalog'),true);assert.equal(f.calls.some(row=>row.name==='photos'),false);assert.equal(f.clicks,0);
 });

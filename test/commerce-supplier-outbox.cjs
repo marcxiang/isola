@@ -132,3 +132,36 @@ test('photo reuse preserves a synced first reference and restores a later pendin
  const beforeCalls=f.calls.length,result=await f.worker.run(f.engine,nextId,{allowDispatch:true});assert.equal(result.state,'needs_review');assert.match(result.reason,/API 1.8 不支持更换首次关联/);assert.equal(result.attemptCount,0);assert.equal(f.calls.length,beforeCalls);assert.deepEqual(f.engine.db.publicationSupplierSync[0],original);
  const repeated=clone(f.engine.db.publicationSupplierSync);repeated[0]={...clone(f.row),state:'pending',attemptCount:0,operation:null,receipt:null};repeated[1].state='pending';assert.throws(()=>restoreSupplierSync(repeated),{code:'SUPPLIER_OUTBOX_INVALID'});
 });
+
+function replacementAfterWithdrawal(){
+ const f=fixture(),old=f.engine.db.publicationSupplierSync[0],original=f.engine.db.publications.submissions[0];old.state='cancelled';old.reason='Original item deleted before supplier association';original.closedWithdrawal={kind:'operator_confirmed_deletion',reason:'deleted_not_sold',confirmed:true,profileId:'profile-1',memberId:'123',listingId:'98765',url:old.payload.listingUrl};
+ const listingId='98766',payload={...old.payload,listingId,listingUrl:'https://www.vinted.fr/items/'+listingId},id='mark-listed-'+createHash('sha256').update(JSON.stringify(['claim-1',listingId])).digest('hex');
+ const next={...clone(old),id,payload,submissionId:'submission-2',state:'pending',reason:'Replacement publication verified'};
+ f.engine.db.publicationSupplierSync.push(next);f.engine.db.claims[0].listings.push({listingId,url:payload.listingUrl});
+ f.engine.db.publications.submissions.push({...clone(original),id:'submission-2',closedWithdrawal:undefined,receipt:{listingId,url:payload.listingUrl}});
+ f.client.markListed=async(claimId,payload,options)=>{f.calls.push(['mark',claimId,clone(payload),options.idempotencyKey]);const saved=f.saved.publicationSupplierSync.find(row=>row.id===id);assert.equal(saved.state,'dispatching');assert.equal(saved.attemptCount,1);f.remote.set.claim={id:claimId,platform:payload.platform,listing_id:payload.listingId,listing_url:payload.listingUrl};return {ok:true};};
+ return {...f,next,id,run:options=>f.worker.run(f.engine,id,options)};
+}
+
+test('a replacement can send the first supplier association when every earlier listing was withdrawn before dispatch',async()=>{
+ const f=replacementAfterWithdrawal(),old=clone(f.engine.db.publicationSupplierSync[0]),result=await f.run({allowDispatch:true});assert.equal(result.state,'synced');assert.equal(result.attemptCount,1);assert.equal(f.marks().length,1);assert.equal(f.marks()[0][2].listingId,'98766');assert.deepEqual(f.engine.db.publicationSupplierSync[0],old);
+ await f.run({allowDispatch:true});assert.equal(f.marks().length,1);assert.equal(restoreSupplierSync(f.engine.db.publicationSupplierSync).length,2);
+});
+
+test('missing withdrawal or cancelled association evidence keeps reused photos read-only',async()=>{
+ for(const change of [db=>{db.publicationSupplierSync.shift();},db=>{delete db.publications.submissions[0].closedWithdrawal;},db=>{db.publicationSupplierSync[0].state='needs_review';},db=>{db.publicationSupplierSync[0].submissionId=null;},db=>{db.claims[0].listings.unshift({listingId:'98764',url:'https://www.vinted.fr/items/98764'});}]){
+  const f=replacementAfterWithdrawal();change(f.engine.db);assert.equal((await f.run({allowDispatch:true})).state,'needs_review');assert.equal(f.calls.length,0);assert.equal(f.marks().length,0);
+ }
+});
+
+test('a previously attempted supplier association cannot be replaced by a new listing after deletion',async()=>{
+ for(const mode of ['synced','uncertain']){
+  const f=fixture();await f.run({allowDispatch:true});const attempted=clone(f.engine.db.publicationSupplierSync[0]),g=replacementAfterWithdrawal();g.engine.db.publicationSupplierSync[0]=attempted;if(mode==='uncertain')Object.assign(g.engine.db.publicationSupplierSync[0],{state:'uncertain',receipt:null});
+  if(mode==='uncertain'){await assert.rejects(g.run({allowDispatch:true}),{code:'SUPPLIER_OUTBOX_INVALID'});}else assert.equal((await g.run({allowDispatch:true})).state,'needs_review');assert.equal(g.calls.length,0);assert.equal(g.marks().length,0);
+ }
+});
+
+test('changed withdrawn-association history during a supplier read prevents the replacement POST',async()=>{
+ const f=replacementAfterWithdrawal(),claim=f.client.claim;f.client.claim=async id=>{const receipt=await claim(id);f.engine.db.publicationSupplierSync[0].state='needs_review';return receipt;};
+ await assert.rejects(f.run({allowDispatch:true}),{code:'SUPPLIER_OUTBOX_CHANGED'});assert.equal(f.marks().length,0);
+});

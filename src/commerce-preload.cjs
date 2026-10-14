@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('commerce', {
   submitPublication: planId => ipcRenderer.invoke('commerce-publication-submit', planId),
   inspectPublishedListing: planId => ipcRenderer.invoke('commerce-published-inspect', planId),
   associatePublishedListing: (planId,reviewToken) => ipcRenderer.invoke('commerce-published-associate', planId,reviewToken),
+  confirmDeletedListing: (planId,confirmation) => ipcRenderer.invoke('commerce-confirm-deleted-listing', planId,confirmation),
   prepareDraft: planId => ipcRenderer.invoke('commerce-prepare-draft', planId),
   inspectPhotos: planId => ipcRenderer.invoke('commerce-photos-inspect', planId),
   preparePhotos: planId => ipcRenderer.invoke('commerce-photos-prepare', planId),

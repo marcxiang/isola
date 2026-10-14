@@ -19,6 +19,7 @@ const {createPhotoService}=require('./commerce-photo-service.cjs');
 const { SKUDeskClient } = require('./sku-desk.cjs');
 const { RequestGate } = require('./sku-transport.cjs');
 const {stopDraft,installUnloadGuard,closeContents}=require('./navigation-lifecycle.cjs');
+const {loadSalesPage}=require('./sales-navigation.cjs');
 const {buildFingerprintConfig,FINGERPRINT_PRESETS,DEVICE_PRESETS}=require('./fingerprint-config.cjs');
 const {displayLayout,createDisplayController,getDisplayState}=require('./display-transform.cjs');
 const {profileManagerStatus,ACCOUNT_OBSERVATION_MAX_AGE_MS}=require('./manager-status.cjs');
@@ -217,12 +218,20 @@ async function stopPageAutomation(w) {
   const until=Date.now()+15000;
   while(w.aiAgent?.state.running){if(Date.now()>=until)throw Error('AI 仍在停止，请等待当前步骤结束后重试。页面已保留。');await new Promise(resolve=>setTimeout(resolve,20));}
 }
-async function navigateTab(w, tab, url, userAction) {
+async function navigateTab(w, tab, url, userAction, salesNavigation) {
   if(!tab||tab.view.webContents.isDestroyed())throw Error('当前页面已关闭');
   const c=tab.view.webContents,endIntent=userAction?tab.unloadGuard.begin(userAction):()=>{},navigationId=Symbol('navigation');
   tab.navigationId=navigationId;tab.error='';tab.url=url;sendState(w);
-  try {await deadline(c.loadURL(url),30000,'页面加载');return true;}
+  try {
+    if(salesNavigation)await loadSalesPage({contents:c,target:url,signal:salesNavigation.signal,guard:()=>{
+      salesNavigation.guard();
+      if(tab.navigationId!==navigationId||w.activeTab!==tab.id||!w.tabs.includes(tab))throw Object.assign(Error('后台标签已切换，请核对原页面'),{code:'PAGE_CHANGED'});
+    },readError:()=>tab.error||tab.unloadGuard?.blocked&&tab.unloadGuard.reason,onMonitor:monitor=>{tab.salesNavigation=monitor;}});
+    else await deadline(c.loadURL(url),30000,'页面加载');
+    return true;
+  }
   catch(e){
+    if(salesNavigation){if(!c.isDestroyed()&&tab.navigationId===navigationId){c.stop();tab.error=e.message;sendState(w);}throw e;}
     if(c.isDestroyed()||tab.navigationId!==navigationId)return false;
     if(e.code==='ERR_ABORTED'||e.errno===-3||/ERR_ABORTED/.test(e.message)){
       tab.url=c.getURL();tab.loading=c.isLoading();tab.error=tab.unloadGuard.blocked?tab.unloadGuard.reason:'';sendState(w);return false;
@@ -318,13 +327,13 @@ async function openSalesPage(profileId,url,{signal,guard,jobId,role}){
  try{
   let tab=w.tabs.find(row=>row.id===salesTabs.get(key)&&!row.view.webContents.isDestroyed());
   if(tab&&tab.view.webContents.getURL()!==url)throw Object.assign(Error('原后台标签已改变，请核对原页面'),{code:'PAGE_CHANGED'});
-  if(tab){w.activeTab=tab.id;resizeViews(w);sendState(w);}else{tab=await addTab(w,url);salesTabs.set(key,tab.id);}
-  valid();if(tab.error||tab.view.webContents.isDestroyed()||tab.view.webContents.getURL()!==url)throw Object.assign(Error('后台页面未能完整打开，请检查账号和网络'),{code:'PAGE_CHANGED'});
+  if(tab){w.activeTab=tab.id;resizeViews(w);sendState(w);}else tab=await addTab(w,url,{salesNavigation:{signal,guard:valid},onCreated:created=>salesTabs.set(key,created.id)});
+  valid();if(tab.error||tab.view.webContents.isDestroyed()||tab.view.webContents.isLoadingMainFrame()||tab.view.webContents.getURL()!==url)throw Object.assign(Error('后台页面未能完整打开，请检查账号和网络'),{code:'PAGE_CHANGED'});
   if(w.isMinimized())w.restore();w.show();w.focus();tab.view.webContents.focus();
   return {tab};
  }finally{w.navigationPending=false;}
 }
-async function addTab(w, target) {
+async function addTab(w, target, {salesNavigation,onCreated}={}) {
   await stopDraft(w);
   if (w.tabs.length >= 20) throw Error('每个环境最多打开 20 个标签页');
   const view = new WebContentsView({ webPreferences: { session: sesFor(w.profile), contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, devTools: false } });
@@ -334,6 +343,7 @@ async function addTab(w, target) {
   tab.isInputVisible=()=>!w.isDestroyed()&&w.isVisible()&&!w.isMinimized()&&w.activeTab===tab.id&&getDisplayState(c).ready;
   tab.controlFeedback=event=>w.controlOverlay.show(tab,event);
   w.tabs.push(tab); w.activeTab = tab.id; w.contentView.addChildView(view); resizeViews(w); sendState(w);
+  onCreated?.(tab);
   c.setAudioMuted(false); c.setWebRTCIPHandlingPolicy(fingerprint.webRTCPolicy);
   tab.unloadGuard=installUnloadGuard(w,tab,{showMessageBoxSync:(...args)=>dialog.showMessageBoxSync(...args),onState:()=>sendState(w),isAutomating:()=>!!w.aiAgent?.state.running||!!w.vintedDraftController||!!commerce?.active.has(w.profile.id)});
   c.once('destroyed',()=>{
@@ -344,7 +354,7 @@ async function addTab(w, target) {
   tab.proxyAuth=new ProxyAuthGuard(w.profile.proxy);
   c.on('did-start-navigation',(_event,_url,isInPlace,isMainFrame)=>{if(isMainFrame){invalidateAccountObservation(w.profile.id);if(!isInPlace)tab.proxyAuth.beginNavigation();}});
   c.on('login', (event, details, auth, callback) => { event.preventDefault();const credentials=tab.proxyAuth.credentials(details,auth);if(credentials)callback(credentials.username,credentials.password);else callback(); });
-  c.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url)) addTab(w, url).catch(e => { tab.error = e.message; sendState(w); }); return { action: 'deny' }; });
+  c.setWindowOpenHandler(({ url }) => { if(tab.salesNavigation){tab.salesNavigation.rejectNewWindow();return {action:'deny'};} if (/^https?:\/\//.test(url)) addTab(w, url).catch(e => { tab.error = e.message; sendState(w); }); return { action: 'deny' }; });
   c.on('will-navigate', (e, url) => { if (!/^https?:\/\//.test(url)) e.preventDefault(); });
   c.on('page-title-updated', (_, title) => { tab.title = title; sendState(w); });
   c.on('did-navigate', () => { tab.aiContext = null; });
@@ -354,11 +364,11 @@ async function addTab(w, target) {
   c.on('did-fail-load', (e, code, description, url, isMain) => { if (isMain && code !== -3) { tab.error = description; sendState(w); } });
   c.on('render-process-gone', () => {invalidateAccountObservation(w.profile.id);tab.error = '页面进程退出，请重新加载'; sendState(w); });
   c.debugger.on('detach', (_, reason) => { if (!quitting && !c.isDestroyed() && reason !== 'target closed') { tab.error = '指纹配置连接中断，请关闭并重新启动此环境'; c.stop(); view.setVisible(false); sendState(w); } });
-  try { await configure(c, w.profile, tab); await navigateTab(w, tab, target || localFile('check.html')); } catch (e) { tab.error = e.message; sendState(w); throw e; }
+  try { await configure(c, w.profile, tab); await navigateTab(w, tab, target || localFile('check.html'),undefined,salesNavigation); } catch (e) { tab.error = e.message; sendState(w); throw e; }
   return tab;
 }
 async function launch(id,{guard=()=>{},initialURL}={}) {
-  guard();const p = profile(id); if (locks.has(id)) throw Object.assign(Error('环境正在启动'),{code:'PAGE_BUSY'});if (windows.has(id)) { windows.get(id).focus(); return; }
+  guard();const p = profile(id); if (locks.has(id)) throw Object.assign(Error('环境正在启动'),{code:'PAGE_BUSY'});if (windows.has(id)) { showWorkspaceWindow(windows.get(id)); return; }
   locks.add(id); notify(); let w, route;
   try {
     const s = sesFor(p); route = await createProxyRoute(p.proxy); routes.set(id, route);guard();
@@ -382,7 +392,7 @@ async function launch(id,{guard=()=>{},initialURL}={}) {
     w.on('close',e=>{w.vintedDraftController?.abort();if(w.closeApproved)return;e.preventDefault();void closeBrowserWindow(w).catch(error=>{log('window close stopped: '+error.message);const tab=w.tabs.find(t=>t.id===w.activeTab);if(tab){tab.error=error.message;sendState(w);}});});
     w.on('closed', () => { w.vintedDraftController?.abort();w.aiAgent.stop();commerce?.active.get(id)?.abort();invalidateAccountObservation(id); for (const t of [...w.tabs]) { if (!t.view.webContents.isDestroyed()) t.view.webContents.close(); } windows.delete(id); routes.delete(id); s.closeAllConnections().finally(() => route.close()).catch(() => {}); notify(); });
     // The toolbar is usable even while a tab is starting or a proxy is unavailable.
-    await w.loadFile(path.join(__dirname, 'browser.html'));guard();await addTab(w, initialURL||p.url);guard();
+    await w.loadFile(path.join(__dirname, 'browser.html'));guard();await addTab(w, initialURL||p.url);guard();showWorkspaceWindow(w);
     const openedBefore=p.lastOpenedAt;p.lastOpenedAt=new Date().toISOString();try{save();}catch{p.lastOpenedAt=openedBefore;log('recent-open metadata could not be saved');}
     log('environment started');
   } catch (e) { log('environment startup failed: ' + e.message); if (w && !w.isDestroyed()) await closeBrowserWindow(w,{userInitiated:false}); else if (route) { await route.close(); routes.delete(id); } throw e; }
@@ -428,13 +438,16 @@ function register() {
   desk('commerce-publication-inspect',(c,id)=>inspectPublication(c,id));
   desk('commerce-published-inspect',(c,id)=>associationService.inspect(c,id));
   desk('commerce-published-associate',(c,id,token)=>associationService.associate(c,id,token));
+  desk('commerce-confirm-deleted-listing',(c,id,input)=>c.confirmDeletedListing(id,input));
   desk('commerce-publication-submit',(c,id)=>submitPublication(c,id,{beforeSubmit:plan=>{const w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}}));
   desk('commerce-preflight',(c,id)=>commercePreparation.preflight(c,id));desk('commerce-prepare-draft',(c,id)=>commercePreparation.prepareDraft(c,id,{beforeFields:plan=>{const w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}}));
   desk('commerce-account-inspect',(c,id)=>c.configure(async(signal,guard)=>{
     const plan=c.plan(id),w=windows.get(plan.profileId);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}
-    const result=await new VintedAccount(c.adapter).inspectAccount(plan.profileId,{signal});guard();
-    const account=c.bindMarketAccount(plan.profileId,result);c.event('info','已核对 '+account.username+' 的 Vinted 账号');c.persist();c.emit();
-    return {account,message:result.message};
+    let result;
+    try{result=await new VintedAccount(c.adapter).inspectAccount(plan.profileId,{signal,expectedAccount:c.db.marketAccounts.find(row=>row.profileId===plan.profileId),closeMenu:true});guard();}
+    catch(error){if(!c.storageFaulted()){c.event(error.code==='STOPPED'?'info':'warning','账号核验未完成：'+String(error.message||'请查看当前页面').slice(0,450));c.persist();c.emit();}throw error;}
+    const account=c.bindMarketAccount(plan.profileId,result);c.event('info',result.usernameSource==='saved-binding'?'已核对 Vinted 账号 ID；用户名沿用绑定：'+account.username:'已核对 '+account.username+' 的 Vinted 账号');c.persist();c.emit();
+    return {account,usernameSource:result.usernameSource,message:result.message};
   }));
   desk('commerce-open-listing',(c,id)=>openListingPage(c,id));desk('commerce-open-active-listing',(c,id)=>openListingPage(c,id,{active:true}));
   desk('commerce-photos-inspect',(c,id)=>photoService.inspect(c,id));desk('commerce-photos-prepare',(c,id)=>photoService.prepare(c,id));desk('commerce-photos-preview',(c,id)=>photoService.preview(c,id));desk('commerce-photos-upload',(c,id,recheckOnly=false)=>photoService.upload(c,id,{recheckOnly}));

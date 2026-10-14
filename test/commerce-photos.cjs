@@ -149,3 +149,9 @@ test('restart recovers claiming state and rejects corrupted, duplicate or identi
  }
  const uncertain=structuredClone(good),row=uncertain.photoPreparations[0];row.state='claiming';delete row.receipt;delete row.receiptHash;delete row.claimId;delete row.images;row.assets=[];uncertain.claims=[];fs.writeFileSync(f.engine.file,JSON.stringify(uncertain));const restarted=new CommerceEngine(f.options);assert.equal(restarted.db.photoPreparations[0].state,'uncertain');await restarted.close();fs.writeFileSync(f.engine.file,JSON.stringify(good));
 });
+
+test('an old listing revision cannot reuse the live lease to claim or download photos',async t=>{
+ const f=await fixture(t),engine=f.engine;f.plan.enabled=true;engine.seed();const job=engine.db.jobs[0],controller=new AbortController();job.state='running';const lease=engine.leases.acquire(job.profileId,job.id);engine.active.set(job.profileId,controller);f.plan.listingRevision=1;
+ try{await assert.rejects(preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode}),{code:'STOPPED'});assert.equal(f.calls.length,0);assert.equal(engine.db.photoPreparations.length,0);}
+ finally{engine.active.delete(job.profileId);engine.leases.release(lease);}
+});

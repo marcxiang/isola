@@ -9,10 +9,10 @@ const {publicationInput}=require('./commerce-publication-service.cjs');
 const {VintedPublishSubmit,publicationJournal}=require('./vinted-publish-submit.cjs');
 const {VintedListingReceipt,listingURL}=require('./vinted-listing-receipt.cjs');
 const {createSupplierOutbox}=require('./commerce-supplier-outbox.cjs');
-const {FORM_URL}=require('./vinted-publication.cjs');
+const {FORM_URL,listingRevision,isPublicationOpen}=require('./vinted-publication.cjs');
 const clone=value=>JSON.parse(JSON.stringify(value));
 const fail=(code,message,ambiguous=false)=>Object.assign(Error(message),{code,ambiguous});
-const binding=plan=>JSON.stringify([plan.id,plan.profileId,plan.productId,plan.sku,plan.enabled,plan.completedCount,plan.targetCount,plan.listingPriceCents,plan.minOfferCents,plan.reuseOwnPhotos,plan.listing]);
+const binding=plan=>JSON.stringify([plan.id,plan.profileId,plan.productId,plan.sku,plan.enabled,plan.completedCount,listingRevision(plan.listingRevision),plan.targetCount,plan.listingPriceCents,plan.minOfferCents,plan.reuseOwnPhotos,plan.listing]);
 
 // One visible browser action at a time across profiles. The engine may run
 // independent supplier reads concurrently, but never steals focus mid-click.
@@ -32,7 +32,7 @@ class VintedSalesRuntime extends VintedAdapter {
  }
  assertOwned({engine,job,signal},expected){
   const rows=engine.db.jobs.filter(row=>row.id===job.id),current=rows[0],plans=engine.db.plans.filter(row=>row.id===job.planId),plan=plans[0];
-  if(!signal||signal.aborted||engine.faulted||engine.closing||engine.configPending||engine.active.get(job.profileId)?.signal!==signal||!engine.leases.snapshot().some(row=>row.profileId===job.profileId&&row.jobId===job.id)||rows.length!==1||plans.length!==1||!['running','completed'].includes(current?.state)||current.planId!==job.planId||current.profileId!==job.profileId||current.productId!==job.productId||current.type!=='listing'||!plan?.enabled||plan.profileId!==job.profileId||plan.productId!==job.productId||current.payload?.cycle!==plan.completedCount)throw fail('STOPPED','售卖任务已停止或所属计划已改变');
+  if(!signal||signal.aborted||engine.faulted||engine.closing||engine.configPending||engine.active.get(job.profileId)?.signal!==signal||!engine.leases.snapshot().some(row=>row.profileId===job.profileId&&row.jobId===job.id)||rows.length!==1||plans.length!==1||!['running','completed'].includes(current?.state)||current.planId!==job.planId||current.profileId!==job.profileId||current.productId!==job.productId||current.type!=='listing'||!plan?.enabled||plan.profileId!==job.profileId||plan.productId!==job.productId||current.payload?.cycle!==plan.completedCount||listingRevision(current.payload?.listingRevision)!==listingRevision(plan.listingRevision)||listingRevision(current.payload?.listingRevision)!==listingRevision(job.payload?.listingRevision))throw fail('STOPPED','售卖任务已停止或所属计划已改变');
   if(expected&&binding(plan)!==expected)throw fail('PLAN_CHANGED','商品配置在执行中发生变化，已停止');
   return {job:current,plan};
  }
@@ -77,7 +77,7 @@ class VintedSalesRuntime extends VintedAdapter {
    try{
     account=this.account(engine,profileId);
     identityGuard();
-    if(plan.activeListingId||engine.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&row.state!=='cancelled'&&!row.closedSale))throw fail('PUBLICATION_EXISTS','原商品或提交记录尚未关闭，不能再次刊登');
+    if(plan.activeListingId||engine.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&isPublicationOpen(row)))throw fail('PUBLICATION_EXISTS','原商品或提交记录尚未关闭，不能再次刊登');
     for(const key of ['title','description','condition','brand','color','parcel'])if(typeof plan.listing?.[key]!=='string'||!plan.listing[key].trim())throw fail('LISTING_INCOMPLETE','计划缺少已确认的商品字段：'+key);
     if(!Array.isArray(plan.listing.categoryPath)||!plan.listing.categoryPath.length)throw fail('LISTING_INCOMPLETE','计划缺少已确认的完整商品分类');
     if(typeof this.ensureProfile==='function'){
@@ -102,7 +102,7 @@ class VintedSalesRuntime extends VintedAdapter {
     const manifest=await this.trustedManifest(photos.manifest);accountGuard();
     const upload=await this.uploadPhotos(profileId,manifest,{signal});accountGuard();
     if(upload?.verified!==true||upload.uncertain!==false||upload.claimId!==photos.manifest.claimId||upload.count!==photos.manifest.count)throw fail('PHOTO_UNVERIFIED','原页面照片上传结果待核对，未重复上传',upload?.uncertain===true);
-    const observed=await this.inspectCurrentAccount(profileId,{signal});accountGuard();
+    const observed=await this.inspectCurrentAccount(profileId,{signal,expectedAccount:account,closeMenu:true});accountGuard();
     if(observed.verified!==true||observed.memberId!==account.memberId||observed.profileURL!==account.profileURL)throw fail('ACCOUNT_CHANGED','发布页账号与原绑定不一致');
     engine.accountObservations.set(profileId,{...observed,profileId,checkedAt:new Date().toISOString()});
     const input=await this.readPublicationInput(engine,plan.id,signal,accountGuard);accountGuard();
@@ -123,7 +123,7 @@ class VintedSalesRuntime extends VintedAdapter {
     const latest=engine.db.jobs.find(row=>row.id===job.id);
     if(latest?.state!=='completed'||latest.result?.externalId!==verified.receipt.listingId||latest.result?.submissionId!==record.id)throw fail('PUBLICATION_UNKNOWN_RESULT','原刊登回执未能完整保存到任务，已停止',true);
    }catch(error){
-    const attempted=engine.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&row.proof.facts.cycle===job.payload.cycle&&row.attemptCount===1);
+    const attempted=engine.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&row.proof.facts.cycle===job.payload.cycle&&listingRevision(row.proof.facts.listingRevision)===listingRevision(job.payload.listingRevision)&&isPublicationOpen(row)&&row.attemptCount===1);
     if(submitted||attempted)error.ambiguous=true;
     throw error;
    }finally{if(this.uiOwner===owner)this.uiOwner=null;}

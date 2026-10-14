@@ -365,15 +365,15 @@ test('cancelled and falsely completed sales cannot silently seed a replacement l
  Object.assign(job,{state:'completed',result:{externalId:'supplier-order',verified:true}});f.engine.seed();assert.equal(f.engine.db.jobs.filter(row=>row.type==='listing').length,1);
 });
 
-async function publishedFixture(t,options={}){
+async function publishedFixture(t,options={}, {reconcile=true}={}){
  const f=await fixture(t,options),{buildPublicationProof,FORM_URL}=require('../src/vinted-publication.cjs'),{publicationJournal}=require('../src/vinted-publish-submit.cjs');
  const at=new Date().toISOString(),profileId=f.plan.profileId,listing={title:'Local test accessory',description:'Local fixture only.',categoryPath:['Maison','Accessoires'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'};
  Object.assign(f.plan,{listing,status:'ready'});f.engine.bindMarketAccount(profileId,{verified:true,memberId:'123',username:'seller',profileURL:'https://www.vinted.fr/member/123'});
  const account=f.engine.db.marketAccounts[0],claim={id:'journal-claim',setId:'journal-set',profileId,productId:f.plan.productId,images:[{id:'image-1'}],listings:[]},documentKey='fixture-document';f.engine.db.claims.push(claim);f.engine.persist();
  const input={plan:f.plan,product:{id:f.plan.productId,sku:f.plan.sku,stock:1},claim,expectedAccount:account,evidence:{profileId,tabId:'fixture-tab',documentKey,url:FORM_URL,observedAt:at,challenge:false,account:{...account,verified:true},form:{documentKey,complete:true,invalidFields:[],unknownFields:[],fields:Object.entries({...listing,priceCents:f.plan.listingPriceCents}).map(([field,value])=>({field,value,verified:true}))},photos:{documentKey,profileId,productId:f.plan.productId,claimId:claim.id,setId:claim.setId,count:1,signature:'a'.repeat(64),verified:true,busy:false,errorCount:0},publication:{documentKey,count:1,observed:true,label:'Ajouter',enabled:true}}};
  const journal=publicationJournal(f.engine),proof=buildPublicationProof(input),record=await journal.prepare(proof);await journal.dispatchOnce(record.id,proof,async()=>{});
- await journal.reconcile(record.id,{verified:true,mappingVerified:true,publicationStatus:'published',observedAt:new Date().toISOString(),profileId,account:{...account,verified:true},seller:{...account,verified:true},ownedByCurrentAccount:true,listingId:'98765',url:'https://www.vinted.fr/items/98765',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:documentKey},priceKind:'item',priceCents:f.plan.listingPriceCents,currency:'EUR',title:listing.title,photos:{verified:true,count:1,signature:'a'.repeat(64)}});
- f.plan=f.engine.plan(f.plan.id);return {...f,journal,record,publicationJournal};
+ if(reconcile)await journal.reconcile(record.id,{verified:true,mappingVerified:true,publicationStatus:'published',observedAt:new Date().toISOString(),profileId,account:{...account,verified:true},seller:{...account,verified:true},ownedByCurrentAccount:true,listingId:'98765',url:'https://www.vinted.fr/items/98765',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:documentKey},priceKind:'item',priceCents:f.plan.listingPriceCents,currency:'EUR',title:listing.title,photos:{verified:true,count:1,signature:'a'.repeat(64)}});
+ f.plan=f.engine.plan(f.plan.id);return {...f,journal,record,publicationJournal,input};
 }
 
 test('a journal-backed sale closes its listing, counts once and creates its original task in one snapshot',async t=>{
@@ -401,4 +401,67 @@ test('sales-only mode confirms a sale without procurement and unlocks only the n
 test('sales-only runtime cannot execute a legacy procurement task even when flags are accidentally enabled',async t=>{
  let executed=0;const f=await fixture(t,{adapter:{readiness:()=>({salesOnly:true,capabilities:{shippingLabel:true,procurement:true}}),executeJob:async()=>{executed++;}}});await f.listed();
  const job=f.engine.enqueue('fulfillment',f.plan,f.sale(),'legacy-procurement');assert.equal(await f.engine.runJob(job),false);await f.engine.runOnce();assert.equal(executed,0);assert.equal(f.counts.order,0);assert.equal(job.state,'queued');
+});
+
+const deletionRequest=f=>({submissionId:f.record.id,listingURL:'https://www.vinted.fr/items/98765-old-product',confirmed:true});
+test('confirmed deletion of an uncertain submission archives it and queues a new revision without increasing sales or claiming photos',async t=>{
+ const f=await publishedFixture(t,{}, {reconcile:false});f.engine.seed();
+ const old=f.engine.enqueue('listing',f.plan,{cycle:0},'listing:'+f.plan.id+':0');old.state='needs_review';old.error='Original publication awaits review';f.engine.persist();
+ const beforeClaims=JSON.stringify(f.engine.db.claims),writes=[],persist=f.engine.persist.bind(f.engine);f.engine.persist=()=>{writes.push(JSON.parse(JSON.stringify(f.engine.db)));persist();};
+ const result=await f.engine.confirmDeletedListing(f.plan.id,deletionRequest(f));assert.equal(writes.length,1);assert.equal(result.publications[0].closedWithdrawal,true);assert.equal(result.publications[0].closedSale,false);
+ const plan=f.engine.plan(f.plan.id),jobs=f.engine.db.jobs;assert.equal(plan.completedCount,0);assert.equal(plan.listingRevision,1);assert.equal(plan.activeListingId,null);assert.equal(plan.listingPriceCents,2500);assert.equal(JSON.stringify(f.engine.db.claims),beforeClaims);assert.deepEqual(f.engine.db.sales,[]);assert.equal(f.counts.claim,0);assert.equal(f.counts.listing,0);
+ assert.equal(jobs.length,2);assert.equal(jobs[0].state,'cancelled');assert.equal(jobs[0].result.kind,'listing_deleted');assert.equal(jobs[0].deletion.reason,'deleted_not_sold');assert.equal(jobs[0].deletion.verified,undefined);assert.equal(jobs[1].state,'queued');assert.equal(jobs[1].dedupeKey,'listing:'+plan.id+':0:r1');assert.deepEqual(jobs[1].payload,{cycle:0,listingRevision:1});
+ f.engine.seed();assert.equal(f.engine.db.jobs.length,2);assert.equal(f.engine.canRetry(jobs[0]),false);assert.deepEqual(f.journal.state(),f.engine.db.publications);assert.equal(f.publicationJournal(f.engine),f.journal);
+ await assert.rejects(f.engine.confirmDeletedListing(plan.id,deletionRequest(f)),{code:'DELETION_SUBMISSION_CONFLICT'});assert.equal(writes.length,1);
+ const restored=new CommerceEngine(f.options);try{assert.equal(restored.plan(plan.id).listingRevision,1);assert.equal(restored.db.jobs[0].state,'cancelled');assert.equal(restored.db.jobs[1].state,'queued');restored.seed();assert.equal(restored.db.jobs.length,2);}finally{await restored.close();}
+});
+
+test('confirmed deletion retains a completed publication receipt and cancels only its unsent supplier association',async t=>{
+ const f=await publishedFixture(t),result={verified:true,submissionId:f.record.id,externalId:'98765'},job=f.engine.enqueue('listing',f.plan,{cycle:0},'listing:'+f.plan.id+':0');job.state='completed';job.result=result;f.engine.persist();const beforeClaims=JSON.stringify(f.engine.db.claims);
+ await f.engine.confirmDeletedListing(f.plan.id,deletionRequest(f));const old=f.engine.db.jobs.find(row=>row.id===job.id),record=f.engine.db.publications.submissions[0];
+ assert.equal(record.state,'published');assert.equal(record.receipt.listingId,'98765');assert.equal(record.closedWithdrawal.listingId,'98765');assert.equal(old.state,'cancelled');assert.deepEqual(old.result.previousResult,result);assert.equal(f.engine.db.publicationSupplierSync[0].state,'cancelled');assert.equal(JSON.stringify(f.engine.db.claims),beforeClaims);assert.equal(f.engine.plan(f.plan.id).completedCount,0);
+ const restored=new CommerceEngine(f.options);try{assert.equal(restored.db.publications.submissions[0].closedWithdrawal.reason,'deleted_not_sold');assert.equal(restored.db.publicationSupplierSync[0].state,'cancelled');}finally{await restored.close();}
+});
+
+test('deletion requires explicit confirmation, original identity, stopped queue and an incomplete enabled sales plan',async t=>{
+ for(const change of [f=>{f.request.confirmed=false;},f=>{f.request.submissionId='other-submission';},f=>{f.request.listingURL='https://www.vinted.fr/items/87654';},f=>{f.engine.plan(f.plan.id).enabled=false;},f=>{f.engine.plan(f.plan.id).completedCount=2;},f=>{f.engine.plan(f.plan.id).profileId='profile-2';},f=>{f.engine.db.marketAccounts[0].memberId='999';},f=>{f.engine.accounts={list:()=>[{profileId:f.plan.profileId,identity:{memberId:'999',profileURL:'https://www.vinted.fr/member/999'}}]};},f=>{f.engine.running=true;},f=>{f.engine.active.set(f.plan.profileId,new AbortController());},f=>{f.engine.plan(f.plan.id).listingRevision=1;}]){
+  const f=await publishedFixture(t);f.request=deletionRequest(f);change(f);const before=JSON.stringify(f.engine.db);await assert.rejects(f.engine.confirmDeletedListing(f.plan.id,f.request),String(change));assert.equal(JSON.stringify(f.engine.db),before);assert.equal(f.counts.listing,0);f.engine.running=false;f.engine.active.clear();
+ }
+});
+
+test('conflicting navigation, task, other-account item or unresolved write prevents deletion recovery',async t=>{
+ const changes=[f=>{f.engine.db.publications.submissions[0].navigation=[{profileId:f.plan.profileId,listingId:'87654',url:'https://www.vinted.fr/items/87654'}];},f=>{const job=f.engine.enqueue('listing',f.plan,{cycle:0},'listing:'+f.plan.id+':0');job.operation={kind:'claim'};job.mutationPending=true;},f=>{const job=f.engine.enqueue('message',f.plan,{},'pending-reply');job.state='uncertain';},f=>{f.engine.db.plans.push({...f.plan,id:'other-plan',activeListingId:'98765'});},f=>{f.engine.enqueue('listing',f.plan,{cycle:0,listingRevision:1},'listing:'+f.plan.id+':0:r1');}];
+ for(const change of changes){const f=await publishedFixture(t);change(f);const before=JSON.stringify(f.engine.db);await assert.rejects(f.engine.confirmDeletedListing(f.plan.id,deletionRequest(f)));assert.equal(JSON.stringify(f.engine.db),before);}
+});
+
+test('a failed deletion snapshot retains the old journal, job and sales state on disk',async t=>{
+ const f=await publishedFixture(t),before=fs.readFileSync(f.engine.file,'utf8'),old=JSON.stringify(f.engine.db);f.engine.persist=()=>{throw Error('Simulated deletion write failure');};
+ await assert.rejects(f.engine.confirmDeletedListing(f.plan.id,deletionRequest(f)),{code:'PUBLICATION_STORAGE_FAILED'});assert.equal(f.engine.faulted,true);assert.equal(f.journal.faulted,true);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(JSON.stringify(f.engine.db),old);assert.equal(f.engine.plan(f.plan.id).completedCount,0);
+});
+
+test('stale listing revisions cannot run, retry or replace the current revision task',async t=>{
+ const f=await fixture(t);f.plan.listingRevision=1;const old=f.engine.enqueue('listing',f.plan,{cycle:0,listingRevision:0},'listing:'+f.plan.id+':0');
+ await assert.rejects(f.engine.runJob(old),{code:'LISTING_REVISION_CHANGED'});await f.engine.runOnce();assert.equal(old.state,'needs_review');assert.equal(old.blockedReason,'LISTING_REVISION_CHANGED');assert.equal(f.engine.canRetry(old),false);assert.equal(f.counts.listing,0);assert.equal(f.counts.claim,0);
+});
+
+test('deleted publication can be replaced and deleted again in one sales cycle with separate durable submission identities',async t=>{
+ const f=await publishedFixture(t),{buildPublicationProof}=require('../src/vinted-publication.cjs');await f.engine.confirmDeletedListing(f.plan.id,deletionRequest(f));
+ const plan=f.engine.plan(f.plan.id),account=f.engine.db.marketAccounts[0],claim=f.engine.db.claims[0],documentKey='replacement-document',at=new Date().toISOString();
+ const evidence={...f.input.evidence,documentKey,tabId:'replacement-tab',observedAt:at,form:{...f.input.evidence.form,documentKey},photos:{...f.input.evidence.photos,documentKey},publication:{...f.input.evidence.publication,documentKey}};
+ const proof=buildPublicationProof({...f.input,plan,claim,expectedAccount:account,evidence}),record=await f.journal.prepare(proof);await f.journal.dispatchOnce(record.id,proof,async()=>{});
+ await f.journal.reconcile(record.id,{verified:true,mappingVerified:true,publicationStatus:'published',observedAt:new Date().toISOString(),profileId:plan.profileId,account:{...account,verified:true},seller:{...account,verified:true},ownedByCurrentAccount:true,listingId:'98766',url:'https://www.vinted.fr/items/98766',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:documentKey},priceKind:'item',priceCents:plan.listingPriceCents,currency:'EUR',title:plan.listing.title,photos:{verified:true,count:1,signature:'a'.repeat(64)}});
+ const current=f.engine.plan(plan.id),replacement=f.engine.db.jobs.find(row=>row.payload?.listingRevision===1);assert.equal(current.activeListingId,'98766');assert.equal(current.completedCount,0);assert.equal(replacement.state,'completed');assert.equal(replacement.result.submissionId,record.id);assert.equal(f.engine.db.publications.submissions.length,2);assert.equal(f.engine.db.claims[0].listings.length,2);
+ await f.engine.confirmDeletedListing(plan.id,{submissionId:record.id,listingURL:'https://www.vinted.fr/items/98766',confirmed:true});assert.equal(f.engine.plan(plan.id).listingRevision,2);assert.equal(f.engine.plan(plan.id).completedCount,0);assert.equal(f.engine.db.jobs.filter(row=>row.state==='queued').length,1);assert.equal(f.engine.db.jobs.at(-1).dedupeKey,'listing:'+plan.id+':0:r2');assert.equal(f.engine.db.publications.submissions.every(row=>row.closedWithdrawal?.reason==='deleted_not_sold'),true);
+});
+
+test('deletion rejects a dedupe-matched job with a different cycle or revision without writing a snapshot',async t=>{
+ for(const payload of [{cycle:1,listingRevision:0},{cycle:0,listingRevision:1},{}]){
+  const f=await publishedFixture(t),job=f.engine.enqueue('listing',f.plan,payload,'listing:'+f.plan.id+':0');job.state='needs_review';f.engine.persist();const before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db);let writes=0;const persist=f.engine.persist.bind(f.engine);f.engine.persist=()=>{writes++;persist();};
+  await assert.rejects(f.engine.confirmDeletedListing(f.plan.id,deletionRequest(f)),{code:'DELETION_JOB_CONFLICT'});assert.equal(writes,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(JSON.stringify(f.engine.db),memory);
+ }
+});
+
+test('deletion rejects a globally duplicated original job ID even when the other row belongs to another profile',async t=>{
+ const f=await publishedFixture(t),job=f.engine.enqueue('listing',f.plan,{cycle:0},'listing:'+f.plan.id+':0');job.state='needs_review';f.engine.db.jobs.push({...job,type:'message',profileId:'profile-2',planId:'other-plan',dedupeKey:'other-business-key'});f.engine.persist();const before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db);let writes=0;const persist=f.engine.persist.bind(f.engine);f.engine.persist=()=>{writes++;persist();};
+ await assert.rejects(f.engine.confirmDeletedListing(f.plan.id,deletionRequest(f)),{code:'DELETION_JOB_CONFLICT'});assert.equal(writes,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(JSON.stringify(f.engine.db),memory);
 });

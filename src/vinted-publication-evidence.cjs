@@ -102,7 +102,7 @@ class VintedPublicationEvidence{
  async readPass(input,context){
   const {plan,claim,manifest}=input,profileId=plan.profileId,guard=()=>this.adapter.current(profileId,context);
   const account=await this.wait(()=>this.account.state(profileId,context),context);guard();
-  ensure(account.account,'PUBLICATION_ACCOUNT_UNVERIFIED','请先核对并展开当前账号菜单，不能仅凭页面上的普通个人主页链接判断账号');
+  ensure(account.account,'PUBLICATION_ACCOUNT_UNVERIFIED','请先核对当前账号菜单；关闭菜单后也必须有同一页面的有效核验记录，不能仅凭普通个人主页链接判断账号');
   await this.wait(()=>this.adapter.read(profileId,context),context);guard();
   const form=await this.wait(()=>this.adapter.control.isolated(context.tab,'('+probePublicationForm.toString()+')('+JSON.stringify(FIELD_SPECS)+')'),context);guard();
   ensure(form&&form.url===FORM_URL&&typeof form.documentKey==='string','PUBLICATION_PAGE_CHANGED','刊登表单页面已改变');

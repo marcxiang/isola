@@ -84,7 +84,7 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       const calls=await js(`window.dashboardFixture.calls()`);assert.deepEqual(calls[calls.length-1],{name:'inspectAccount',args:['listed']});
       assert.match(await js(`document.querySelector('[data-plan-id="listed"] .distribution-account').innerText`),/账号未核对/);
       const changed=structuredClone(fixture);changed.profiles[1].marketAccount={platform:'vinted-fr',username:'fixture_seller',verifiedAt:'2026-10-13T19:00:00Z'};await update(changed);
-      assert.match(await js(`document.querySelector('[data-plan-id="listed"] .distribution-account').innerText`),/已核对账号：fixture_seller/);
+      assert.equal(await js(`document.querySelector('[data-plan-id="listed"] .distribution-account').innerText`),'绑定账号：fixture_seller（历史核对）');
       await js(`Array.from(document.querySelectorAll('[data-plan-id="listed"] button')).find(button=>button.textContent==='核对发布条件').click()`);await frames();
       const report=await js(`({open:document.querySelector('#preflight-dialog').open,title:document.querySelector('#preflight-title').innerText,body:document.querySelector('#preflight-detail').innerText,fillHidden:document.querySelector('#preflight-fill').hidden,buttons:Array.from(document.querySelectorAll('#preflight-dialog button'),button=>button.innerText)})`);
       assert.equal(report.open,true);assert.equal(report.title,'核对发布条件');assert.match(report.body,/当前页面缺少照片回执/);assert.match(report.body,/请先上传并核对照片/);assert.equal(report.fillHidden,true);assert.equal(report.buttons.includes('发布'),false);

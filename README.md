@@ -8,7 +8,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.9**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.10**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
 - Starting the scheduler automatically opens a closed listing profile in its original persistent session, then checks the current account before preparing photos or publishing. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
@@ -16,9 +16,17 @@ The current development version is **0.5.3-dev.9**. The production runtime now c
 - Supplier photo association has a durable outbox. An uncertain request is checked by reading the original claim, never blindly resent. The supplier contract allows only the first listing association; later reuse remains in local history.
 - Messages, offer acceptance and paid-sale browser evidence still require live validation and remain disabled. Factual French reply previews and strict evidence validators are implemented, without sending unverified replies.
 - Purchase controls are hidden in sales-only mode, purchase tasks cannot run, and no purchase budget is required. Existing purchase history remains intact.
-- Earlier real TEST publication and its unresolved record are retained. Do not clear history, treat a deleted listing as a sale, or change capability flags to force progress.
+- The earlier TEST submission is retained with an operator-confirmed deletion record. Its revision 1 relisting task is held for review at the catalog check, at €5 with zero completed sales and the original photos preserved. Automatic profile opening has been observed live; mobile account-menu closure still needs correction. No new publication has been completed.
 
-启动调度后，已绑定账号的上架计划会自动打开对应环境，无需逐个手动开窗。后台刊登链路已接入，逐项核对不通过就暂停；消息、报价、成交和卖出后补上仍待真实页面联调。原 TEST 的提交记录继续保留，不重复发布。办公室接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
+启动调度后，已绑定账号的上架计划会自动打开对应环境，无需逐个手动开窗。后台刊登链路已接入，逐项核对不通过就暂停；消息、报价、成交和卖出后补上仍待真实页面联调。已删除且未售出的原商品可在暂停调度后选择“已删除，重新上架”，填写原商品地址并确认；保留原提交、销量和图片，创建独立的重上架任务。办公室接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
+
+dev.10 源码接续检查点（2026-10-15）：最终完整 Node 729/729 通过，零失败、零跳过，包含 AI 延迟解密修复；AI 与设置存储专项 18/18 通过。较早轮次 Mac Electron 联合检查 80/80 通过，嵌套标题处理、关闭菜单诊断和延迟解密修复尚未重新完成同组桌面回归。
+
+用户启动后已实际自动打开账号衣橱，自动开窗时的会话刷新竞态已修复；header 外独立手机菜单的原生连续性专项 12 项通过。真实账号菜单已两次读取并点击关闭，但闭合核验仍失败，正在依据本机脱敏诊断处理。分类、品牌、成色、颜色四类 Fait 收尾源码已修；真实自动仅分类和品牌通过，其余仍待实测。较早在手工完成 Fait 后，旧构建应用已核对八项商品字段和原一张照片上传回执，不代表全自动准备已通过。没有新发布；revision 1 原任务停在 needs_review / check_catalog，售价 5 欧元、销量 0、照片保留。
+
+已定位并修复一处开窗卡住的原因：隐藏的 AI 面板也会读取模型设置并同步解密密钥，等待系统钥匙串时阻塞主线程。现在读取模型元信息和普通设置保存均保留密文，真正启动 AI 时才解密；新密钥加密、清除及更换接口地址的密钥规则保持。新包尚待真实开窗验证；代理和货盘等其他凭据访问仍可能需要钥匙串许可。
+
+本次先保存源码进度，未交付包含全部最新修复的最终 Mac 包。下次办公室先恢复仍等待系统钥匙串的旧应用，再打包最新源码、复测账号菜单关闭诊断和四类 Fait，重跑桌面回归后继续原任务；当前未完成全自动刊登。
 
 ## Features / 功能
 
@@ -68,7 +76,7 @@ Electron tests require a desktop session; network tests start local servers. The
 npm run package
 ```
 
-The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). The latest 0.5.3-dev.7 source currently lives on `codex/windows-association-v053`, while `main` remains at the earlier checkpoint. Check out the development branch before building the latest version.
+The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). The latest 0.5.3-dev.10 source currently lives on `codex/windows-association-v053`, while `main` remains at the earlier checkpoint. Check out the development branch before building the latest version.
 
 For a local Apple Silicon development build on macOS 13 or later:
 

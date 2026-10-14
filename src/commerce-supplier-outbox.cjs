@@ -80,11 +80,23 @@ function one(rows,predicate,message){ensure(Array.isArray(rows),message);const f
 function binding(engine,id){
  const db=engine.db,row=one(db.publicationSupplierSync,item=>item.id===id,'货盘关联记录缺失或重复');validateSupplierSyncRecord(row);
  const related=db.publicationSupplierSync.filter(item=>item.claimId===row.claimId);
+ for(const item of related)validateSupplierSyncRecord(item);
  ensure(related.every(item=>item.profileId===row.profileId&&item.productId===row.productId)&&related.filter(item=>['pending','dispatching','uncertain'].includes(item.state)).length<=1,'照片领取关联记录冲突');
  const claim=one(db.claims,item=>item.id===row.claimId,'原照片领取缺失或重复');
  ensure(claim.profileId===row.profileId&&claim.productId===row.productId&&identifier(claim.setId)&&Array.isArray(claim.listings),'原照片领取与环境或商品不一致');
  const link=one(claim.listings,item=>String(item.listingId)===row.payload.listingId,'原刊登在照片领取历史中缺失或重复');ensure(link.url===row.payload.listingUrl,'原刊登与货盘关联链接不一致');
- const reused=claim.listings.indexOf(link)>0;
+ const index=claim.listings.indexOf(link),prior=related.filter(item=>item.id!==row.id),untouched=item=>item.state==='cancelled'&&item.attemptCount===0&&item.operation===null&&item.receipt===null;
+ // A withdrawn item that was never sent to the supplier does not consume the
+ // claim's first association. Require complete original link + journal +
+ // cancelled outbox evidence for every earlier item; missing history is not
+ // evidence that a request was unsent.
+ const unusedWithdrawal=previous=>{
+  const records=(db.publications?.submissions||[]).filter(record=>record.receipt?.listingId===String(previous.listingId)&&record.proof?.facts?.photos?.claimId===claim.id);
+  const syncs=prior.filter(item=>item.payload.listingId===String(previous.listingId));
+  return records.length===1&&!!records[0].closedWithdrawal&&syncs.length===1&&untouched(syncs[0])&&syncs[0].submissionId===records[0].id&&syncs[0].payload.listingUrl===previous.url;
+ };
+ const firstAfterWithdrawal=index>0&&prior.length>0&&prior.every(untouched)&&claim.listings.slice(0,index).every(unusedWithdrawal);
+ const reused=index>0&&!firstAfterWithdrawal;
  ensure(identifier(db.supplierAccountId)&&(!claim.supplierAccountId||claim.supplierAccountId===db.supplierAccountId),'照片领取所属货盘账号无法核对');
  const account=one(db.marketAccounts,item=>item.profileId===row.profileId,'原环境账号绑定缺失或重复');
  ensure(!db.marketAccounts.some(item=>item.profileId!==row.profileId&&item.memberId===account.memberId),'同一平台账号绑定多个环境');
@@ -99,7 +111,7 @@ function binding(engine,id){
  }
  const request={baseURL:normalizeBaseURL(db.settings.baseURL),supplierAccountId:db.supplierAccountId,claimId:row.claimId,payload:clone(row.payload)};
  if(row.operation)ensure(same(row.operation.request,request),'原货盘请求的地址或账号已改变');
- return {row,plan,reused,expected:{claimId:claim.id,setId:claim.setId,productId:claim.productId,payload:clone(row.payload)},request,signature:hash({request,setId:claim.setId,profileId:row.profileId,submissionId:row.submissionId,memberId:account.memberId,profileURL:account.profileURL,planId:plan?.id||null,reused})};
+ return {row,plan,reused,expected:{claimId:claim.id,setId:claim.setId,productId:claim.productId,payload:clone(row.payload)},request,signature:hash({request,setId:claim.setId,profileId:row.profileId,submissionId:row.submissionId,memberId:account.memberId,profileURL:account.profileURL,planId:plan?.id||null,reused,...(firstAfterWithdrawal?{withdrawnHistory:prior}:{} )})};
 }
 
 function createSupplierOutbox({now=Date.now,timeoutMs=30000}={}){

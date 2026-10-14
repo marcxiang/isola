@@ -4,6 +4,7 @@ const assert=require('node:assert/strict');
 const {createHash}=require('node:crypto');
 const {VintedAdapter}=require('../src/vinted-adapter.cjs');
 const {VintedPublishSubmit}=require('../src/vinted-publish-submit.cjs');
+const {VintedAccount,getClosedAccountEvidence,CLOSED_RECEIPT_MS}=require('../src/vinted-account.cjs');
 const {probePublicationForm,FIELD_SPECS}=require('../src/vinted-publication-evidence.cjs');
 const FORM='https://www.vinted.fr/items/new';
 const PHOTO='https://fixture.test/photo.png',AVATAR='https://fixture.test/avatar.png';
@@ -26,11 +27,14 @@ const html=String.raw`<!doctype html><meta charset="utf-8"><title>Local single-p
 <footer><button type="button">Sauvegarder le brouillon</button><button id="publish" type="submit">Ajouter</button></footer></form></main>
 <script>window.fixture={publishes:0,clicks:[]};document.addEventListener('click',event=>fixture.clicks.push({id:event.target.id,label:event.target.textContent.trim(),trusted:event.isTrusted}));document.querySelector('#listing').onsubmit=event=>{event.preventDefault();fixture.publishes++;history.pushState(null,'','/items/77777-local-test');};</script>`;
 
+const mobileHeader=String.raw`<header><div style="position:fixed;top:8px;right:8px;z-index:50"><button id="mobile-toggle" type="button" aria-label="Menu ouvert" aria-controls="mobile-account" aria-expanded="false">☰</button></div><div id="mobile-account" aria-labelledby="mobile-toggle" style="display:none;position:fixed;inset:0;background:white;padding:80px 20px;z-index:40"><h2>Mon Compte</h2><a href="/member/123">Mon profil</a><a href="/settings/profile">Paramètres</a><a href="/my_orders">Mes commandes</a><button type="button">Se déconnecter</button></div></header>`;
+const mobileHTML=html.replace(/<header>[\s\S]*?<\/header>/,mobileHeader).replace('</script>',`document.querySelector('#mobile-toggle').onclick=()=>{const button=document.querySelector('#mobile-toggle'),menu=document.querySelector('#mobile-account'),open=button.getAttribute('aria-expanded')!=='true';button.setAttribute('aria-expanded',String(open));button.setAttribute('aria-label',open?'Menu fermé':'Menu ouvert');menu.style.display=open?'block':'none';};</script>`);
+
 module.exports=async function publishSubmitSmoke(api,check){
- let profile,session,w,originalThrottling;
+ let profile,session,w,originalThrottling,fixturePage=html;
  try{
   profile=api.saveProfile({name:'QA local guarded publication',url:FORM,fingerprintMode:'native',width:1180,height:900});session=api.sesFor(profile);
-  session.protocol.handle('https',request=>[PHOTO,AVATAR,'https://fixture.test/replaced.png'].includes(request.url)?new Response(image,{headers:{'content-type':'image/png','cache-control':'no-store'}}):new Response(request.url===FORM?html:'Not found',{status:request.url===FORM?200:404,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}}));
+  session.protocol.handle('https',request=>[PHOTO,AVATAR,'https://fixture.test/replaced.png'].includes(request.url)?new Response(image,{headers:{'content-type':'image/png','cache-control':'no-store'}}):new Response(request.url===FORM?fixturePage:'Not found',{status:request.url===FORM?200:404,headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store'}}));
   await api.launch(profile.id);w=api.windows.get(profile.id);const tab=w.tabs[0],contents=tab.view.webContents,adapter=new VintedAdapter({windows:api.windows});
   // This is a manual, foreground publication fixture. Ensure a painted native
   // surface before testing the unchanged atomic native-click boundary.
@@ -72,6 +76,32 @@ module.exports=async function publishSubmitSmoke(api,check){
     finally{adapter.control.target=target;}
    }
    return {blockedFinalChanges:3,nativeClicks:0,externalRequestsForwarded:0};
+  });
+  await check('mobile drawer is natively verified and closed before one trusted publication click',async()=>{
+   fixturePage=mobileHTML;await contents.loadURL(FORM);const {engine,input,service}=setup();input.expectedAccount.username='fixture';
+   const observed=await new VintedAccount(adapter).inspectAccount(profile.id,{expectedAccount:input.expectedAccount,closeMenu:true});
+   assert.equal(observed.memberId,'123');assert.equal(observed.usernameSource,'saved-binding');assert.equal(observed.menuClosed,true);
+   const receipt=getClosedAccountEvidence(adapter,{profileId:profile.id,tab,documentKey:observed.documentKey});assert.ok(receipt);assert.equal(Object.isFrozen(receipt),true);
+   const result=await service.submit({engine,planId:input.plan.id,input,guard:()=>{}}),actual=await contents.executeJavaScript('({...fixture})');
+   assert.equal(actual.publishes,1);assert.equal(actual.clicks.filter(click=>click.id==='mobile-toggle'&&click.trusted).length,2);assert.deepEqual(actual.clicks.filter(click=>click.id==='publish'),[{id:'publish',label:'Ajouter',trusted:true}]);assert.equal(result.state,'uncertain');assert.equal(result.published,false);
+   return {nativeMenuClicks:2,nativePublishClicks:1,menuClosed:true,identityFromFreshMenu:true,usernameFromBinding:true,externalRequestsForwarded:0};
+  });
+  await check('closed mobile menu proof still rejects final reopening, changed toggle, overlay and expiry',async()=>{
+   fixturePage=mobileHTML;
+   const changes=[
+    `document.querySelector('#mobile-toggle').setAttribute('aria-label','Menu fermé');document.querySelector('#mobile-toggle').setAttribute('aria-expanded','true');document.querySelector('#mobile-account').style.display='block'`,
+    `document.querySelector('#mobile-toggle').id='replaced-toggle'`,
+    `(()=>{const blocker=document.createElement('div');blocker.id='unexpected-overlay';blocker.style.cssText='position:fixed;inset:0;z-index:100;background:white';document.body.append(blocker)})()`,
+    'expire-main-receipt'
+   ];
+   for(const change of changes){
+    await contents.loadURL(FORM);const {engine,input,service}=setup();input.expectedAccount.username='fixture';await new VintedAccount(adapter).inspectAccount(profile.id,{expectedAccount:input.expectedAccount,closeMenu:true});
+    const target=adapter.control.target,originalNow=Date.now;
+    adapter.control.target=async(...args)=>{const found=await target.apply(adapter.control,args);if(args[3]?.scroll===false){if(change==='expire-main-receipt')Date.now=()=>originalNow()+CLOSED_RECEIPT_MS+1;else await contents.executeJavaScript(change);}return found;};
+    try{await assert.rejects(service.submit({engine,planId:input.plan.id,input,guard:()=>{}}));assert.equal(await contents.executeJavaScript('fixture.publishes'),0);assert.equal((await contents.executeJavaScript('fixture.clicks')).filter(click=>click.id==='publish').length,0);}
+    finally{adapter.control.target=target;Date.now=originalNow;}
+   }
+   return {blockedChanges:4,nativePublishClicks:0,mainExpiryChecked:true,hitTestStillRequired:true,externalRequestsForwarded:0};
   });
  }finally{if(w&&!w.isDestroyed()){const c=w.tabs[0]?.view.webContents;if(c&&!c.isDestroyed()&&originalThrottling!==undefined)c.setBackgroundThrottling(originalThrottling);w.close();}await new Promise(resolve=>setTimeout(resolve,200));if(session)session.protocol.unhandle('https');if(profile)await api.deleteProfile(profile.id);}
 };

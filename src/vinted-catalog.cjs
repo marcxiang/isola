@@ -28,48 +28,66 @@ function parseCardLabel(value){
  return {title:clean(match[1]),normalizedTitle:normalized,condition:match[2],priceCents,currency:'EUR'};
 }
 
-// Read-only visible DOM. This intentionally has no Vinted class/test-id guesses,
-// hidden application state or implicit pagination. A count is not complete
-// unless every distinct visible item can be tied to a reliable title receipt.
-// Empty-state labels must be supplied from an observed French wardrobe screen;
-// no unobserved copy is silently assumed to describe an empty account.
-function probeCatalogDOM(emptyStateLabels){
+// Observed 2026-10-14 on the account owner's French mobile wardrobe. This
+// empty screen has no article-count heading; retain the visible shape instead
+// of inventing a "0 articles" observation. Account ownership is checked by the
+// existing VintedAccount reader before and after every DOM pass.
+const OWN_EMPTY_WARDROBE=Object.freeze({heading:'Ajoute des articles pour commencer à vendre',subtitle:"Fais du tri ! Vends ce que tu n'utilises plus.",createLabel:'Ajouter un article',createURL:ORIGIN+'/items/new',selectedTab:'Annonces'});
+function probeCatalogDOM(emptyStateLabels,observedEmptyState){
  const d=globalThis.__isolaDOM,clean=v=>String(v||'').replace(/\s+/g,' ').trim(),visible=e=>!!e?.isConnected&&d.visible(e);
  const outside=e=>!!d.closest(e,'header,nav,[role=navigation],footer');
- const raw={url:location.href,documentKey:String(performance.timeOrigin),countLabels:[],links:[],emptyLabels:[],errors:[],ready:document.readyState==='complete'};
+ const raw={url:location.href,documentKey:String(performance.timeOrigin),countLabels:[],links:[],emptyLabels:[],emptyState:null,errors:[],ready:document.readyState==='complete'};
  if(!d)return {...raw,errors:['DOM helpers unavailable']};
  const headings=[...document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role=heading]')].filter(e=>visible(e)&&!outside(e));
  const counts=headings.filter(e=>/^(?:0|[1-9]\d*) articles?$/.test(clean(d.safeText(e,120))));
  raw.countLabels=counts.map(e=>clean(d.safeText(e,120)));
- if(counts.length!==1)return {...raw,errors:['衣橱商品总数缺失或不唯一']};
- const anchors=[...document.querySelectorAll('a[href]')].filter(e=>visible(e)&&!outside(e));
- const links=[];
+ const anchors=[...document.querySelectorAll('a[href]')].filter(e=>visible(e)&&!outside(e)),links=[],createLinks=[];
  for(const anchor of anchors){
   let url;try{url=new URL(anchor.href);}catch{continue;}
   if(!/^\/items\//.test(url.pathname))continue;
+  if(observedEmptyState&&url.href===observedEmptyState.createURL&&clean(d.label(anchor))===observedEmptyState.createLabel){createLinks.push(anchor);continue;}
   if(url.origin!=='https://www.vinted.fr'||url.username||url.password||url.search||url.hash||!/^\/items\/[1-9]\d{0,29}(?:-[^/]+)?\/?$/.test(url.pathname)){raw.errors.push('存在无法核对的商品链接');continue;}
   links.push(anchor);
  }
- const broad=e=>['HTML','BODY','HEADER','NAV','FOOTER'].includes(e.tagName);
- const heading=counts[0],parents=d.parents(heading).filter(e=>!broad(e)&&visible(e));
- const labels=Array.isArray(emptyStateLabels)?emptyStateLabels.filter(v=>typeof v==='string'&&v.length>0&&v.length<=300):[];
- let scope;
- if(links.length)scope=parents.find(e=>e!==heading&&links.every(link=>e.contains(link)));
- else scope=parents.find(e=>e!==heading&&[...e.querySelectorAll('p,span,div,[role=status]')].some(node=>visible(node)&&labels.includes(clean(d.safeText(node,301)))));
- if(!scope)return {...raw,errors:[...raw.errors,'商品总数、商品卡片或空衣橱标记无法关联同一区域']};
  for(const anchor of links){
   const labels=[anchor.getAttribute('aria-label'),d.safeText(anchor,501),...Array.from(anchor.querySelectorAll('img')).filter(visible).map(img=>img.getAttribute('alt'))].map(clean).filter(Boolean);
   raw.links.push({href:String(anchor.href),labels:[...new Set(labels)]});
  }
- raw.emptyLabels=[...scope.querySelectorAll('p,span,div,[role=status]')].filter(node=>visible(node)&&labels.includes(clean(d.safeText(node,301)))).map(node=>clean(d.safeText(node,301)));
- raw.emptyLabels=[...new Set(raw.emptyLabels)];
+ const broad=e=>['HTML','BODY','HEADER','NAV','FOOTER'].includes(e.tagName);
+ const labels=Array.isArray(emptyStateLabels)?emptyStateLabels.filter(v=>typeof v==='string'&&v.length>0&&v.length<=300):[];
+ const emptyHeadings=observedEmptyState?headings.filter(e=>e.tagName==='H1'&&clean(d.safeText(e,300))===observedEmptyState.heading):[];
+ let scope;
+ if(counts.length===0&&observedEmptyState){
+  const candidates=[...document.querySelectorAll('p,span,div,[role=status]')].filter(e=>visible(e)&&!outside(e)&&clean(d.safeText(e,301))===observedEmptyState.subtitle);
+  // Nested wrappers with the same text describe one subtitle, not duplicates.
+  const subtitles=candidates.filter(e=>!candidates.some(other=>other!==e&&e.contains(other)));
+  const selectedTabs=[...document.querySelectorAll('[role=tab][aria-selected=true]')].filter(e=>visible(e)&&!outside(e));
+  if(emptyHeadings.length===1&&subtitles.length===1&&createLinks.length===1&&selectedTabs.length===1&&clean(d.label(selectedTabs[0]))===observedEmptyState.selectedTab&&links.length===0){
+   const heading=emptyHeadings[0];
+   scope=d.parents(heading).find(e=>e!==heading&&!broad(e)&&e.tagName!=='MAIN'&&visible(e)&&e.contains(subtitles[0])&&e.contains(createLinks[0]));
+   const wardrobe=scope&&d.parents(scope).find(e=>!broad(e)&&visible(e)&&e.contains(selectedTabs[0]));
+   if(scope&&wardrobe)raw.emptyState={kind:'observed_own_wardrobe_empty',heading:clean(d.safeText(heading,300)),subtitle:clean(d.safeText(subtitles[0],301)),createLabel:clean(d.label(createLinks[0])),createURL:String(createLinks[0].href),selectedTab:clean(d.label(selectedTabs[0])),headingCount:1,subtitleCount:1,createLinkCount:1,selectedTabCount:1,sameRegion:true};
+   else scope=null;
+  }
+  if(!raw.emptyState)raw.errors.push('没有可核对的本人空衣橱完整标记');
+ }else if(counts.length===1){
+  if(emptyHeadings.length)raw.errors.push('空衣橱标记与商品总数同时出现，不能确认当前衣橱');
+  const heading=counts[0],parents=d.parents(heading).filter(e=>!broad(e)&&visible(e));
+  if(links.length)scope=parents.find(e=>e!==heading&&links.every(link=>e.contains(link)));
+  else scope=parents.find(e=>e!==heading&&[...e.querySelectorAll('p,span,div,[role=status]')].some(node=>visible(node)&&labels.includes(clean(d.safeText(node,301)))));
+ }else raw.errors.push('衣橱商品总数缺失或不唯一');
+ if(!scope)raw.errors.push('商品总数、商品卡片或空衣橱标记无法关联同一区域');
+ if(scope){
+  raw.emptyLabels=[...scope.querySelectorAll('p,span,div,[role=status]')].filter(node=>visible(node)&&labels.includes(clean(d.safeText(node,301)))).map(node=>clean(d.safeText(node,301)));
+  raw.emptyLabels=[...new Set(raw.emptyLabels)];
+ }
  const pending=[...document.querySelectorAll('[aria-busy=true],[role=progressbar]')].some(visible);
- const more=[...scope.querySelectorAll('a[href],button,[role=button]')].filter(visible).some(node=>node.getAttribute('rel')?.split(/\s+/).includes('next')||/^(?:Suivant|Suivante|Afficher plus|Voir plus|Charger plus|Page suivante)$/i.test(clean(d.label(node))));
+ const more=[...(scope||document).querySelectorAll('a[href],button,[role=button]')].filter(visible).some(node=>node.getAttribute('rel')?.split(/\s+/).includes('next')||/^(?:Suivant|Suivante|Afficher plus|Voir plus|Charger plus|Page suivante)$/i.test(clean(d.label(node))));
  const pagination=[...document.querySelectorAll('nav,[role=navigation]')].filter(visible).some(node=>/pagination/i.test(clean(node.getAttribute('aria-label'))));
  raw.busy=pending;raw.pagination=more||pagination;
  raw.challenge=[...document.querySelectorAll('iframe')].some(e=>visible(e)&&/captcha|challenges\.cloudflare|challenge-platform/i.test((e.getAttribute('src')||'')+' '+(e.getAttribute('title')||'')));
- raw.dialogs=[...document.querySelectorAll('[aria-modal=true],dialog[open]')].filter(visible).length;
- raw.alerts=[...scope.querySelectorAll('[role=alert],[aria-live=assertive]')].filter(visible).map(e=>clean(d.safeText(e,400))).filter(Boolean);
+ raw.dialogs=[...document.querySelectorAll('[aria-modal=true],dialog[open],[role=dialog]')].filter(visible).length;
+ raw.alerts=[...document.querySelectorAll('[role=alert],[aria-live=assertive]')].filter(visible).map(e=>clean(d.safeText(e,400))).filter(Boolean);
  return raw;
 }
 
@@ -78,7 +96,9 @@ function catalogSurface(raw,{expectedAccount,title,emptyStateLabels=[]}){
  ensure(identity.memberId===expectedAccount.memberId&&identity.profileURL===expectedAccount.profileURL,'CATALOG_WRONG_ACCOUNT','当前页面不是绑定账号自己的衣橱');
  const issues=[];if(!Array.isArray(raw.errors)||raw.errors.length)issues.push(...(Array.isArray(raw.errors)?raw.errors:['衣橱页面结构无法核对']));
  if(typeof raw.documentKey!=='string'||!raw.documentKey||raw.documentKey.length>100)issues.push('衣橱页面编号缺失或无效');
- const count=Array.isArray(raw.countLabels)&&raw.countLabels.length===1&&/^(?:0|[1-9]\d*) articles?$/.test(raw.countLabels[0])?Number.parseInt(raw.countLabels[0],10):null;
+ const explicit=raw.emptyState,observedEmpty=!!explicit&&explicit.kind==='observed_own_wardrobe_empty'&&Object.entries(OWN_EMPTY_WARDROBE).every(([key,value])=>explicit[key]===value)&&['headingCount','subtitleCount','createLinkCount','selectedTabCount'].every(key=>explicit[key]===1)&&explicit.sameRegion===true&&Array.isArray(raw.countLabels)&&raw.countLabels.length===0&&Array.isArray(raw.links)&&raw.links.length===0;
+ if(explicit&&!observedEmpty)issues.push('本人空衣橱标记不完整、冲突或尚未按已观察形状核对');
+ const count=observedEmpty?0:Array.isArray(raw.countLabels)&&raw.countLabels.length===1&&/^(?:0|[1-9]\d*) articles?$/.test(raw.countLabels[0])?Number.parseInt(raw.countLabels[0],10):null;
  if(!Number.isSafeInteger(count)||count<0||count>100000)issues.push('衣橱商品总数缺失或无效');
  const entries=new Map();
  if(!Array.isArray(raw.links))issues.push('衣橱商品列表无法读取');
@@ -95,11 +115,11 @@ function catalogSurface(raw,{expectedAccount,title,emptyStateLabels=[]}){
   items.push({listingId:entry.listingId,url:entry.url,...entry.cards[0]});
  }
  if(entries.size!==count)issues.push('可见商品数量不等于衣橱总数，可能尚未加载完整或使用了分页');
- if(count===0&&(!Array.isArray(raw.emptyLabels)||!raw.emptyLabels.some(label=>emptyStateLabels.includes(label))))issues.push('没有已核对的可见空衣橱标记');
+ if(count===0&&!observedEmpty&&(!Array.isArray(raw.emptyLabels)||!raw.emptyLabels.some(label=>emptyStateLabels.includes(label))))issues.push('没有已核对的可见空衣橱标记');
  if(raw.ready!==true||raw.busy!==false||raw.pagination!==false||raw.challenge!==false||raw.dialogs!==0||!Array.isArray(raw.alerts)||raw.alerts.length)issues.push('页面仍在加载、分页、存在验证或弹窗，不能确认衣橱完整');
  items.sort((a,b)=>a.listingId.localeCompare(b.listingId,'en'));
  const duplicate=items.some(item=>item.normalizedTitle===target),complete=issues.length===0;
- return {complete,duplicate:duplicate?true:complete?false:null,absent:complete&&!duplicate,items,count,reason:issues.length?[...new Set(issues)].join('；'):duplicate?'已找到同标题商品，不会重复刊登':'已核对完整的本人衣橱，没有同标题商品',issues:[...new Set(issues)],documentKey:raw.documentKey,url:identity.profileURL};
+ return {complete,duplicate:duplicate?true:complete?false:null,absent:complete&&!duplicate,items,count,emptyState:observedEmpty?{...explicit}:null,reason:issues.length?[...new Set(issues)].join('；'):duplicate?'已找到同标题商品，不会重复刊登':'已核对完整的本人衣橱，没有同标题商品',issues:[...new Set(issues)],documentKey:raw.documentKey,url:identity.profileURL};
 }
 
 class VintedCatalog{
@@ -114,14 +134,18 @@ class VintedCatalog{
   finally{context.signal.removeEventListener('abort',abort);}
  }
  async accountState(profileId,context,expectedAccount,expectedDocument){
-  const state=await this.wait(()=>this.account.state(profileId,context,expectedDocument?{documentKey:expectedDocument,username:expectedAccount.username}:undefined),context);
-  ensure(typeof state?.documentKey==='string'&&state.documentKey&&state.account?.memberId===expectedAccount.memberId&&state.account.profileURL===expectedAccount.profileURL&&state.account.username===expectedAccount.username,'CATALOG_ACCOUNT_CHANGED','当前账号菜单与绑定账号不一致，或菜单尚未核验');
-  if(expectedDocument)ensure(state.documentKey===expectedDocument,'CATALOG_PAGE_CHANGED','衣橱页面已重新加载');
-  return state;
+  // Mobile account identity lives inside a drawer. Read that identity freshly,
+  // close the same observed drawer, then inspect the exposed wardrobe surface.
+  // A cached identity or a still-open menu must never establish an empty page.
+  const receipt=await this.wait(()=>this.account.inspectAccount(profileId,{expectedAccount,controller:context.controller,signal:context.signal,tab:context.tab,closeMenu:true}),context);
+  ensure(receipt?.verified===true&&receipt.menuClosed===true&&typeof receipt.documentKey==='string'&&receipt.documentKey&&receipt.memberId===expectedAccount.memberId&&receipt.profileURL===expectedAccount.profileURL&&receipt.username===expectedAccount.username,'CATALOG_ACCOUNT_CHANGED','当前账号菜单与绑定账号不一致，或菜单尚未关闭核验');
+  if(expectedDocument)ensure(receipt.documentKey===expectedDocument,'CATALOG_PAGE_CHANGED','衣橱页面已重新加载');
+  return {documentKey:receipt.documentKey,account:{memberId:receipt.memberId,profileURL:receipt.profileURL,username:receipt.username,usernameSource:receipt.usernameSource,association:receipt.evidence?.association}};
  }
+
  async readPass(profileId,input,context,documentKey){
   const before=await this.accountState(profileId,context,input.expectedAccount,documentKey);
-  const raw=await this.wait(()=>this.adapter.control.isolated(context.tab,'('+probeCatalogDOM.toString()+')('+JSON.stringify(this.emptyStateLabels)+')'),context);
+  const raw=await this.wait(()=>this.adapter.control.isolated(context.tab,'('+probeCatalogDOM.toString()+')('+JSON.stringify(this.emptyStateLabels)+','+JSON.stringify(OWN_EMPTY_WARDROBE)+')'),context);
   ensure(raw?.documentKey===documentKey,'CATALOG_PAGE_CHANGED','衣橱和账号不属于同一页面');
   const surface=catalogSurface(raw,{...input,emptyStateLabels:this.emptyStateLabels}),after=await this.accountState(profileId,context,input.expectedAccount,documentKey);
   ensure(JSON.stringify(before.account)===JSON.stringify(after.account),'CATALOG_ACCOUNT_CHANGED','读取衣橱时当前账号发生变化');
@@ -139,7 +163,7 @@ class VintedCatalog{
    context.guard();const selected=this.adapter.current(profileId,context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;
    ownsLock=w.vintedDraftController!==controller;if(ownsLock)w.vintedDraftController=controller;
    contents.on?.('did-start-navigation',navigation);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);timer=setTimeout(()=>{timedOut=true;controller.abort();},this.timeoutMs);
-   if(openAccount){const receipt=await this.wait(()=>this.account.inspectAccount(profileId,{controller,signal:controller.signal,tab:context.tab}),context);ensure(receipt?.verified===true&&receipt.memberId===identity.memberId&&receipt.profileURL===identity.profileURL&&receipt.username===expectedAccount.username,'CATALOG_ACCOUNT_CHANGED','当前登录账号与保存的环境绑定不一致');}
+   if(openAccount){const receipt=await this.wait(()=>this.account.inspectAccount(profileId,{expectedAccount,controller,signal:controller.signal,tab:context.tab,closeMenu:true}),context);ensure(receipt?.verified===true&&receipt.menuClosed===true&&receipt.memberId===identity.memberId&&receipt.profileURL===identity.profileURL&&receipt.username===expectedAccount.username,'CATALOG_ACCOUNT_CHANGED','当前登录账号与保存的环境绑定不一致');}
    const initial=await this.accountState(profileId,context,expectedAccount),input={expectedAccount,title};
    const first=await this.readPass(profileId,input,context,initial.documentKey),second=await this.readPass(profileId,input,context,initial.documentKey);context.guard();
    ensure(JSON.stringify(first)===JSON.stringify(second),'CATALOG_PAGE_CHANGED','两次读取之间衣橱内容或账号发生变化');
@@ -151,4 +175,4 @@ class VintedCatalog{
  async collect(profileId,options){return this.run(profileId,options,false);}
 }
 
-module.exports={VintedCatalog,probeCatalogDOM,catalogSurface,parseCardLabel,normalizedTitle,itemIdentity};
+module.exports={VintedCatalog,probeCatalogDOM,catalogSurface,parseCardLabel,normalizedTitle,itemIdentity,OWN_EMPTY_WARDROBE};

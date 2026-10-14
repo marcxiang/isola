@@ -2,7 +2,7 @@
 
 const test=require('node:test'),assert=require('node:assert/strict'),{EventEmitter}=require('node:events');
 const {createHash}=require('node:crypto');
-const {VintedPublishSubmit,publicationJournal}=require('../src/vinted-publish-submit.cjs');
+const {VintedPublishSubmit,publicationJournal,commitPublicationDeletion}=require('../src/vinted-publish-submit.cjs');
 const {createDisplayController}=require('../src/display-transform.cjs');
 const FORM='https://www.vinted.fr/items/new',clone=value=>JSON.parse(JSON.stringify(value));
 const hash=value=>createHash('sha256').update(value).digest('hex'),photoSource='https://images.vinted.test/original.jpg';
@@ -125,6 +125,11 @@ test('the atomic boundary rejects account, photo, field, challenge and optional 
  const f=fixture({onAtomic:api=>{api.engine.adapter.photos.claims.values().next().value.signature='c'.repeat(64);}});await assert.rejects(f.run(),{code:'PUBLICATION_UNKNOWN_RESULT'});assert.equal(f.events.length,0);
 });
 
+test('a page-provided closed-menu claim cannot replace an unexpired main-process account receipt',async()=>{
+ const f=fixture({onAtomic:(_api,state)=>{state.account=null;state.closedAccount={verified:true,valid:true,closed:true,documentKey:'100.1',memberId:'123',profileURL:'https://www.vinted.fr/member/123'};}});
+ await assert.rejects(f.run(),{code:'PUBLICATION_UNKNOWN_RESULT'});assert.equal(f.events.length,0);assert.equal(f.engine.db.publications.submissions[0].attemptCount,1);
+});
+
 test('dispatch deadline revokes the click controller while uncertain persistence remains blocked',async()=>{
  let releaseRead,releasePersist,enteredPersist;const readPending=new Promise(resolve=>{releaseRead=resolve;}),persistPending=new Promise(resolve=>{releasePersist=resolve;}),persistEntered=new Promise(resolve=>{enteredPersist=resolve;});
  const f=fixture({timeoutMs:1000,dispatchTimeoutMs:25,onRead:(_api,count)=>count===5?readPending:undefined,onPersist:async(_api,state)=>{if(state.submissions[0]?.state==='uncertain'){enteredPersist();await persistPending;}}});
@@ -161,4 +166,39 @@ test('storage failure before click cannot proceed, and journal ownership detects
 test('navigation persistence failure keeps the submission uncertain and reports an ambiguous result',async()=>{
  const f=fixture({navigate:'https://www.vinted.fr/items/98765',onPersist:(_f,state)=>{if(state.submissions[0]?.navigation?.length)throw Error('disk full');}});
  await assert.rejects(f.run(),caught=>caught.ambiguous===true);assert.equal(f.events.filter(event=>event.type==='mouseDown').length,1);assert.equal(f.engine.faulted,true);
+});
+
+async function deletionFixture(){
+ const f=fixture();await f.run();Object.assign(f.engine.db,{plans:[clone(f.plan)],claims:[{...clone(f.input.claim),listings:[]}],jobs:[{id:'old-job',type:'listing',profileId:f.plan.profileId,productId:f.plan.productId,planId:f.plan.id,dedupeKey:'listing:plan-1:0',payload:{cycle:0},state:'needs_review',step:'pending',operation:null,mutationPending:false,result:null}],sales:[],publicationSupplierSync:[]});
+ const record=f.engine.db.publications.submissions[0],evidence={kind:'operator_confirmed_deletion',confirmed:true,reason:'deleted_not_sold',reviewId:'deletion-review-1',profileId:f.plan.profileId,memberId:'123',listingId:'98765',url:'https://www.vinted.fr/items/98765',confirmedAt:new Date().toISOString()};
+ const stage=(before,state)=>{const next=clone(before);next.publications=state;Object.assign(next.plans[0],{listingRevision:1,activeListingId:null,status:'ready'});Object.assign(next.jobs[0],{state:'cancelled',step:'listing_deleted',result:{kind:'listing_deleted',externalId:'98765',submissionId:record.id}});next.jobs.push({...clone(before.jobs[0]),id:'new-job',dedupeKey:'listing:plan-1:0:r1',payload:{cycle:0,listingRevision:1},state:'queued'});return next;};
+ return {f,record,evidence,stage};
+}
+
+test('operator deletion bridge persists withdrawal, unchanged sales and new revision queue in one durable engine snapshot',async()=>{
+ const {f,record,evidence,stage}=await deletionFixture(),writes=[],beforeEvents=f.events.length;f.engine.persist=async()=>{writes.push(clone(f.engine.db));};
+ const result=await commitPublicationDeletion(f.engine,record.id,evidence,stage);assert.equal(writes.length,1);const db=writes[0];assert.deepEqual(db.publications.submissions[0].proof,record.proof);assert.equal(result.closedWithdrawal.reviewId,evidence.reviewId);assert.equal(db.plans[0].completedCount,0);assert.equal(db.plans[0].listingRevision,1);assert.equal(db.jobs[0].state,'cancelled');assert.equal(db.jobs[1].dedupeKey,'listing:plan-1:0:r1');assert.deepEqual(db.sales,[]);assert.equal(f.events.length,beforeEvents);assert.deepEqual(publicationJournal(f.engine).state(),db.publications);
+ await assert.rejects(commitPublicationDeletion(f.engine,record.id,evidence,stage),{code:'PUBLICATION_DELETION_CLOSED'});assert.equal(writes.length,1);
+});
+
+test('deletion bridge rejects a partial journal-only release or a stage that changes sales counts',async()=>{
+ const a=await deletionFixture(),before=clone(a.f.engine.db);await assert.rejects(publicationJournal(a.f.engine).releaseAfterDeletion(a.record.id,a.evidence),{code:'PUBLICATION_STORAGE_FAILED'});assert.deepEqual(a.f.engine.db,before);
+ for(const change of [db=>db.plans[0].completedCount++,db=>db.sales.push({id:'fabricated-sale'}),db=>db.plans[0].listingRevision=0,db=>db.plans[0].listingRevision=2]){
+  const {f,record,evidence,stage}=await deletionFixture(),original=clone(f.engine.db);await assert.rejects(commitPublicationDeletion(f.engine,record.id,evidence,(old,state)=>{const next=stage(old,state);change(next);return next;}),{code:'PUBLICATION_STORAGE_FAILED'});assert.deepEqual(f.engine.db,original);
+ }
+});
+
+test('deletion fsync failure rolls engine and shared journal back with original job intact',async()=>{
+ const {f,record,evidence,stage}=await deletionFixture(),before=clone(f.engine.db);f.engine.persist=async()=>{assert.equal(f.engine.db.plans[0].listingRevision,1);assert.ok(f.engine.db.publications.submissions[0].closedWithdrawal);throw Error('disk full');};
+ await assert.rejects(commitPublicationDeletion(f.engine,record.id,evidence,stage),{code:'PUBLICATION_STORAGE_FAILED'});assert.deepEqual(f.engine.db,before);assert.equal(f.engine.faulted,true);assert.deepEqual(publicationJournal(f.engine).state(),before.publications);
+});
+
+test('a stopped deletion guard and concurrent deletion cannot mutate the old publication twice',async()=>{
+ const {f,record,evidence,stage}=await deletionFixture(),before=clone(f.engine.db);await assert.rejects(commitPublicationDeletion(f.engine,record.id,evidence,stage,{guard:()=>{throw Object.assign(Error('stopped'),{code:'STOPPED'});}}),{code:'STOPPED'});assert.deepEqual(f.engine.db,before);
+ let release,entered;const pending=new Promise(resolve=>{release=resolve;}),began=new Promise(resolve=>{entered=resolve;});f.engine.persist=async()=>{entered();await pending;};const first=commitPublicationDeletion(f.engine,record.id,evidence,stage);await began;
+ await assert.rejects(commitPublicationDeletion(f.engine,record.id,evidence,stage));release();await first;assert.equal(f.engine.db.plans[0].listingRevision,1);assert.equal(f.engine.db.jobs.length,2);
+});
+
+test('a relisting revision changed at native input boundary prevents publication of a stale version',async()=>{
+ const f=fixture({onFocus:api=>{api.plan.listingRevision=1;}});await assert.rejects(f.run(),{code:'PUBLICATION_UNKNOWN_RESULT'});assert.equal(f.events.length,0);
 });

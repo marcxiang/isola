@@ -1,11 +1,11 @@
 {
   "name": "isola-browser",
-  "version": "0.5.3-dev.9",
+  "version": "0.5.3-dev.10",
   "description": "Local isolated browsing environments",
   "main": "src/main.cjs",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/model.cjs test/proxy.cjs test/ai.cjs test/keys.cjs test/socks-addresses.cjs test/sku-desk.cjs test/sku-transport.cjs test/commerce-engine.cjs test/listing-config.cjs test/vinted-adapter.cjs test/commerce-preflight.cjs test/navigation-lifecycle.cjs test/commerce-photos.cjs test/vinted-photo-upload.cjs test/proxy-auth.cjs test/vinted-account.cjs test/vinted-publication.cjs test/vinted-publication-evidence.cjs test/commerce-scheduler.cjs test/commerce-scheduler-integration.cjs test/vinted-publish-submit.cjs test/commerce-publication-reconcile.cjs test/vinted-listing-receipt.cjs test/commerce-association-service.cjs test/fingerprint-config.cjs test/device-probe.cjs test/commerce-accounts.cjs test/commerce-account-service.cjs test/vinted-login.cjs test/ai-settings-store.cjs test/display-transform.cjs test/manager-status.cjs test/commerce-supplier-outbox.cjs test/vinted-conversation.cjs test/vinted-catalog.cjs test/vinted-sales-runtime.cjs",
+    "test": "node --test test/model.cjs test/proxy.cjs test/ai.cjs test/keys.cjs test/socks-addresses.cjs test/sku-desk.cjs test/sku-transport.cjs test/commerce-engine.cjs test/listing-config.cjs test/vinted-adapter.cjs test/commerce-preflight.cjs test/navigation-lifecycle.cjs test/sales-navigation.cjs test/commerce-photos.cjs test/vinted-photo-upload.cjs test/proxy-auth.cjs test/vinted-account.cjs test/vinted-publication.cjs test/vinted-publication-evidence.cjs test/commerce-scheduler.cjs test/commerce-scheduler-integration.cjs test/vinted-publish-submit.cjs test/commerce-publication-reconcile.cjs test/vinted-listing-receipt.cjs test/commerce-association-service.cjs test/fingerprint-config.cjs test/device-probe.cjs test/commerce-accounts.cjs test/commerce-account-service.cjs test/vinted-login.cjs test/ai-settings-store.cjs test/display-transform.cjs test/manager-status.cjs test/commerce-supplier-outbox.cjs test/vinted-conversation.cjs test/vinted-catalog.cjs test/vinted-sales-runtime.cjs",
     "package": "node scripts/package.mjs",
     "test:electron": "electron test/electron-smoke.cjs",
     "package:windows": "node scripts/package.mjs --platform=win32",

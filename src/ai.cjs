@@ -24,14 +24,20 @@ function loadSettings(profileId) {
   let apiKey='';try{if(saved.encryptedKey)apiKey=safeStorage.decryptString(Buffer.from(saved.encryptedKey,'base64'));}catch{throw Error('此环境的模型密钥无法解密，请在本机重新保存');}
   return {...CONFIG_DEFAULT,...saved,apiKey};
 }
-function publicSettings(profileId) { const {apiKey, encryptedKey, ...s} = loadSettings(profileId); return {...s,hasKey:!!apiKey,scope:profileId===undefined?'legacy-template':'environment'}; }
+function publicSettings(profileId) {
+  // Toolbar metadata must not unlock a model key merely to open a browser.
+  const {encryptedKey,...s}=readSettingsRecord({dir:app.getPath('userData'),profileId,defaults:CONFIG_DEFAULT});
+  return {...s,hasKey:!!encryptedKey,scope:profileId===undefined?'legacy-template':'environment'};
+}
 function saveSettings(input,profileId) {
-  const before = loadSettings(profileId), same = input.baseURL?.replace(/\/$/,'') === before.baseURL;
-  const apiKey = input.clearKey ? '' : input.apiKey || (same ? before.apiKey : '');
-  const s = validateSettings({...input, apiKey}, {requireKey:false});
+  const before=readSettingsRecord({dir:app.getPath('userData'),profileId,defaults:CONFIG_DEFAULT});
+  const s=validateSettings({...input,apiKey:input.clearKey?'':input.apiKey||''},{requireKey:false});
   if (s.apiKey && !safeStorage.isEncryptionAvailable()) throw Error('系统密钥加密不可用');
   const {apiKey:secret, ...out} = s;
-  out.encryptedKey = secret ? safeStorage.encryptString(secret).toString('base64') : '';
+  // A settings-only edit retains the exact sealed record. Only a new key
+  // needs encryption; existing keys are decrypted when AI actually starts.
+  const same=s.baseURL===before.baseURL.replace(/\/$/,'');
+  out.encryptedKey=input.clearKey?'':secret?safeStorage.encryptString(secret).toString('base64'):same?before.encryptedKey:'';
   writeSettingsRecord({dir:app.getPath('userData'),profileId,defaults:CONFIG_DEFAULT,value:out});
   return publicSettings(profileId);
 }

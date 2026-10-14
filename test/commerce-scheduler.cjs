@@ -84,3 +84,9 @@ test('queue projection distinguishes deliberate sales-only procurement disableme
 test('an unsubmitted temporary blocker preserves its actionable cause during the polling delay',()=>{
  const f=fixture();Object.assign(f.jobs[0],{retryAt:new Date(NOW+10000).toISOString(),blockedReason:'PAGE_BUSY',error:'Wait for the existing page action'});const row=first(f);assert.equal(row.reasonCode,'PAGE_BUSY');assert.equal(row.reason,'Wait for the existing page action');assert.equal(row.state,'waiting');
 });
+
+test('a relisting revision blocks old queued jobs while preserving the original sales cycle',()=>{
+ const f=autoOpenFixture();f.plans[0].listingRevision=1;assert.equal(first(f).reasonCode,'LISTING_CYCLE_CHANGED');assert.deepEqual(inspect(f).runnableJobIds,[]);
+ f.jobs[0].payload.listingRevision=1;f.jobs[0].dedupeKey='listing:plan-1:0:r1';assert.equal(first(f).reasonCode,'PROFILE_AUTO_OPEN');assert.deepEqual(inspect(f).runnableJobIds,['job-1']);
+ for(const value of [-1,1.5,'1',null]){f.jobs[0].payload.listingRevision=value;assert.equal(first(f).reasonCode,'LISTING_CYCLE_CHANGED');}
+});

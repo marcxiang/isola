@@ -83,6 +83,7 @@
         </section>
         <section class="card"><div class="section-heading"><div><h2 id="execution-rules-title">执行与采购规则</h2><p id="execution-rules-description">先限定执行范围，再启动持续调度。</p></div></div>
           <label class="toggle-row"><span><b>允许后台持续调度</b><small>最小化窗口后仍检查任务；需要保持应用和电脑运行。</small></span><input type="checkbox" name="backgroundEnabled"></label>
+          <p id="background-setup-guidance" class="field-hint" role="status" hidden>请勾选「允许后台持续调度」并点击「保存设置」，然后点击顶部「启动调度」。保存设置不会自动开始上架。</p>
           <div class="field-grid"><label>最多同时运行的环境数<input name="maxConcurrent" type="number" min="1" max="3" step="1" value="1" required></label><label data-purchase-control>货盘履约方式<select name="fulfillmentMethod"><option value="wms">仓库履约（WMS）</option><option value="self">自行履约</option></select></label></div>
           <div class="field-grid" data-purchase-control><label>单笔采购上限（€）<input name="perOrderLimit" type="text" inputmode="decimal" placeholder="0.00" value="0.00" required maxlength="14"></label><label>每日采购上限（€）<input name="dailyLimit" type="text" inputmode="decimal" placeholder="0.00" value="0.00" required maxlength="14"></label></div>
           <p class="field-hint" data-purchase-control>金额保留最多两位小数。上限设为 0 时，不授权自动采购；实际执行还需订单信息和流程验证完整。</p>
@@ -127,6 +128,18 @@
     <div id="publication-association-detail" aria-live="polite"></div>
     <p id="publication-association-confirmation" class="publication-submit-note" hidden>点击「关联已核对刊登」即表示你确认：当前商品对应这条原发布提交。应用会记录这次操作员确认并保存本机关联。</p>
     <div class="form-actions end"><button type="button" data-close="publication-association-dialog">关闭</button><button type="button" id="publication-association-inspect">重新读取当前商品</button><button type="button" id="publication-association-confirm" class="primary" disabled>关联已核对刊登</button></div>
+  </dialog>
+  <dialog id="publication-withdrawal-dialog" aria-labelledby="publication-withdrawal-title">
+    <form id="publication-withdrawal-form" autocomplete="off">
+      <div class="dialog-heading"><div><div class="eyebrow">VINTED / RELIST</div><h2 id="publication-withdrawal-title">已删除，重新上架</h2></div><button type="button" data-close="publication-withdrawal-dialog" class="icon-button" aria-label="关闭重新上架确认">×</button></div>
+      <div id="publication-withdrawal-summary" class="account-confirm-summary"></div>
+      <p class="account-confirm-note">确认后保留原提交、图片和任务历史，记录原商品已删除，并重新安排上架。累计销量不会增加；本操作不会在 Vinted 删除商品，也不会立即点击发布。重新上架仍需启动调度并逐项核对页面。</p>
+      <label>原 Vinted 法国站商品地址<input id="publication-withdrawal-url" type="url" required maxlength="2048" placeholder="https://www.vinted.fr/items/…" spellcheck="false"></label>
+      <label class="check-row"><input id="publication-withdrawal-confirmed" type="checkbox"> 我确认原商品已在 Vinted 删除，尚未售出</label>
+      <p id="publication-withdrawal-error" class="form-error" role="alert" hidden></p>
+      <p id="publication-withdrawal-result" class="field-hint" role="status" hidden></p>
+      <div class="form-actions end"><button type="button" data-close="publication-withdrawal-dialog">关闭</button><button type="submit" id="publication-withdrawal-submit" class="primary" disabled>确认并重新排队</button></div>
+    </form>
   </dialog>
   <dialog id="plan-photos-dialog" aria-labelledby="plan-photos-title">
     <div class="dialog-heading"><div><div class="eyebrow">VINTED / LISTING PHOTOS</div><h2 id="plan-photos-title">照片准备与上传</h2></div><button type="button" data-close="plan-photos-dialog" class="icon-button" aria-label="关闭照片面板">×</button></div>

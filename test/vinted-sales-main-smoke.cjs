@@ -40,6 +40,10 @@ module.exports=async function salesMainSmoke(api,check){
    catalogReads.push({tabId:selected.tab.id,jobId:job.id,leaseJobId:lease.jobId});
    return {complete:false,duplicate:false,reason:'Fixture catalog is deliberately incomplete; no supplier or publication step may run.'};
   };
+  await check('opening an existing hidden profile restores the same window without creating another tab or navigating',async()=>{
+   const beforeRequests=requests.length,beforeTabs=w.tabs.map(tab=>tab.id);w.hide();assert.equal(w.isVisible(),false);await api.launch(profile.id);await until(()=>w.isVisible()&&!w.isMinimized());assert.equal(api.windows.get(profile.id),w);assert.deepEqual(w.tabs.map(tab=>tab.id),beforeTabs);assert.equal(requests.length,beforeRequests);
+   return {sameWindow:true,visible:true,additionalNavigations:0};
+  });
   const assertNoBusinessMutation=()=>{
    assert.deepEqual(engine.db.photoPreparations,[]);assert.deepEqual(engine.db.claims,[]);assert.deepEqual(engine.db.publications.submissions,[]);assert.deepEqual(engine.db.publicationSupplierSync,[]);assert.equal(plan.activeListingId,null);
    assert.equal(engine.active.size,0);assert.deepEqual(engine.leases.snapshot(),[]);assert.equal(engine.adapter.uiOwner,null);

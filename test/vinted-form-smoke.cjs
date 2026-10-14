@@ -23,32 +23,37 @@ const html=String.raw`<!doctype html><meta charset="utf-8"><title>Vinted form co
 <footer><button type="button" id="upload">Ajoute des photos</button><button type="button" id="save">Sauvegarder le brouillon</button><button type="submit" id="publish">Ajouter</button></footer>
 </form></main>
 <script>
-window.fixture={events:[],saves:0,publishes:0,uploads:0,categorySearch:'',semanticButtons:false,escapes:0,stuckMenu:false,brandMenuDelay:0,brandResultsDelay:0,brandReadyDelay:0,brandReadyAt:0,ignoredBrandClicks:0,recommendationClicks:0,normalizePrice:false,wrongPrice:false,colorSuggestions:false};
+window.fixture={events:[],saves:0,publishes:0,uploads:0,categorySearch:'',semanticButtons:false,escapes:0,stuckMenu:false,brandMenuDelay:0,brandResultsDelay:0,brandReadyDelay:0,brandReadyAt:0,ignoredBrandClicks:0,recommendationClicks:0,normalizePrice:false,wrongPrice:false,colorSuggestions:false,mobilePickers:false,confirmedMenus:[]};
 for(const kind of ['click','input','keydown'])document.addEventListener(kind,event=>{if(event.target.closest('main'))fixture.events.push({kind,trusted:event.isTrusted,id:event.target.id,label:event.target.textContent.slice(0,100),key:event.key||''});},true);
 const menu=document.querySelector('#menu'),cat=document.querySelector('#category'),condition=document.querySelector('#condition');
+function modalHeader(label){return '<div class="modal-header"><div><h2><span>'+label+'</span></h2></div><button type="button" aria-label="Fermer">×</button></div>';}
+function commitChoice(name,apply){if(!fixture.mobilePickers){apply();return;}let done=menu.querySelector('[data-done]');if(!done){done=document.createElement('button');done.type='button';done.dataset.done=name;done.id=name+'-done';done.textContent='Fait';menu.append(done);}done.onclick=()=>{fixture.confirmedMenus.push(name);apply();};}
 function category(level){
+ menu.setAttribute('aria-label','Catégorie');
  menu.innerHTML='<input id="category-search" placeholder="Trouver une catégorie"><div id="choices"></div>';
  const search=menu.querySelector('input'),choices=menu.querySelector('#choices');search.value=fixture.categorySearch;
  function render(){choices.replaceChildren();if(fixture.categorySearch){choices.textContent='Résultats pour '+fixture.categorySearch;return;}
   if(level<2){const button=document.createElement(fixture.semanticButtons?'div':'button');if(fixture.semanticButtons){button.setAttribute('role','button');button.tabIndex=0;button.style.cssText='padding:16px;cursor:pointer';}else button.type='button';button.textContent=level===0?'Femmes':'Accessoires';button.onclick=()=>category(level+1);choices.append(button);}
-  else{choices.innerHTML='<label><input type="radio" name="category-choice">Autres accessoires</label>';choices.querySelector('input').onchange=()=>{cat.value='Autres accessoires';menu.replaceChildren();fixture.brandReadyAt=Date.now()+fixture.brandReadyDelay;const material=document.querySelector('#material');if(material)material.value='Plastique';};}}
+  else{choices.innerHTML='<label><input type="radio" name="category-choice">Autres accessoires</label>';choices.querySelector('input').onchange=()=>commitChoice('category',()=>{cat.value='Autres accessoires';menu.replaceChildren();fixture.brandReadyAt=Date.now()+fixture.brandReadyDelay;const material=document.querySelector('#material');if(material)material.value='Plastique';});}}
  search.oninput=()=>{fixture.categorySearch=search.value;render();};render();
 }
 cat.onclick=()=>category(0);
-condition.onclick=()=>{menu.innerHTML='<label><input type="radio" name="condition-choice" data-label="Neuf avec étiquette">Neuf avec étiquette Article neuf et jamais porté</label><label><input type="radio" name="condition-choice" data-label="Neuf sans étiquette">Neuf sans étiquette Article neuf, sans étiquette ni emballage</label>';for(const choice of menu.querySelectorAll('input'))choice.onchange=()=>{condition.value=choice.dataset.label;menu.replaceChildren();};};
+condition.onclick=()=>{menu.removeAttribute('aria-label');menu.innerHTML=modalHeader('État')+'<label><input type="radio" name="condition-choice" data-label="Neuf avec étiquette">Neuf avec étiquette Article neuf et jamais porté</label><label><input type="radio" name="condition-choice" data-label="Neuf sans étiquette">Neuf sans étiquette Article neuf, sans étiquette ni emballage</label>';for(const choice of menu.querySelectorAll('input'))choice.onchange=()=>commitChoice('condition',()=>{condition.value=choice.dataset.label;menu.replaceChildren();});};
 const brand=document.querySelector('#brand'),color=document.querySelector('#color');
 brand.onclick=()=>{
+ menu.setAttribute('aria-label','Marque');
  if(Date.now()<fixture.brandReadyAt){fixture.ignoredBrandClicks++;return;}
  function open(){menu.innerHTML='<input id="brand-search" placeholder="Rechercher une marque"><div id="brand-options"></div>';
  const search=menu.querySelector('#brand-search'),options=menu.querySelector('#brand-options');let timer;
- function render(){clearTimeout(timer);const value=search.value;const apply=()=>{if(!search.isConnected||search.value!==value)return;options.innerHTML=(value==='Sans marque'?'<label><input type="radio" name="brand-choice" data-label="Sans marque">Sans marque</label>':'')+'<label><input type="radio" name="brand-choice" data-label="The Unbranded Brand">The Unbranded Brand</label>';for(const choice of options.querySelectorAll('input'))choice.onchange=()=>{brand.value=choice.dataset.label;menu.replaceChildren();};};if(value==='Sans marque'&&fixture.brandResultsDelay)timer=setTimeout(apply,fixture.brandResultsDelay);else apply();}
+ function render(){clearTimeout(timer);const value=search.value;const apply=()=>{if(!search.isConnected||search.value!==value)return;options.innerHTML=(value==='Sans marque'?'<label><input type="radio" name="brand-choice" data-label="Sans marque">Sans marque</label>':'')+'<label><input type="radio" name="brand-choice" data-label="The Unbranded Brand">The Unbranded Brand</label>';for(const choice of options.querySelectorAll('input'))choice.onchange=()=>commitChoice('brand',()=>{brand.value=choice.dataset.label;menu.replaceChildren();});};if(value==='Sans marque'&&fixture.brandResultsDelay)timer=setTimeout(apply,fixture.brandResultsDelay);else apply();}
  search.oninput=render;render();}
  if(fixture.brandMenuDelay)setTimeout(open,fixture.brandMenuDelay);else open();
 };
 color.onclick=()=>{
+ menu.removeAttribute('aria-label');
  const all='<label><input id="color-black" type="checkbox" data-label="Noir">Noir</label><label><input type="checkbox" data-label="Blanc">Blanc</label>';
- menu.classList.add('color-open');menu.innerHTML='<div role="group" aria-label="Couleur">'+(fixture.colorSuggestions?'<div><div>Suggestions</div><ul><li><label><input id="suggested-black" type="checkbox" data-label="Noir">Noir</label></li></ul></div><div><div>Toutes les couleurs</div><ul><li>'+all+'</li></ul></div>':all)+'</div>';
- for(const choice of menu.querySelectorAll('input')){choice.checked=color.value.split(', ').includes(choice.dataset.label);choice.onchange=()=>{const selected=new Set([...menu.querySelectorAll('input:checked')].map(e=>e.dataset.label));color.value=[...selected].join(', ');for(const same of menu.querySelectorAll('input'))same.checked=selected.has(same.dataset.label);};}
+ menu.classList.add('color-open');menu.innerHTML=modalHeader('Couleur')+'<div role="group" aria-label="Couleur">'+(fixture.colorSuggestions?'<div><div>Suggestions</div><ul><li><label><input id="suggested-black" type="checkbox" data-label="Noir">Noir</label></li></ul></div><div><div>Toutes les couleurs</div><ul><li>'+all+'</li></ul></div>':all)+'</div>';
+ for(const choice of menu.querySelectorAll('input')){choice.checked=color.value.split(', ').includes(choice.dataset.label);choice.onchange=()=>{const selected=new Set([...menu.querySelectorAll('input:checked')].map(e=>e.dataset.label));for(const same of menu.querySelectorAll('input'))same.checked=selected.has(same.dataset.label);commitChoice('color',()=>{color.value=[...selected].join(', ');if(fixture.mobilePickers){menu.replaceChildren();menu.classList.remove('color-open');}});};}
 };
 document.addEventListener('keydown',event=>{if(event.key==='Escape'){fixture.escapes++;if(!fixture.stuckMenu){menu.replaceChildren();menu.classList.remove('color-open');}}});
 document.querySelector('#price').addEventListener('input',event=>{if(fixture.wrongPrice)event.target.value='50.00';else if(fixture.normalizePrice)event.target.value=event.target.value.replace(',','.');});
@@ -84,6 +89,15 @@ module.exports=async function vintedFormSmoke(api,check){
       const result=await adapter.prepareFields(profile.id,input);assert.deepEqual(result.filled.map(f=>f.field),['title','description','categoryPath','condition','priceCents']);
       const state=await c.executeJavaScript(`({search:fixture.categorySearch,category:document.querySelector('#category').value,events:fixture.events,saves:fixture.saves,publishes:fixture.publishes})`);
       assert.equal(state.search,'');assert.equal(state.category,'Autres accessoires');assert.ok(state.events.some(e=>e.kind==='input'&&e.id==='category-search'&&e.trusted));assert.ok(state.events.every(e=>e.trusted));assert.equal(state.saves,0);assert.equal(state.publishes,0);return {searchCleared:true,semanticButtonTags:'div',category:state.category};
+    });
+    await check('Vinted mobile pickers use trusted scoped Fait confirmations before reading committed fields',async()=>{
+      await c.loadURL(FORM);await c.executeJavaScript(`fixture.mobilePickers=true;const other=document.createElement('button');other.type='button';other.textContent='Fait';other.id='unrelated-done';other.onclick=()=>fixture.saves++;document.querySelector('footer').append(other);`);
+      const result=await adapter.prepareFields(profile.id,{...input,brand:'Sans marque',color:'Noir',condition:'Neuf sans étiquette'});
+      assert.deepEqual(result.filled.map(field=>field.field),['title','description','categoryPath','brand','condition','color','priceCents']);
+      const state=await c.executeJavaScript(`({category:cat.value,brand:brand.value,condition:condition.value,color:color.value,price:document.querySelector('#price').value,menuChildren:menu.children.length,...fixture})`);
+      assert.deepEqual(state.confirmedMenus,['category','brand','condition','color']);assert.equal(state.category,'Autres accessoires');assert.equal(state.brand,'Sans marque');assert.equal(state.condition,'Neuf sans étiquette');assert.equal(state.color,'Noir');assert.equal(state.price,'5,00');assert.equal(state.menuChildren,0);assert.equal(state.escapes,0);assert.equal(state.saves,0);assert.equal(state.publishes,0);assert.equal(state.uploads,0);assert.ok(state.events.every(event=>event.trusted));
+      for(const name of state.confirmedMenus)assert.ok(state.events.some(event=>event.kind==='click'&&event.id===name+'-done'&&event.trusted));
+      assert.equal(state.events.some(event=>event.id==='unrelated-done'),false);return {confirmedMenus:state.confirmedMenus,trustedConfirmations:true,unrelatedFaitClicked:false,publicationCount:state.publishes};
     });
     await check('Vinted local runtime selects the explicit brand and closes a color overlay with trusted Escape',async()=>{
       await c.loadURL(FORM);const result=await adapter.prepareFields(profile.id,{...input,brand:'Sans marque',color:'Noir',condition:'Neuf sans étiquette'});assert.deepEqual(result.filled.map(f=>f.field),['title','description','categoryPath','brand','condition','color','priceCents']);

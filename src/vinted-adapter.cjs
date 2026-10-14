@@ -265,6 +265,55 @@ class VintedAdapter {
     return {verified:true};
   }
 
+  async finishChoiceSelection(profileId,context,ownership,spec,label) {
+    const searchLabel=spec.key==='categoryPath'?CATEGORY_SEARCH:spec.key==='brand'?BRAND_SEARCH:null;
+    const choiceMatches=e=>spec.key==='condition'?(normalized(e.label)===label||normalized(e.label).startsWith(label+' ')):normalized(e.label)===label;
+    // Mobile category/brand choosers and condition/color dialogs commit through
+    // their own Fait. Desktop pickers without that button keep the existing path.
+    const page=await this.read(profileId,context),searches=page.elements.filter(e=>e.tag==='input'&&!e.disabled&&!e.sensitive&&(normalized(e.label)===searchLabel||normalized(e.placeholder)===searchLabel));
+    const radios=page.elements.filter(e=>!e.disabled&&!e.sensitive&&(spec.key==='color'?(e.role==='checkbox'||e.tag==='input'&&e.type==='checkbox'):(e.role==='radio'||e.tag==='input'&&e.type==='radio'))&&choiceMatches(e));
+    const buttons=page.elements.filter(e=>!e.sensitive&&(e.role==='button'||e.tag==='button'&&!e.role)&&normalized(e.label)==='Fait');
+    if(!buttons.length)return {verified:true,unchanged:true};
+    const fields=page.elements.filter(e=>ALL_SPECS.some(spec=>matchesSpec(e,spec))).map(e=>e.id);
+    const state=await this.control.isolated(context.tab,`(() => {
+      const d=globalThis.__isolaDOM,get=id=>globalThis.__isolaElements?.get(id),normalize=value=>String(value||'').replace(/\\s+/g,' ').trim();
+      const allowed=e=>!!e?.isConnected&&d.visible(e)&&!d.closest(e,'header,nav,[role=navigation],[role=tablist]');
+      const searches=${JSON.stringify(searches.map(e=>e.id))}.map(get).filter(allowed),radios=${JSON.stringify(radios.map(e=>e.id))}.map(get).filter(allowed),buttons=${JSON.stringify(buttons.map(e=>e.id))}.map(id=>({id,node:get(id)})).filter(item=>allowed(item.node));
+      const result={documentKey:String(performance.timeOrigin),open:${!!searchLabel}?searches.length>0:radios.length>0};if(!result.open)return result;
+      if(${!!searchLabel}&&searches.length!==1||radios.length!==1)return {...result,error:${JSON.stringify(spec.label)}+'选择器或叶子选项无法唯一核对，未点击确认'};
+      const radio=radios[0],search=${!!searchLabel}?searches[0]:radio,checked=e=>e.checked===true||e.getAttribute?.('aria-checked')==='true';
+      if(!checked(radio))return {...result,error:${JSON.stringify(spec.label)}+'叶子尚未选中，未点击确认'};
+      const fields=${JSON.stringify(fields)}.map(get).filter(e=>e?.isConnected);
+      const title=p=>{
+        if(normalize(p.getAttribute?.('aria-label'))===${JSON.stringify(spec.label)})return true;
+        // A modal header can wrap its title and a separate close button. Read
+        // the independent text title inside it, never the aggregate wrapper.
+        const matches=[...p.querySelectorAll('h1,h2,h3,h4,h5,h6,[role=heading],span,p,div')].filter(node=>d.visible(node)&&!node.querySelectorAll('input,textarea,button,[role=button],[role=radio],[role=checkbox]').length&&normalize(d.safeText(node,180))===${JSON.stringify(spec.label)});
+        return matches.filter(node=>!matches.some(other=>node!==other&&node.contains(other))).length===1;
+      };
+      const scopes=d.parents(search).filter(p=>!['BODY','HTML','MAIN','FORM'].includes(p.tagName)&&p.contains(radio)&&fields.every(field=>!p.contains(field))&&(${!!searchLabel}||title(p)));
+      const scope=scopes.find(p=>buttons.some(item=>p.contains(item.node)));
+      if(!scope)return {...result,error:'未找到'+${JSON.stringify(spec.label)}+'选择器自身的 Fait 确认按钮'};
+      const matches=buttons.filter(item=>scope.contains(item.node));
+      const selected=[...scope.querySelectorAll(${JSON.stringify(spec.key==='color'?'input[type=checkbox],[role=checkbox]':'input[type=radio],[role=radio]')})].filter(e=>allowed(e)&&checked(e));
+      if(matches.length!==1||selected.length!==1||selected[0]!==radio)return {...result,error:${JSON.stringify(spec.label)}+'确认按钮或已选叶子不唯一，未继续'};
+      const button=matches[0].node;
+      if(button.tagName!=='BUTTON'||d.disabled(button)||button.getAttribute?.('href')||button.form&&button.type==='submit'||normalize(d.label(button))!=='Fait')return {...result,error:${JSON.stringify(spec.label)}+'确认控件用途无法核对，未继续'};
+      return {...result,buttonId:matches[0].id};
+    })()`);
+    this.current(profileId,context);
+    if(!state||state.documentKey!==ownership.documentKey)throw problem('PAGE_CHANGED','商品页已重新加载，准备已停止');
+    if(state.error)return {reason:state.error,halted:true};
+    if(!state.open)return {verified:true,unchanged:true};
+    if(!state.buttonId)return {reason:spec.label+'选择器尚未确认，已停止',halted:true};
+    const receipt=await this.control.performAction(context.tab,{action:'click',elementId:state.buttonId},this.options(context.signal,()=>this.current(profileId,context)));
+    this.current(profileId,context);frenchPage(receipt.url,true);
+    const readOpen=async()=>{if(searchLabel)return this.searchControl(profileId,context,searchLabel);const page=await this.read(profileId,context),values=await this.values(context.tab,page);return {documentKey:values.documentKey,matches:page.elements.filter(e=>choiceMatches(e)&&(spec.key==='color'?(e.role==='checkbox'||e.tag==='input'&&e.type==='checkbox'):(e.role==='radio'||e.tag==='input'&&e.type==='radio')))};};
+    const closed=await this.waitForMenu(profileId,context,readOpen,value=>value.documentKey!==ownership.documentKey||value.matches.length===0);
+    if(closed.documentKey!==ownership.documentKey)throw problem('PAGE_CHANGED','商品页已重新加载，准备已停止');
+    return closed.matches.length?{reason:'点击'+spec.label+' Fait 后选择器仍未关闭，已停止',halted:true}:{verified:true};
+  }
+
   async nonNavigationCandidates(profileId,context,candidates) {
     const allowed=await this.control.isolated(context.tab,`(() => {const ids=${JSON.stringify(candidates.map(e=>e.id))},d=globalThis.__isolaDOM;return ids.filter(id=>{const e=globalThis.__isolaElements?.get(id);return !!e?.isConnected&&!d.closest(e,'header,nav,[role=navigation],[role=tablist]');});})()`);
     this.current(profileId,context);
@@ -345,13 +394,14 @@ class VintedAdapter {
     const checked=e=>e.checked===true||e.checked==='true';
     if(spec.key==='color'&&optionsOnPage.some(e=>normalized(e.label)!==label&&checked(e)))return {reason:'页面还选中了其他颜色，未自动取消或叠加颜色',halted:true};
     if(spec.key==='brand'||!checked(matches[0])){await this.control.performAction(context.tab,{action:'click',elementId:matches[0].id},options);guard();}
-    const selected=await this.readChoiceValue(profileId,context,ownership,spec);
-    if(selected.error||selected.value!==label)return {reason:selected.error||'选择后的'+spec.label+'与指定标签不一致',halted:true};
     if(spec.key==='color'){
-      const confirmed=await this.colorOptions(profileId,context,selected.page,label);
+      const confirmed=await this.colorOptions(profileId,context,await this.read(profileId,context),label);
       if(confirmed.error||confirmed.matches.length!==1||!checked(confirmed.matches[0]))return {reason:confirmed.error||'颜色复选框没有确认选中，未继续操作',halted:true};
       if(confirmed.options.some(e=>normalized(e.label)!==label&&checked(e)))return {reason:'选择后页面还选中了其他颜色，未继续操作',halted:true};
     }
+    const finished=await this.finishChoiceSelection(profileId,context,ownership,spec,label);if(finished.halted)return finished;
+    const selected=await this.readChoiceValue(profileId,context,ownership,spec);
+    if(selected.error||selected.value!==label)return {reason:selected.error||'选择后的'+spec.label+'与指定标签不一致',halted:true};
     ownership.fields[spec.key]=selected.value;
     const closed=await this.closeChoiceMenu(profileId,context,spec,label);if(closed.halted)return closed;
     const final=await this.readChoiceValue(profileId,context,ownership,spec);
@@ -455,6 +505,7 @@ class VintedAdapter {
       await this.control.performAction(context.tab,{action:'click',elementId:matches[0].id},options);guard();
       if(spec.key==='categoryPath')steps.push({label,elementId:matches[0].id,role:final?'radio':'button',documentKey:ownership.documentKey,unique:true});
     }
+    const finished=await this.finishChoiceSelection(profileId,context,ownership,spec,labels.at(-1));if(finished.halted)return finished;
     page=await this.read(profileId,context);match=this.field(page,spec,{readOnly:true});
     if(match.error)return {reason:match.error,halted:true};
     const next=await this.values(context.tab,page);guard();const selected=next.values.find(e=>e.id===match.element.id)?.value;

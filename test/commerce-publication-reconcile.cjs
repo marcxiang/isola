@@ -122,3 +122,50 @@ test('missing first supplier history is restored only for review when a later as
  const f=await reusedPhotoFixture();f.db.publicationSupplierSync=[f.later];const result=project(f.db,f.db.publications,{now:NOW});
  assert.equal(result.db.publicationSupplierSync.length,2);assert.deepEqual(result.db.publicationSupplierSync[0],f.later);const first=result.db.publicationSupplierSync.find(row=>row.id===f.first.id);assert.equal(first.state,'needs_review');assert.equal(first.attemptCount,0);assert.equal(first.operation,null);assert.equal(first.receipt,null);assert.deepEqual(first.payload,f.first.payload);
 });
+
+function deletionEvidence(f){return {kind:'operator_confirmed_deletion',confirmed:true,reason:'deleted_not_sold',reviewId:'deletion-review-1',profileId:'profile-1',memberId:'123',listingId:'98765',url:'https://www.vinted.fr/items/98765',confirmedAt:at};}
+async function withdrawnFixture(){
+ const f=await fixture(),db=f.run().db;await f.journal.releaseAfterDeletion(f.record.id,deletionEvidence(f));db.publications=f.journal.state();Object.assign(db.plans[0],{activeListingId:null,status:'ready',listingRevision:1});Object.assign(db.jobs[0],{state:'cancelled',step:'listing_deleted',result:{kind:'listing_deleted',externalId:'98765',submissionId:f.record.id}});db.publicationSupplierSync[0].state='cancelled';return {f,db};
+}
+
+test('a publication-only projection cannot create an operator deletion without the complete engine recovery transaction',async()=>{
+ const f=await fixture(),db=f.run().db;await f.journal.releaseAfterDeletion(f.record.id,deletionEvidence(f));assert.throws(()=>project(db,f.journal.state(),{now:NOW}),{code:'PUBLICATION_DELETION_PROJECTION_REQUIRED'});
+ const uncertain=clone(f.db);assert.throws(()=>project(uncertain,f.journal.state(),{now:NOW}),{code:'PUBLICATION_DELETION_PROJECTION_REQUIRED'});
+});
+
+test('withdrawn publication projection retains receipt, archived job and cancelled supplier history without reoccupying the plan',async()=>{
+ const {db}=await withdrawnFixture(),before=clone(db),result=project(db,db.publications,{now:NOW+1000});assert.equal(result.changed,false);assert.deepEqual(result.db,before);assert.equal(result.db.plans[0].activeListingId,null);assert.equal(result.db.plans[0].completedCount,0);assert.equal(result.db.jobs[0].state,'cancelled');assert.equal(result.db.publications.submissions[0].state,'published');assert.equal(result.db.claims[0].listings.length,1);assert.equal(result.db.publicationSupplierSync[0].state,'cancelled');
+});
+
+test('every field of an already withdrawn submission is immutable under future projections',async()=>{
+ const {db}=await withdrawnFixture();
+ for(const change of [row=>delete row.closedWithdrawal,row=>row.closedWithdrawal.reviewId='changed',row=>row.reason='rewritten',row=>row.updatedAt=new Date(NOW+1000).toISOString(),row=>row.receipt.observedAt=new Date(NOW+1000).toISOString(),row=>row.navigation=[]]){const next=clone(db.publications);change(next.submissions[0]);assert.throws(()=>project(db,next,{now:NOW+1000}),{code:'PUBLICATION_PROJECTION_CONFLICT'},String(change));}
+});
+
+test('same sales cycle relisting completes only its new revision job and keeps previous published receipt and photo association history',async()=>{
+ const {f,db}=await withdrawnFixture(),input=clone(f.input);input.plan=clone(db.plans[0]);input.claim=clone(db.claims[0]);input.evidence.documentKey='100.3';for(const key of ['form','photos','publication'])input.evidence[key].documentKey='100.3';
+ const proof=buildPublicationProof(input,{now:NOW}),record=await f.journal.prepare(proof);await f.journal.dispatchOnce(record.id,proof,async()=>{});db.publications=f.journal.state();
+ const oldJob=clone(db.jobs[0]),newJob={...clone(oldJob),id:'relist-job',dedupeKey:'listing:plan-1:0:r1',payload:{cycle:0,listingRevision:1},state:'queued',step:'pending',result:null};db.jobs.push(newJob);
+ const receipt={...clone(f.evidence),listingId:'98766',url:'https://www.vinted.fr/items/98766',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:'100.3'}};await f.journal.reconcile(record.id,receipt);
+ const result=project(db,f.journal.state(),{now:NOW});assert.deepEqual(result.db.jobs[0],oldJob);assert.equal(result.db.jobs[1].state,'completed');assert.equal(result.db.jobs[1].result.externalId,'98766');assert.deepEqual(result.completedJobIds,['relist-job']);assert.equal(result.db.plans[0].activeListingId,'98766');assert.equal(result.db.plans[0].completedCount,0);assert.equal(result.db.claims[0].listings[1].listingRevision,1);assert.equal(result.db.publicationSupplierSync.length,2);assert.equal(result.db.publicationSupplierSync[0].state,'cancelled');assert.equal(result.db.publicationSupplierSync[1].state,'pending');assert.equal(result.db.publicationSupplierSync[1].payload.listingId,'98766');assert.equal(result.db.publicationSupplierSync[1].attemptCount,0);assert.equal(result.db.publicationSupplierSync[1].operation,null);assert.equal(result.db.publicationSupplierSync[1].submissionId,record.id);assert.equal(project(result.db,result.db.publications,{now:NOW+1000}).changed,false);
+ const wrong=clone(db);wrong.plans[0].listingRevision=0;assert.throws(()=>project(wrong,f.journal.state(),{now:NOW}),{code:'PUBLICATION_PROJECTION_CONFLICT'});
+});
+
+async function replacementPublication(){
+ const {f,db}=await withdrawnFixture(),input=clone(f.input);input.plan=clone(db.plans[0]);input.claim=clone(db.claims[0]);input.evidence.documentKey='replacement-document';for(const key of ['form','photos','publication'])input.evidence[key].documentKey='replacement-document';
+ const proof=buildPublicationProof(input,{now:NOW}),record=await f.journal.prepare(proof);await f.journal.dispatchOnce(record.id,proof,async()=>{});db.publications=f.journal.state();await f.journal.reconcile(record.id,{...clone(f.evidence),listingId:'98766',url:'https://www.vinted.fr/items/98766',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:'replacement-document'}});return {f,db,next:f.journal.state()};
+}
+
+test('replacement photo association never supersedes an already sent, uncertain or synced original request',async()=>{
+ const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
+ for(const status of ['synced','uncertain','needs_review']){
+  const {db,next}=await replacementPublication(),row=db.publicationSupplierSync[0];row.state=status;
+  if(status==='synced')row.receipt={claimId:row.claimId,setId:'set-1',productId:row.productId,platform:'Vinted',listingId:row.payload.listingId,listingUrl:row.payload.listingUrl,observedAt:at,source:'claim_detail'};
+  else {const request={baseURL:'https://supplier.test/api/v1',supplierAccountId:'supplier-1',claimId:row.claimId,payload:clone(row.payload)};row.attemptCount=1;row.operation={kind:'mark_listed',idempotencyKey:'isola-'+row.id,request,fingerprint:require('node:crypto').createHash('sha256').update(JSON.stringify(canonical(request))).digest('hex')};}
+  const saved=clone(row),result=project(db,next,{now:NOW});assert.deepEqual(result.db.publicationSupplierSync,[saved],status);assert.equal(result.db.claims[0].listings.length,2);assert.equal(result.db.plans[0].activeListingId,'98766');
+ }
+});
+
+test('missing earlier association history never authorizes a replacement supplier request',async()=>{
+ const {db,next}=await replacementPublication();db.publicationSupplierSync=[];const result=project(db,next,{now:NOW});assert.equal(result.db.publicationSupplierSync.length,1);const row=result.db.publicationSupplierSync[0];assert.equal(row.payload.listingId,'98765');assert.equal(row.state,'needs_review');assert.equal(row.attemptCount,0);assert.equal(row.operation,null);assert.equal(result.db.claims[0].listings.length,2);
+});

@@ -118,11 +118,11 @@ class VintedListingReceipt {
    ensure(expectedAccount.profileId===facts.profileId&&expectedAccount.memberId===facts.account.memberId&&expected.memberId===facts.account.memberId,'LISTING_ACCOUNT_CHANGED','环境绑定账号与原提交不一致');
    if(signal?.aborted)throw failure('STOPPED','刊登详情核对已停止');
    controller=new AbortController();signal?.addEventListener('abort',cancel,{once:true});
-   const context={controller,signal:controller.signal,form:false};context.guard=()=>{ensure(!controller.signal.aborted,'STOPPED','刊登详情核对已停止');const selected=this.adapter.current(facts.profileId,context);listingURL(selected.tab.view.webContents.getURL());};
+   const context={controller,signal:controller.signal,form:false,expectedAccount};context.guard=()=>{ensure(!controller.signal.aborted,'STOPPED','刊登详情核对已停止');const selected=this.adapter.current(facts.profileId,context);listingURL(selected.tab.view.webContents.getURL());};
    const selected=this.adapter.current(facts.profileId,context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;const identity=listingURL(contents.getURL());Object.assign(summary,identity);w.vintedDraftController=controller;
    contents.on?.('did-start-navigation',navigation);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);timer=setTimeout(()=>{timedOut=true;controller.abort();},this.timeoutMs);
-   const initial=await this.wait(()=>this.account.inspectAccount(facts.profileId,{controller,signal:controller.signal,tab:context.tab}),context);summary.menuOpened=initial.menuOpened===true;
-   ensure(initial.verified===true&&initial.memberId===facts.account.memberId&&initial.profileURL===facts.account.profileURL,'LISTING_ACCOUNT_CHANGED','当前账号与原刊登提交的账号不一致');
+   const initial=await this.wait(()=>this.account.inspectAccount(facts.profileId,{controller,signal:controller.signal,tab:context.tab,expectedAccount,closeMenu:true}),context);summary.menuOpened=initial.menuOpened===true;summary.menuClosed=initial.menuClosed===true;
+   ensure(initial.verified===true&&initial.menuClosed===true&&initial.memberId===facts.account.memberId&&initial.profileURL===facts.account.profileURL,'LISTING_ACCOUNT_CHANGED','当前账号与原刊登提交的账号不一致');
    summary.checks.push({name:'当前登录账号',ok:true,detail:'账号菜单与原提交和环境绑定一致'});
    const input={record:checked,expectedAccount},first=await this.readPass(input,context,initial),second=await this.readPass(input,context,initial);
    const stable=equal(first,second);summary.checks.push({name:'连续两次详情核对',ok:stable,detail:stable?'账号、商品、卖家、价格和图片摘要保持一致':'两次读取之间详情发生变化'});

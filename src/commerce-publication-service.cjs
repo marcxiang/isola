@@ -1,6 +1,7 @@
 'use strict';
 const {readPreparedPhotos}=require('./commerce-photos.cjs');
 const {VintedPublicationEvidence}=require('./vinted-publication-evidence.cjs');
+const {isPublicationOpen}=require('./vinted-publication.cjs');
 const {VintedPublishSubmit}=require('./vinted-publish-submit.cjs');
 
 // Only a plan ID crosses IPC. Page proofs, supplier claims and private file
@@ -22,7 +23,7 @@ function inspectPublication(engine,id){
   let report;
   try{const input=await publicationInput(engine,id,signal,guard);guard();report=await new VintedPublicationEvidence(engine.adapter).inspect(input,{signal});guard();}
   catch(error){guard();report={planId:id,checkedAt:new Date().toISOString(),checks:[{name:'发布准备',ok:false,detail:String(error.message||'无法核对').slice(0,700)}],blockers:[String(error.message||'无法核对').slice(0,700)],readyForPublication:false,publicationEnabled:false,message:'发布前核对未通过；没有保存草稿或发布商品。'};}
-  const occupied=engine.db.publications.submissions.some(row=>row.proof.facts.planId===id&&row.state!=='cancelled'&&!row.closedSale);
+  const occupied=engine.db.publications.submissions.some(row=>row.proof.facts.planId===id&&isPublicationOpen(row));
   return {...report,manualPublicationEnabled:!occupied,published:false,saved:false};
  });
 }

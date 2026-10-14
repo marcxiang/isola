@@ -1,7 +1,7 @@
 'use strict';
 const {randomUUID,createHash}=require('node:crypto');
 const {VintedListingReceipt}=require('./vinted-listing-receipt.cjs');
-const {operatorReviewedEvidence}=require('./vinted-publication.cjs');
+const {operatorReviewedEvidence,isPublicationOpen,listingRevision}=require('./vinted-publication.cjs');
 const {publicationJournal}=require('./vinted-publish-submit.cjs');
 const TTL=120000;
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -14,10 +14,10 @@ function createAssociationService({readerFactory=adapter=>new VintedListingRecei
  function input(engine,id){
   ensure(typeof id==='string'&&id.length>0&&id.length<=256,'刊登计划编号无效');
   ensure(!engine.faulted&&!engine.closing,'运营存储不可用');
-  const plan=engine.plan(id),records=engine.db.publications.submissions.filter(row=>row.proof.facts.planId===id&&row.state!=='cancelled'&&!row.closedSale);
+  const plan=engine.plan(id),records=engine.db.publications.submissions.filter(row=>row.proof.facts.planId===id&&isPublicationOpen(row));
   ensure(records.length===1&&records[0].state==='uncertain'&&records[0].attemptCount===1,'仅能关联原先已提交且结果待核对的刊登');
   const expectedAccount=engine.db.marketAccounts.find(row=>row.profileId===plan.profileId);
-  ensure(expectedAccount&&plan.profileId===records[0].proof.facts.profileId,'原计划与账号绑定不一致');
+  ensure(expectedAccount&&plan.profileId===records[0].proof.facts.profileId&&plan.completedCount===records[0].proof.facts.cycle&&listingRevision(plan.listingRevision)===listingRevision(records[0].proof.facts.listingRevision),'原计划与账号绑定不一致');
   return {plan,record:records[0],expectedAccount};
  }
  function fingerprint(value){return hash({plan:value.plan,record:value.record,account:value.expectedAccount});}

@@ -1,4 +1,5 @@
 'use strict';
+const {listingRevision}=require('./vinted-publication.cjs');
 const fs=require('node:fs'),path=require('node:path'),{randomUUID,createHash}=require('node:crypto');
 const MAX_IMAGE_BYTES=5*1024*1024,READ_TIMEOUT_MS=30000;
 const STATES=new Set(['prepared','claiming','uncertain','receipt_saved','downloading','ready','needs_review']);
@@ -140,10 +141,10 @@ async function preparePhotos(engine,planId,{setId,signal:callerSignal,validateIm
 // or profile lease. Manual preparation still uses the configuration lock.
 async function preparePhotosForJob(engine,job,{signal,validateImage}={}){
  if(typeof validateImage!=='function')throw failure('PHOTO_DECODER','照片解码校验器未配置，未领取照片');
- const identity={id:job?.id,planId:job?.planId,profileId:job?.profileId,productId:job?.productId,cycle:job?.payload?.cycle};
+ const identity={id:job?.id,planId:job?.planId,profileId:job?.profileId,productId:job?.productId,cycle:job?.payload?.cycle,listingRevision:listingRevision(job?.payload?.listingRevision)};
  const guard=()=>{
   const rows=engine.db.jobs.filter(row=>row.id===identity.id),current=rows[0],plan=engine.db.plans.find(row=>row.id===identity.planId);
-  if(!signal||signal.aborted||engine.active.get(identity.profileId)?.signal!==signal||!engine.leases.snapshot().some(row=>row.profileId===identity.profileId&&row.jobId===identity.id)||rows.length!==1||current.state!=='running'||current.type!=='listing'||current.planId!==identity.planId||current.profileId!==identity.profileId||current.productId!==identity.productId||current.payload?.cycle!==identity.cycle||!plan?.enabled||plan.profileId!==identity.profileId||plan.productId!==identity.productId||plan.completedCount!==identity.cycle||engine.closing||engine.configPending)throw stopped();
+  if(!signal||signal.aborted||engine.active.get(identity.profileId)?.signal!==signal||!engine.leases.snapshot().some(row=>row.profileId===identity.profileId&&row.jobId===identity.id)||rows.length!==1||current.state!=='running'||current.type!=='listing'||current.planId!==identity.planId||current.profileId!==identity.profileId||current.productId!==identity.productId||current.payload?.cycle!==identity.cycle||listingRevision(current.payload?.listingRevision)!==identity.listingRevision||listingRevision(plan?.listingRevision)!==identity.listingRevision||!plan?.enabled||plan.profileId!==identity.profileId||plan.productId!==identity.productId||plan.completedCount!==identity.cycle||engine.closing||engine.configPending)throw stopped();
  };
  guard();return preparePhotoWork(engine,identity.planId,{validateImage},signal,guard);
 }

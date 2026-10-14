@@ -8,6 +8,9 @@ const { createControlOverlay } = require('./control-overlay.cjs');
 const { CommerceEngine } = require('./commerce-engine.cjs');
 const { VintedAdapter } = require('./vinted-adapter.cjs');
 const { VintedAccount } = require('./vinted-account.cjs');
+const { AccountsStore } = require('./commerce-accounts.cjs');
+const { VintedLogin, LOGIN_URL } = require('./vinted-login.cjs');
+const { CommerceAccountService,accountError } = require('./commerce-account-service.cjs');
 const commercePreparation = require('./commerce-preflight.cjs');
 const {inspectPublication,submitPublication}=require('./commerce-publication-service.cjs');
 const associationService=require('./commerce-association-service.cjs').createAssociationService();
@@ -20,7 +23,8 @@ app.setName('Isola');
 app.commandLine.appendSwitch('disable-quic');
 if (process.env.ISOLA_TEST_DATA) app.setPath('userData', process.env.ISOLA_TEST_DATA);
 let manager, profiles = [], quitting = false, quitPending=false, quitApproved=false;
-let commerceWindow, commerce, awakeId=null;
+let commerceWindow, commerce, commerceAccounts, awakeId=null;
+const accountTabs=new Map();
 const skuGate=new RequestGate({maxConcurrent:3,maxPerMinute:100});
 const windows = new Map(), locks = new Set(), routes = new Map();
 const photoService=createPhotoService({nativeImage,focusProfile:id=>{const w=windows.get(id);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}});
@@ -45,7 +49,27 @@ function commerceChanged(state){
   if(!state.running&&awakeId!==null){powerSaveBlocker.stop(awakeId);awakeId=null;}
   if(commerceWindow&&!commerceWindow.isDestroyed())commerceWindow.webContents.send('commerce-state',state);
 }
-function ensureCommerce(){if(!commerce)commerce=new CommerceEngine({dir:path.join(app.getPath('userData'),'commerce'),profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedAdapter({windows,isBusy:id=>commerce?.active.has(id)||!!windows.get(id)?.closingPromise||!!windows.get(id)?.navigationPending}),seal:value=>{if(!safeStorage.isEncryptionAvailable())throw Error('系统加密不可用，无法保存密钥');return safeStorage.encryptString(value).toString('base64');},unseal:value=>safeStorage.decryptString(Buffer.from(value,'base64')),onChange:commerceChanged});return commerce;}
+function ensureCommerce(){
+ if(!commerce){
+  const dir=path.join(app.getPath('userData'),'commerce');
+  const seal=value=>{if(!safeStorage.isEncryptionAvailable()||process.platform==='linux'&&safeStorage.getSelectedStorageBackend?.()==='basic_text')throw Error('系统加密不可用，无法保存密钥');return safeStorage.encryptString(value).toString('base64');};
+  const unseal=value=>safeStorage.decryptString(Buffer.from(value,'base64'));
+  const accounts=new AccountsStore({dir,profiles:list,seal,unseal,assertMutable:assertAccountMutable,onChange:()=>commerce?.emit()});
+  commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedAdapter({windows,isBusy:id=>commerce?.active.has(id)||!!windows.get(id)?.closingPromise||!!windows.get(id)?.navigationPending}),accounts,seal,unseal,onChange:commerceChanged});
+  commerceAccounts=new CommerceAccountService({engine:commerce,store:accounts,openPage:openAccountPage,login:new VintedLogin(commerce.adapter)});
+ }
+ return commerce;
+}
+function assertAccountMutable({action,account,next}){
+ if(!commerce)return;
+ if(commerce.running||commerce.active.size||commerce.ticking||commerce.faulted||commerce.closing||account&&commerceAccounts?.isBusy(account.id))throw accountError('ACCOUNT_BUSY');
+ const changingIdentity=['rebind','change-login','remove'].includes(action);
+ if(changingIdentity&&account){
+  const ids=new Set([account.profileId,next?.profileId].filter(Boolean));
+  if(commerce.db.marketAccounts.some(row=>ids.has(row.profileId))||['plans','jobs','claims','photoPreparations','sales','reservations'].some(key=>commerce.db[key].some(row=>ids.has(row.profileId))))throw accountError('ACCOUNT_HISTORY');
+ }
+ if(['create','rebind','remove'].includes(action)&&[account?.profileId,next?.profileId].filter(Boolean).some(id=>windows.has(id)||locks.has(id)))throw accountError('PROFILE_OPEN');
+}
 async function openCommerce(){
   const engine=ensureCommerce();if(commerceWindow&&!commerceWindow.isDestroyed()){commerceWindow.show();commerceWindow.focus();engine.emit();return;}
   commerceWindow=new BrowserWindow({width:1360,height:940,minWidth:1050,minHeight:700,title:'Isola · 运营工作台',backgroundColor:'#f5f7fb',webPreferences:{preload:path.join(__dirname,'commerce-preload.cjs'),contextIsolation:true,sandbox:true,nodeIntegration:false}});
@@ -57,7 +81,8 @@ function profile(id) { const p = profiles.find(p => p.id === id); if (!p) throw 
 function requireClosed(id) { if (windows.has(id) || locks.has(id)) throw Error('请先关闭该环境'); }
 function requireCommerceUnlinked(id) {
   const stored=path.join(app.getPath('userData'),'commerce','commerce-state.json');
-  const engine=commerce||(fs.existsSync(stored)?ensureCommerce():null);
+  const engine=commerce||(fs.existsSync(stored)||fs.existsSync(path.join(path.dirname(stored),'commerce-accounts.json'))?ensureCommerce():null);
+  if(engine?.accounts?.findByProfile(id))throw Error('该环境绑定了账号，请先在账号中心处理绑定，不能删除或清除登录数据。');
   if(engine&&(engine.active.has(id)||['plans','jobs','claims','photoPreparations'].some(key=>engine.db[key].some(row=>row.profileId===id))))throw Error('该环境关联了运营计划或历史记录，不能删除或清除登录数据；请保留此环境并新建其他环境。');
 }
 function sesFor(p) { return session.fromPartition('persist:environment-' + p.id); }
@@ -188,6 +213,24 @@ async function openListingPage(engine,planId,{active=false}={}) {
     }finally{w.navigationPending=false;}
   });
 }
+async function openAccountPage(profileId,{signal,guard,freshLogin=false}){
+ guard();if(signal.aborted)throw accountError('ACCOUNT_UNAVAILABLE');
+ if(!windows.has(profileId))await launch(profileId);
+ guard();const w=windows.get(profileId);
+ if(!w||w.isDestroyed())throw accountError('ACCOUNT_UNAVAILABLE');
+ if(w.closingPromise||w.navigationPending||w.aiAgent?.state?.running||w.vintedDraftController)throw accountError('ACCOUNT_BUSY');
+ w.navigationPending=true;
+ try{
+  let tab=freshLogin?null:w.tabs.find(t=>t.id===accountTabs.get(profileId)&&!t.view.webContents.isDestroyed());
+  const compatible=t=>{try{const u=new URL(t.view.webContents.getURL());return u.origin==='https://www.vinted.fr'&&!u.username&&!u.password&&(freshLogin?u.href===LOGIN_URL:['/','/member/login','/member/login/email','/login'].includes(u.pathname));}catch{return false;}};
+  if(!tab)tab=w.tabs.find(t=>t.id===w.activeTab&&compatible(t))||w.tabs.find(t=>!t.view.webContents.isDestroyed()&&compatible(t));
+  if(tab){w.activeTab=tab.id;resizeViews(w);sendState(w);}else tab=await addTab(w,LOGIN_URL||'https://www.vinted.fr/');
+  guard();if(w.isDestroyed()||tab.view.webContents.isDestroyed())throw accountError('ACCOUNT_UNAVAILABLE');
+  accountTabs.set(profileId,tab.id);if(w.isMinimized())w.restore();w.show();w.focus();tab.view.webContents.focus();
+  if(tab.error&&!tab.unloadGuard?.blocked)throw accountError('ACCOUNT_UNAVAILABLE');
+  return {profileId,url:tab.view.webContents.getURL()};
+ }finally{w.navigationPending=false;}
+}
 async function addTab(w, target) {
   await stopDraft(w);
   if (w.tabs.length >= 20) throw Error('每个环境最多打开 20 个标签页');
@@ -274,7 +317,9 @@ function register() {
   handle('fingerprint-preview', input => fingerprintFor(validate({...input,id:undefined,name:'配置预览',url:'https://example.com',proxy:{type:'direct'}})));
   handle('fingerprint-catalog', () => ({devices:DEVICE_PRESETS,systems:FINGERPRINT_PRESETS}));
   handle('commerce-open',openCommerce);
-  const desk=(name,fn)=>ipcMain.handle(name,(e,...args)=>{if(!commerceWindow||commerceWindow.isDestroyed()||e.sender!==commerceWindow.webContents)throw Error('无权访问运营工作台');return fn(ensureCommerce(),...args);});
+  const desk=(name,fn)=>ipcMain.handle(name,(e,...args)=>{if(!commerceWindow||commerceWindow.isDestroyed()||e.sender!==commerceWindow.webContents||e.senderFrame!==commerceWindow.webContents.mainFrame)throw Error('无权访问运营工作台');return fn(ensureCommerce(),...args);});
+  desk('commerce-account-save',(_c,input)=>commerceAccounts.save(input));desk('commerce-account-delete',(_c,id)=>commerceAccounts.remove(id));
+  desk('commerce-account-login',(_c,id)=>commerceAccounts.login(id));desk('commerce-account-open',(_c,id)=>commerceAccounts.open(id));desk('commerce-account-verify',(_c,id,options)=>commerceAccounts.verify(id,options));
   desk('commerce-publication-inspect',(c,id)=>inspectPublication(c,id));
   desk('commerce-published-inspect',(c,id)=>associationService.inspect(c,id));
   desk('commerce-published-associate',(c,id,token)=>associationService.associate(c,id,token));

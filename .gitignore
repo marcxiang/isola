@@ -12,6 +12,7 @@ test-artifacts/
 profiles.json*
 ai-settings.json*
 commerce-state.json*
+commerce-accounts.json*
 Partitions/
 prepared-photos/
 dist/

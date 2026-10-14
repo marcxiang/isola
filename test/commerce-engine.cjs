@@ -7,6 +7,11 @@ const rawProduct={id:'product-1',sku:'SKU-1',name:'Test garment',stock:12,unitPr
 const planInput=(overrides={})=>({profileId:'profile-1',productId:'product-1',listingPriceCents:2500,minOfferCents:1800,targetCount:2,enabled:true,autoReply:true,autoAcceptOffers:true,reuseOwnPhotos:true,...overrides});
 const deferred=()=>{let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j;});return {promise,resolve,reject};};
 
+test('one verified marketplace member cannot be bound to two browser environments',async t=>{
+ const {engine}=await fixture(t,{plan:false});const observed={verified:true,memberId:'123456',username:'fixture_seller',profileURL:'https://www.vinted.fr/member/123456',documentKey:'fixture-doc'};
+ engine.bindMarketAccount('profile-1',observed);assert.throws(()=>engine.bindMarketAccount('profile-2',observed),{code:'ACCOUNT_CONFLICT'});assert.equal(engine.db.marketAccounts.length,1);assert.equal(engine.accountObservations.has('profile-2'),false);
+});
+
 async function fixture(t,{client:clientOverrides={},adapter:adapterOverrides={},settings={},plan={}}={}){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'isola-commerce-test-')),calls=[],counts={listing:0,claim:0,order:0};
   const record=(name,args)=>calls.push({name,args});

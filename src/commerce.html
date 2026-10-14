@@ -12,6 +12,7 @@
     <div class="brand"><span>◈</span> Isola<small>COMMERCE WORKSPACE</small></div>
     <nav aria-label="运营导航">
       <button type="button" data-page="overview" class="nav-item active" aria-current="page"><span>▦</span> 商品运营</button>
+      <button type="button" data-page="accounts" class="nav-item"><span>◎</span> 账号中心 <b id="nav-account-count" hidden>0</b></button>
       <button type="button" data-page="plans" class="nav-item"><span>▤</span> 上架计划</button>
       <button type="button" data-page="inventory" class="nav-item"><span>◇</span> 货盘与图片</button>
       <button type="button" data-page="jobs" class="nav-item"><span>≋</span> 任务记录 <b id="nav-review-count" hidden>0</b></button>
@@ -40,6 +41,13 @@
         <div class="distribution-count" id="distribution-count" role="status"></div><div id="distribution-list"></div><button type="button" id="distribution-more" class="text-button" hidden>显示更多商品</button>
       </section>
       <section class="card operations-events"><div class="section-heading"><div><h2>最新动态</h2><p>最近的调度与执行结果。</p></div><span class="live-label">本机记录</span></div><div id="events" class="event-list" aria-live="polite"></div></section>
+    </section>
+
+    <section id="page-accounts" class="page-section" hidden>
+      <section class="card account-intro"><div class="section-heading"><div><h2>一个账号，固定一个浏览环境</h2><p>录入 Vinted 邮箱或用户名，选择已有设备环境。保存的登录会话会继续留在该环境。</p></div><button type="button" id="new-account" class="primary">＋ 添加账号</button></div><p class="field-hint">“打开并登录”会在固定环境中处理登录；验证码、短信验证或无法确认的结果由你手动接管，再点击“核对登录”。手机方案属于桌面浏览器兼容模拟。</p><p id="account-service-note" class="field-hint" role="status"></p></section>
+      <div class="section-tools account-filters"><input id="account-search" type="search" aria-label="搜索账号" placeholder="搜索名称、邮箱或用户名…" autocomplete="off"><select id="account-status" aria-label="账号状态筛选"><option value="">全部账号</option><option value="attention">需要处理</option><option value="logged_in">最近已核验</option><option value="saved">待登录</option></select><span id="account-count" class="muted" role="status"></span></div>
+      <div id="accounts-list" class="account-list"></div>
+      <p class="footnote">这里显示本机保存的登录结果和最近核验身份，不代表账号持续在线。更换环境或删除账号前请关闭对应窗口；已有运营历史的绑定由系统保留。</p>
     </section>
 
     <section id="page-plans" class="page-section" hidden>
@@ -80,6 +88,16 @@
       </form>
     </section>
   </main>
+
+  <dialog id="account-dialog" aria-labelledby="account-title"><form id="account-form" autocomplete="off"><div class="dialog-heading"><div><div class="eyebrow">VINTED / ACCOUNT</div><h2 id="account-title">添加账号</h2></div><button type="button" data-close="account-dialog" class="icon-button" aria-label="关闭账号编辑">×</button></div><input name="id" type="hidden">
+    <label>账号名称<input name="label" required maxlength="80" placeholder="例如：法国店铺 A" autocomplete="off"></label>
+    <label>Vinted 邮箱或用户名<input name="login" required maxlength="254" placeholder="登录邮箱或用户名" autocomplete="off" spellcheck="false" autocapitalize="none"></label>
+    <label>登录密码<input name="password" type="password" maxlength="1024" autocomplete="new-password" placeholder="可选：保存后用于登录"></label><p id="account-password-hint" class="field-hint">可以稍后补充密码；密码保存后不会回显。</p>
+    <label>固定设备环境<select name="profileId" required aria-describedby="account-profile-hint"><option value="">选择已有浏览器环境</option></select></label><p id="account-profile-hint" class="field-hint">请先在浏览器环境管理中创建设备方案。关联新环境前需要先关闭该窗口。</p>
+    <div id="account-error" class="form-error" role="alert" hidden></div><div class="form-actions end"><button type="button" data-close="account-dialog">取消</button><button type="submit" class="primary" id="account-save">保存账号</button></div>
+  </form></dialog>
+  <dialog id="account-verify-dialog" aria-labelledby="account-verify-title"><div class="dialog-heading"><div><div class="eyebrow">VINTED / CURRENT SESSION</div><h2 id="account-verify-title">核对当前登录账号</h2></div><button type="button" data-close="account-verify-dialog" class="icon-button" aria-label="关闭登录核对">×</button></div><div id="account-verify-summary" class="account-confirm-summary"></div><p class="account-confirm-note">请先在这个固定环境中完成登录或验证码，并确认当前窗口登录的就是以上账号。点击确认后，应用会读取当前账号菜单并保存核验身份；不会提交登录表单。</p><div class="form-actions end"><button type="button" data-close="account-verify-dialog">取消</button><button type="button" id="account-verify-confirm" class="primary">确认并读取当前账号</button></div></dialog>
+  <dialog id="account-delete-dialog" aria-labelledby="account-delete-title"><div class="dialog-heading"><div><div class="eyebrow">VINTED / ACCOUNT</div><h2 id="account-delete-title">删除本机账号记录</h2></div><button type="button" data-close="account-delete-dialog" class="icon-button" aria-label="关闭删除确认">×</button></div><div id="account-delete-summary" class="account-confirm-summary"></div><p class="account-confirm-note">这会删除该账号的本机记录和已保存的登录密码。有关联运营历史或仍在运行的环境不能删除；浏览器环境不会在此处删除。</p><div class="form-actions end"><button type="button" data-close="account-delete-dialog">取消</button><button type="button" id="account-delete-confirm" class="danger-button">删除账号记录</button></div></dialog>
 
   <dialog id="plan-dialog"><form id="plan-form"><div class="dialog-heading"><div><div class="eyebrow">ENVIRONMENT PLAN</div><h2 id="plan-title">新建上架计划</h2></div><button type="button" data-close="plan-dialog" class="icon-button" aria-label="关闭">×</button></div><input name="id" type="hidden">
     <div class="field-grid"><label>浏览器环境<select name="profileId" required></select></label><label>货盘商品<select name="productId" required></select></label></div><p class="field-hint" id="plan-product-info">选择货盘商品后查看库存和图片。</p>

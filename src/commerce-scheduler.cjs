@@ -37,6 +37,7 @@ function accountProblem(profileId,job,input,now){
   const records=(input.accounts||[]).filter(a=>a?.profileId===profileId),observations=(input.observedAccounts||[]).filter(a=>a?.profileId===profileId);
   if(records.length>1||observations.length>1)return decision('blocked','ACCOUNT_RECORD_CONFLICT','同一环境存在多个账号身份记录。','核对账号绑定，不能选择其中一个猜测执行。');
   const bound=records[0],observed=observations[0];
+  if(bound?.memberId&&(input.accounts||[]).some(account=>account.profileId!==profileId&&account.memberId===bound.memberId&&account.platform===bound.platform))return decision('blocked','ACCOUNT_RECORD_CONFLICT','同一个平台账号绑定了多个环境。','请保留原环境并人工核对账号绑定。');
   const validMember=value=>typeof value==='string'&&/^[1-9]\d{0,24}$/.test(value);
   if(bound&&!validMember(bound.memberId)||observed?.verified===true&&!validMember(observed.memberId))return decision('blocked','ACCOUNT_RECORD_CONFLICT','账号身份编号格式无效。','重新读取账号菜单，不能猜测账号编号。');
   if(bound?.memberId&&observed?.verified===true&&observed.memberId!==bound.memberId||job.accountMemberId&&((bound?.memberId&&job.accountMemberId!==bound.memberId)||(observed?.verified===true&&job.accountMemberId!==observed.memberId)))return decision('blocked','ACCOUNT_CHANGED','当前登录账号与环境或任务绑定不一致。','恢复原账号登录并重新核验，保留已有业务记录。');

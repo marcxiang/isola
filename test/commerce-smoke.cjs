@@ -64,10 +64,16 @@ module.exports = async function commerceSmoke(api, check) {
       });
       view.webContents.on('render-process-gone',(_,details)=>consoleErrors.push('Renderer exited: '+details.reason));
       await loading;await frames();
-      const rendered=await view.webContents.executeJavaScript(`({title:document.title,node:typeof require,bridge:typeof window.commerce.state,ready:document.querySelector('#readiness-title').textContent,hidden:document.querySelector('#load-error').hidden})`);
-      assert.equal(rendered.node,'undefined');assert.equal(rendered.bridge,'function');assert.match(rendered.title,/运营工作台/);assert.match(rendered.ready,/联调准备/);assert.equal(rendered.hidden,true);
+      const rendered=await view.webContents.executeJavaScript(`({title:document.title,node:typeof require,bridge:typeof window.commerce.state,ready:document.querySelector('#readiness-title').textContent,capabilities:document.querySelector('#readiness-capabilities').textContent,manualPublish:typeof window.commerce.submitPublication,association:typeof window.commerce.associatePublishedListing,hidden:document.querySelector('#load-error').hidden})`);
+      assert.equal(rendered.node,'undefined');assert.equal(rendered.bridge,'function');assert.match(rendered.title,/运营工作台/);assert.equal(rendered.ready,'手动上架可用 · 后台业务待验证');assert.equal(rendered.hidden,true);
+      assert.equal(rendered.manualPublish,'function');assert.equal(rendered.association,'function');
+      for(const label of ['资料','照片','手动发布','原刊登','自动刊登','消息','报价','运单','采购'])assert.ok(rendered.capabilities.includes(label),'Missing readiness capability: '+label);
+      const capabilityRows=await view.webContents.executeJavaScript(`Array.from(document.querySelectorAll('#readiness-capabilities li'),item=>item.textContent)`);
+      assert.equal(capabilityRows.length,6);assert.match(capabilityRows[1],/手动发布.*核对后可用/);assert.match(capabilityRows[2],/原刊登关联.*核对后可用/);for(const row of capabilityRows.slice(3))assert.match(row,/待验证/);
       const state=await invoke('state');assert.equal(state.readiness.vinted,'unverified');assert.equal(state.settings.backgroundEnabled,false);assert.equal(state.running,false);assert.deepEqual(consoleErrors,[]);
-      return {isolatedRenderer:true,readiness:state.readiness.vinted};
+      for(const capability of ['publish','messages','offers','shippingLabel','procurement'])assert.equal(state.readiness.capabilities[capability],false,'Readiness copy must not enable '+capability);
+      assert.equal(requests.length,0);assert.equal(engine.db.publications.submissions.length,0);
+      return {isolatedRenderer:true,readiness:state.readiness.vinted,manualControlsAvailable:true,backgroundCapabilitiesDisabled:5,externalRequests:0};
     });
 
     await check('commerce settings form encrypts local API token and never returns it through UI state',async()=>{

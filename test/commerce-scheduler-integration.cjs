@@ -92,3 +92,41 @@ test('pausing the plan that owns the lease stops its unsubmitted operation',asyn
   const entered=deferred(),release=deferred(),f=fixture(t,{requireReady:async()=>{entered.resolve();await release.promise;}}),job=f.enqueue(),running=f.engine.runJob(job);await entered.promise;
   const controller=f.engine.active.get(f.plan.profileId);f.engine.setPlanEnabled(f.plan.id,false);assert.equal(controller.signal.aborted,true);release.resolve();await running;assert.equal(job.state,'queued');assert.equal(f.calls.sends,0);assert.equal(f.plan.enabled,false);assert.equal(f.engine.active.size,0);
 });
+
+test('runtime receives the task scope and completes against the current database snapshot',async t=>{
+ const f=fixture(t),job=f.enqueue();let readyScope,executeScope;
+ f.adapter.requireReady=async(profileId,context)=>{readyScope=context;assert.equal(profileId,f.plan.profileId);assert.equal(context.engine,f.engine);assert.equal(context.job,job);assert.equal(context.plan,f.plan);assert.ok(context.signal instanceof AbortSignal);};
+ f.adapter.executeJob=async context=>{executeScope=context;f.engine.db=JSON.parse(JSON.stringify(f.engine.db));f.engine.db.jobs.find(row=>row.id===job.id).result={verified:true,externalId:'runtime-reply'};};
+ await f.engine.runOnce();assert.equal(executeScope.signal,readyScope.signal);assert.equal(f.engine.db.jobs.find(row=>row.id===job.id).state,'completed');assert.equal(f.engine.db.jobs.find(row=>row.id===job.id).result.externalId,'runtime-reply');assert.equal(f.calls.sends,0);assert.equal(f.engine.active.size,0);
+});
+
+test('an unimplemented capability remains queued without burning retries or invoking the runtime',async t=>{
+ const f=fixture(t),job=f.enqueue();f.adapter.readiness=()=>({capabilities:{messages:false}});let calls=0;f.adapter.executeJob=async()=>{calls++;};
+ assert.equal(await f.engine.runJob(job),false);await f.engine.runOnce();await f.engine.runOnce();assert.equal(job.state,'queued');assert.equal(job.attempts,undefined);assert.equal(f.calls.ready,0);assert.equal(calls,0);assert.equal(f.engine.state().jobs[0].scheduling.reasonCode,'CAPABILITY_UNVERIFIED');
+});
+
+test('polling owns the same profile lease as jobs and passes detached plan and account snapshots',async t=>{
+ const f=fixture(t),job=f.enqueue(),entered=deferred(),release=deferred();f.engine.bindMarketAccount(f.plan.profileId,{verified:true,memberId:'123',username:'seller',profileURL:'https://www.vinted.fr/member/123'});
+ let observed;f.adapter.poll=async(profileId,context)=>{observed=context;assert.equal(profileId,f.plan.profileId);assert.ok(f.engine.active.has(profileId));assert.match(f.engine.leases.snapshot()[0].jobId,/^poll:/);context.plans[0].activeListingId='mutated-snapshot';context.expectedAccount.username='mutated-snapshot';entered.resolve();await release.promise;return [];};
+ f.engine.running=true;const polling=f.engine.poll();await entered.promise;assert.equal(await f.engine.runJob(job),false);await assert.rejects(f.engine.configure(async()=>{}),/停止后台/);assert.equal(f.plan.activeListingId,'123456');assert.equal(f.engine.db.marketAccounts[0].username,'seller');assert.ok(observed.signal instanceof AbortSignal);release.resolve();await polling;f.engine.running=false;assert.equal(f.engine.active.size,0);assert.equal(f.engine.leases.activeProfileIds().length,0);assert.equal(job.state,'queued');
+});
+
+test('an unknown or cross-profile event prevents the complete poll batch from being ingested',async t=>{
+ const f=fixture(t);f.adapter.poll=async()=>[{verified:true,type:'message',id:'valid-message',profileId:f.plan.profileId,listingId:f.plan.activeListingId,buyerUsername:'buyer'}, {verified:true,type:'unknown',id:'unrecognized',profileId:f.plan.profileId}];
+ f.engine.running=true;await f.engine.poll();f.engine.running=false;assert.equal(f.engine.db.jobs.length,0);assert.match(f.engine.db.events.at(-1).text,/无法识别/);assert.equal(f.engine.active.size,0);
+});
+
+test('conflicting duplicate events quarantine the original queue before any new batch event is accepted',async t=>{
+ const f=fixture(t),original=f.enqueue(),event={verified:true,type:'message',id:'incoming',profileId:f.plan.profileId,listingId:f.plan.activeListingId,buyerUsername:'buyer',text:'First question'};
+ f.adapter.poll=async()=>[event,{...event,buyerUsername:'other-buyer'}];f.engine.running=true;await f.engine.poll();f.engine.running=false;
+ assert.equal(f.engine.db.jobs.length,1);assert.equal(original.state,'needs_review');assert.equal(original.blockedReason,'EVENT_CONFLICT');assert.equal(original.payload.id,'fixture-message-1');await f.engine.runOnce();assert.equal(f.calls.sends,0);
+});
+
+test('maintenance receives the tick abort scope before polling and a read failure does not stop unrelated jobs',async t=>{
+ const f=fixture(t),job=f.enqueue(),steps=[];f.adapter.maintenance=async({engine,signal})=>{assert.equal(engine,f.engine);assert.ok(signal instanceof AbortSignal);steps.push('maintenance');throw Error('Supplier association awaits review');};f.adapter.poll=async()=>{steps.push('poll');return [];};f.engine.running=true;await f.engine.runOnce();f.engine.running=false;
+ assert.deepEqual(steps,['maintenance','poll']);assert.equal(job.state,'completed');assert.equal(f.calls.sends,1);assert.ok(f.engine.db.events.some(row=>row.text==='Supplier association awaits review'));
+});
+
+test('stopping during maintenance prevents the same tick from polling or starting any task',async t=>{
+ const f=fixture(t),job=f.enqueue(),entered=deferred(),release=deferred();let signal,polls=0;f.adapter.maintenance=async context=>{signal=context.signal;entered.resolve();await release.promise;};f.adapter.poll=async()=>{polls++;return [];};f.engine.running=true;const cycle=f.engine.runOnce();await entered.promise;f.engine.setRunning(false);assert.equal(signal.aborted,true);release.resolve();await cycle;assert.equal(polls,0);assert.equal(job.state,'queued');assert.equal(f.calls.sends,0);
+});

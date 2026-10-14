@@ -2,8 +2,9 @@
 // persisted state. The engine must persist a returned decision before acting.
 const TERMINAL=new Set(['completed','cancelled','rejected']);
 const STATES=new Set([...TERMINAL,'queued','running','uncertain','needs_review']);
-const CAPABILITIES={listing:['publish'],message:['messages'],offer:['offers'],fulfillment:['shippingLabel','procurement']};
-const PRIORITY={fulfillment:0,offer:1,message:2,listing:3};
+const CAPABILITIES={listing:['publish'],message:['messages'],offer:['offers'],sale_confirmation:['saleConfirmation'],fulfillment:['shippingLabel','procurement']};
+const PRIORITY={fulfillment:0,sale_confirmation:0,offer:1,message:2,listing:3};
+const WAITING_CODES=new Set(['VINTED_UNVERIFIED','CAPABILITY_UNVERIFIED','PROFILE_NOT_OPEN','ACCOUNT_RECHECK_REQUIRED','PAGE_BUSY','WORKSPACE_BUSY']);
 const clean=value=>String(value||'').replace(/[\u0000-\u001f\u007f]/g,' ').slice(0,500);
 const hasEvidence=job=>job.operation!=null||job.mutationPending!==false||job.result!=null;
 const timestamp=value=>typeof value==='number'&&Number.isFinite(value)?value:typeof value==='string'?Date.parse(value):NaN;
@@ -25,6 +26,7 @@ function retryDecision(job,error,{now=Date.now(),maxAttempts=5,baseDelayMs=15000
   if(!Number.isSafeInteger(attempts)||attempts<0)return decision('needs_review','INVALID_RETRY_RECORD','重试次数记录无效。','检查任务记录后人工恢复。',{attempts:0,retryAt:null});
   if(!Number.isSafeInteger(maxAttempts)||maxAttempts<1||maxAttempts>20||!Number.isSafeInteger(baseDelayMs)||baseDelayMs<1||!Number.isSafeInteger(maxDelayMs)||maxDelayMs<baseDelayMs)throw new TypeError('Invalid retry policy');
   if(error?.code==='STOPPED')return decision('queued','STOPPED','任务已停止，尚未产生业务提交记录。','手动恢复后台后会重新检查前置条件。',{attempts,retryAt:null});
+  if(WAITING_CODES.has(error?.code))return decision('queued',error.code,clean(error.message)||'当前步骤的前置条件尚未满足。','保留原任务，等待对应环境或已验证能力就绪。',{attempts,retryAt:new Date(current+baseDelayMs).toISOString()});
   if(!['RETRY_LATER','READ_TIMEOUT'].includes(error?.code))return decision('needs_review',clean(error?.code)||'MANUAL_REVIEW',clean(error?.message)||'此错误不能自动重试。','检查当前页面或服务状态，再决定是否重新排队。',{attempts,retryAt:null});
   const nextAttempt=attempts+1;
   if(nextAttempt>=maxAttempts)return decision('needs_review','RETRY_EXHAUSTED','读取重试已达到上限，已暂停任务。','检查网络、代理和账号页面，再手动重新排队。',{attempts:nextAttempt,retryAt:null});
@@ -74,11 +76,12 @@ function inspectQueue(input,{now=Date.now()}={}){
     else if(quarantined.has(job.profileId))status=decision('blocked','PROFILE_RECONCILE_REQUIRED','该环境存在结果不明的业务操作。','先核对原操作，再恢复该账号的其他任务。');
     else if(profile.status!=='running')status=decision('waiting','PROFILE_NOT_OPEN','该环境尚未就绪。','打开对应环境并确认账号登录。');
     else if(job.type==='listing'&&(plan.activeListingId||!Number.isSafeInteger(plan.completedCount)||!Number.isSafeInteger(plan.targetCount)||plan.completedCount>=plan.targetCount||job.payload?.cycle!==plan.completedCount))status=decision('blocked','LISTING_CYCLE_CHANGED','该刊登周期已变化、已有在售商品或销售目标已完成。','核对原在售记录和累计销量，不能重复刊登。');
+    else if(job.type==='listing'&&Array.isArray(input.sales)&&input.sales.some(s=>s.planId===plan.id&&!jobs.some(other=>other.id===s.jobId&&['fulfillment','sale_confirmation'].includes(other.type)&&other.planId===plan.id&&other.state==='completed'&&other.mutationPending===false&&other.result?.verified===true&&other.result?.externalId&&(other.type!=='sale_confirmation'||other.result.externalId===s.platformOrderId&&other.result.kind==='sale_confirmation'))))status=decision('blocked','SALE_CYCLE_PENDING','原成交的处理结果尚未完整核对。','先核对原成交任务，完成后才能进入下一次刊登周期。');
     else if(job.retryAt!=null&&!Number.isFinite(timestamp(job.retryAt)))status=decision('blocked','INVALID_RETRY_RECORD','任务重试时间无效。','检查任务记录后人工恢复。');
-    else if(job.retryAt!=null&&timestamp(job.retryAt)>current)status=decision('waiting','RETRY_DELAY','任务正在等待下次读取检查。','等待约定时间；无需重复点击运行。',{retryAt:new Date(timestamp(job.retryAt)).toISOString()});
+    else if(job.retryAt!=null&&timestamp(job.retryAt)>current)status=WAITING_CODES.has(job.blockedReason)?decision('waiting',job.blockedReason,clean(job.error)||'原任务正在等待已验证能力或窗口就绪。','保持原任务，等待对应前置条件完成。',{retryAt:new Date(timestamp(job.retryAt)).toISOString()}):decision('waiting','RETRY_DELAY','任务正在等待下次读取检查。','等待约定时间；无需重复点击运行。',{retryAt:new Date(timestamp(job.retryAt)).toISOString()});
     else {
       const readiness=input.readinessByProfile?.[job.profileId]||input.readiness,missing=CAPABILITIES[job.type].filter(cap=>readiness?.capabilities?.[cap]!==true);
-      status=missing.length?decision('blocked','CAPABILITY_UNVERIFIED','此任务所需网页步骤尚未验证：'+missing.join('、')+'。','先完成对应步骤的真实页面联调。',{missingCapabilities:missing}):accountProblem(job.profileId,job,input,current);
+      status=readiness?.salesOnly===true&&job.type==='fulfillment'?decision('blocked','PROCUREMENT_DISABLED','当前为纯售卖模式，采购履约任务不会执行。','保留原业务记录；该模式只处理售卖和成交确认。'):missing.length?decision('blocked','CAPABILITY_UNVERIFIED','此任务所需网页步骤尚未验证：'+missing.join('、')+'。','先完成对应步骤的真实页面联调。',{missingCapabilities:missing}):accountProblem(job.profileId,job,input,current);
       if(!status)status=decision('eligible','READY','任务前置检查通过，等待本轮调度。','运行时继续逐步核对账号、页面及业务回执。');
     }
     rows.push({jobId:job?.id||null,profileId:job?.profileId||null,planId:job?.planId||null,type:job?.type||null,...status});
@@ -108,4 +111,4 @@ class ProfileOperationLeases {
   activeProfileIds(){return [...this.leases.keys()];}
   snapshot(){return [...this.leases.values()].map(lease=>({...lease}));}
 }
-module.exports={startupDecision,retryDecision,inspectQueue,ProfileOperationLeases};
+module.exports={startupDecision,retryDecision,inspectQueue,ProfileOperationLeases,CAPABILITIES};

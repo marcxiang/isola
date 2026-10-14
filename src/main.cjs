@@ -7,7 +7,7 @@ const { BrowserAgent, publicSettings, saveSettings } = require('./ai.cjs');
 const {settingsPath:aiSettingsPath,removeSettingsRecord}=require('./ai-settings-store.cjs');
 const { createControlOverlay } = require('./control-overlay.cjs');
 const { CommerceEngine } = require('./commerce-engine.cjs');
-const { VintedAdapter } = require('./vinted-adapter.cjs');
+const { VintedSalesRuntime } = require('./vinted-sales-runtime.cjs');
 const { VintedAccount } = require('./vinted-account.cjs');
 const { AccountsStore } = require('./commerce-accounts.cjs');
 const { VintedLogin, LOGIN_URL } = require('./vinted-login.cjs');
@@ -30,6 +30,7 @@ let commerceView, commerceOwner, commerceLoading, managerLoading, workspacePage=
 let commerce, commerceAccounts, awakeId=null, commerceLoadError=false, managerStatusTimer=null;
 const COMMERCE_PAGES=new Set(['overview','accounts','inventory','plans','jobs','settings']);
 const accountTabs=new Map();
+const salesTabs=new Map();
 const skuGate=new RequestGate({maxConcurrent:3,maxPerMinute:100});
 const windows = new Map(), locks = new Set(), routes = new Map();
 const photoService=createPhotoService({nativeImage,focusProfile:id=>{const w=windows.get(id);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}});
@@ -76,7 +77,7 @@ function ensureCommerce(){
   const seal=value=>{if(!safeStorage.isEncryptionAvailable()||process.platform==='linux'&&safeStorage.getSelectedStorageBackend?.()==='basic_text')throw Error('系统加密不可用，无法保存密钥');return safeStorage.encryptString(value).toString('base64');};
   const unseal=value=>safeStorage.decryptString(Buffer.from(value,'base64'));
   const accounts=new AccountsStore({dir,profiles:list,seal,unseal,assertMutable:assertAccountMutable,onChange:()=>commerce?.emit()});
-  commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedAdapter({windows,isBusy:id=>commerce?.active.has(id)||!!windows.get(id)?.closingPromise||!!windows.get(id)?.navigationPending}),accounts,seal,unseal,onChange:commerceChanged});
+  commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedSalesRuntime({windows,isBusy:id=>commerce?.active.has(id)||!!windows.get(id)?.closingPromise||!!windows.get(id)?.navigationPending,openPage:openSalesPage,validateImage:bytes=>{const image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('照片无法完整解码');return image.getSize();}}),accounts,seal,unseal,onChange:commerceChanged});
   commerceAccounts=new CommerceAccountService({engine:commerce,store:accounts,openPage:openAccountPage,login:new VintedLogin(commerce.adapter)});
   commerceLoadError=false;
  }
@@ -288,6 +289,28 @@ async function openAccountPage(profileId,{signal,guard,freshLogin=false}){
   return {profileId,url:tab.view.webContents.getURL()};
  }finally{w.navigationPending=false;}
 }
+// Only the main-process runtime can request these tabs. Keep user tabs and
+// interrupted drafts intact; a stopped AI is never silently restarted/stopped.
+async function openSalesPage(profileId,url,{signal,guard,jobId,role}){
+ guard();const w=windows.get(profileId),engine=commerce;
+ const valid=()=>{
+  guard();if(signal.aborted||!engine||engine.active.get(profileId)?.signal!==signal||!engine.leases.snapshot().some(row=>row.profileId===profileId&&row.jobId===jobId))throw Object.assign(Error('后台任务已停止'),{code:'STOPPED'});
+  if(!w||w.isDestroyed()||w.closingPromise||w.aiAgent?.state?.running||w.vintedDraftController)throw Object.assign(Error('浏览器窗口正在使用，请等待当前操作完成'),{code:'PAGE_BUSY'});
+ };
+ valid();
+ const account=engine.db.marketAccounts.find(row=>row.profileId===profileId);
+ if(!(role==='listing'&&url==='https://www.vinted.fr/items/new'||role==='catalog'&&url===account?.profileURL))throw Error('后台页面地址与任务不一致');
+ if(w.navigationPending)throw Object.assign(Error('窗口正在导航，请稍后继续'),{code:'PAGE_BUSY'});
+ const key=JSON.stringify([profileId,jobId,role]);w.navigationPending=true;
+ try{
+  let tab=w.tabs.find(row=>row.id===salesTabs.get(key)&&!row.view.webContents.isDestroyed());
+  if(tab&&tab.view.webContents.getURL()!==url)throw Object.assign(Error('原后台标签已改变，请核对原页面'),{code:'PAGE_CHANGED'});
+  if(tab){w.activeTab=tab.id;resizeViews(w);sendState(w);}else{tab=await addTab(w,url);salesTabs.set(key,tab.id);}
+  valid();if(tab.error||tab.view.webContents.isDestroyed()||tab.view.webContents.getURL()!==url)throw Object.assign(Error('后台页面未能完整打开，请检查账号和网络'),{code:'PAGE_CHANGED'});
+  if(w.isMinimized())w.restore();w.show();w.focus();tab.view.webContents.focus();
+  return {tab};
+ }finally{w.navigationPending=false;}
+}
 async function addTab(w, target) {
   await stopDraft(w);
   if (w.tabs.length >= 20) throw Error('每个环境最多打开 20 个标签页');
@@ -407,10 +430,11 @@ function register() {
   ipcMain.handle('ai-settings', e => { const w=browserWindow(e);return publicSettings(w.profile.id); });
   ipcMain.handle('ai-save-settings', (e,input) => { const w=browserWindow(e);return saveSettings(input,w.profile.id); });
   ipcMain.handle('ai-state', e => { const w=browserWindow(e);return w.aiAgent.state; });
-  ipcMain.handle('ai-start', async (e,goal) => {const w=browserWindow(e);if(w.closingPromise)throw Error('窗口正在关闭，请等待完成。');await stopDraft(w);if(w.isDestroyed())throw Error('窗口已关闭');return w.aiAgent.start(goal);});
+  const aiAvailable=w=>{if(w.isDestroyed()||w.closingPromise)throw Error('窗口正在关闭，请等待完成。');if(w.navigationPending||commerce?.active.has(w.profile.id))throw Error('该账号正在执行后台任务，请先暂停调度并等待当前步骤结束。');};
+  ipcMain.handle('ai-start', async (e,goal) => {const w=browserWindow(e);aiAvailable(w);await stopDraft(w);aiAvailable(w);return w.aiAgent.start(goal);});
   ipcMain.handle('ai-stop', e => { browserWindow(e).aiAgent.stop(); });
   ipcMain.handle('ai-pause', e => { browserWindow(e).aiAgent.pause(); });
-  ipcMain.handle('ai-resume', e => { browserWindow(e).aiAgent.resume(); });
+  ipcMain.handle('ai-resume', e => {const w=browserWindow(e);aiAvailable(w);w.aiAgent.resume();});
   ipcMain.handle('ai-approve', (e,id,accepted) => { browserWindow(e).aiAgent.decide(id,!!accepted); });
   ipcMain.handle('browser-state', e => { const w = browserWindow(e); sendState(w); });
   ipcMain.handle('navigate', async (e, action, value) => {
@@ -418,7 +442,7 @@ function register() {
     if(!['go','new','check','switch','close','back','forward','reload','stop'].includes(action))throw Error('浏览器操作无效');
     if(action==='stop'){
       if(w.navigationRequest)w.navigationRequest.cancelled=true;
-      w.vintedDraftController?.abort();w.aiAgent?.stop();w.controlOverlay.clear();
+      w.vintedDraftController?.abort();w.aiAgent?.stop();commerce?.active.get(w.profile.id)?.abort();w.controlOverlay.clear();
       const tab=w.tabs.find(t=>t.id===w.activeTab),c=tab?.view.webContents;
       if(c&&!c.isDestroyed()){c.stop();tab.url=c.getURL();tab.loading=false;sendState(w);}
       return;

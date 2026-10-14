@@ -43,6 +43,7 @@ await require(path.join(root,'test/pointer-feedback.cjs'))(api,check);
 await require(path.join(root,'test/workspace-shell-smoke.cjs'))(api,check);
 await require(path.join(root,'test/manager-status-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-smoke.cjs'))(api,check);
+await require(path.join(root,'test/vinted-sales-main-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-dashboard-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-publication-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-association-ui-smoke.cjs'))(api,check);

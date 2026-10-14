@@ -2,6 +2,7 @@
 
 const {createHash}=require('node:crypto');
 const {restorePublicationState}=require('./vinted-publication.cjs');
+const {validateSupplierSyncRecord}=require('./commerce-supplier-outbox.cjs');
 const clone=value=>JSON.parse(JSON.stringify(value));
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const withoutTime=value=>{const next={...value};delete next.observedAt;return next;};
@@ -14,7 +15,7 @@ function validURL(value,id){try{const url=new URL(value);return url.origin==='ht
 // after its real-page receipt validation. It stages one full engine snapshot;
 // the caller must fsync that whole snapshot once before exposing success.
 // No supplier request, browser action, timer, disk write or count increment runs.
-function projectPublicationReconciliation(db,nextPublications,{now=Date.now()}={}){
+function projectPublicationReconciliation(db,nextPublications,{now=Date.now(),activeLeases=[]}={}){
  ensure(db&&typeof db==='object'&&['plans','claims','jobs','marketAccounts'].every(key=>Array.isArray(db[key])),'运营数据库缺少刊登关联记录');
  ensure(Number.isSafeInteger(now)&&now>=0&&now<=8640000000000000,'刊登关联时钟无效');
  // Validation is read-only here: do not apply startup recovery to an actively
@@ -65,24 +66,44 @@ function projectPublicationReconciliation(db,nextPublications,{now=Date.now()}={
    ensure(job.operation==null&&job.mutationPending===false,'原刊登任务已有业务请求，需先核对，不能覆盖');
    const result={externalId:receipt.listingId,submissionId:record.id,verified:true,summary:'实际刊登回执已核对；货盘上架关联另行核对'};
    if(job.state==='completed'){ensure(job.step==='publication_reconciled'&&same(job.result,result),'原完成任务与本次刊登回执不同');continue;}
-   ensure(['queued','needs_review','cancelled','rejected'].includes(job.state)&&job.result==null,'原刊登任务状态不能自动覆盖');
+   const leased=job.state==='running'&&Array.isArray(activeLeases)&&activeLeases.filter(lease=>lease.profileId===facts.profileId&&lease.jobId===job.id).length===1;
+   ensure((['queued','needs_review','cancelled','rejected'].includes(job.state)||leased)&&job.result==null,'原刊登任务状态不能自动覆盖');
    Object.assign(job,{state:'completed',step:'publication_reconciled',result,error:'',retryAt:null,updatedAt:at,accountMemberId:facts.account.memberId});completedJobIds.push(job.id);
   }
   // Existing engine.listing marks a claim only on its first listing. Do not
   // invent success or send another mark for a reused set. This outbox records
   // the initial request, or an explicit review when older history has no sync
   // receipt. A future worker must persist its request intent before any I/O.
-  const syncs=staged.publicationSupplierSync.filter(row=>row.claimId===claim.id);ensure(syncs.length<=1,'照片领取存在多个货盘上架关联记录');
+  const syncs=staged.publicationSupplierSync.filter(row=>row.claimId===claim.id);
   const first=claim.listings[0],firstRecord=next.submissions.find(row=>row.receipt?.listingId===String(first.listingId)&&row.proof.facts.photos.claimId===claim.id);
   ensure(/^[1-9]\d{0,29}$/.test(String(first.listingId))&&validURL(first.url,String(first.listingId)),'照片领取的首次刊登地址无法核对');
   const payload={action:'published',platform:'Vinted',listingId:String(first.listingId),listingUrl:first.url};
   const id='mark-listed-'+createHash('sha256').update(JSON.stringify([claim.id,String(first.listingId)])).digest('hex');
-  if(syncs.length){
-   const sync=syncs[0];ensure(sync.id===id&&sync.kind==='mark_listed'&&sync.submissionId===(firstRecord?.id||null)&&sync.profileId===facts.profileId&&sync.productId===facts.productId&&same(sync.payload,payload)&&['pending','needs_review'].includes(sync.state)&&sync.attemptCount===0&&sync.operation===null&&sync.receipt===null,'原货盘上架关联的身份、请求或结果尚需独立核对');
+  const initialSync=syncs.find(row=>row.id===id);
+  if(initialSync){
+   const sync=initialSync;ensure(sync.kind==='mark_listed'&&sync.submissionId===(firstRecord?.id||null)&&sync.profileId===facts.profileId&&sync.productId===facts.productId&&same(sync.payload,payload),'原货盘上架关联的身份或请求与原记录不同');
+   try{validateSupplierSyncRecord(sync);}catch{ensure(false,'原货盘上架关联请求或结果尚需独立核对');}
+   ensure(!sync.receipt||sync.receipt.setId===claim.setId,'货盘上架关联回执不属于原照片套组');
   }else{
-   staged.publicationSupplierSync.push({id,kind:'mark_listed',claimId:claim.id,profileId:facts.profileId,productId:facts.productId,submissionId:firstRecord?.id||null,state:firstRecord?'pending':'needs_review',attemptCount:0,operation:null,receipt:null,payload,createdAt:at,updatedAt:at,reason:firstRecord?'平台刊登已核对；货盘上架关联尚未发送':'该照片领取有更早的刊登记录，货盘上架关联状态需核对'});
+   const pending=!!firstRecord&&!syncs.length;
+   staged.publicationSupplierSync.push({id,kind:'mark_listed',claimId:claim.id,profileId:facts.profileId,productId:facts.productId,submissionId:firstRecord?.id||null,state:pending?'pending':'needs_review',attemptCount:0,operation:null,receipt:null,payload,createdAt:at,updatedAt:at,reason:pending?'平台刊登已核对；货盘上架关联尚未发送':'该照片领取已有其他刊登或关联历史，首次货盘关联状态需核对'});
   }
   reconciledSubmissionIds.push(record.id);
+ }
+ // Reused photos may carry older per-listing rows. Validate and retain those
+ // rows independently; only the first listing above can create a new request.
+ // This also covers fully closed publications, which skip active projection.
+ const activeClaims=new Set();
+ for(const sync of staged.publicationSupplierSync){
+  try{validateSupplierSyncRecord(sync);}catch{ensure(false,'货盘上架关联历史的请求或回执无效');}
+  const claim=one(staged.claims,row=>row.id===sync.claimId,'货盘关联的原照片领取');
+  ensure(sync.profileId===claim.profileId&&sync.productId===claim.productId&&Array.isArray(claim.listings),'货盘上架关联历史不属于原环境或商品');
+  const linked=one(claim.listings,row=>String(row.listingId)===sync.payload.listingId,'货盘关联的原刊登历史');
+  ensure(linked.url===sync.payload.listingUrl,'货盘关联历史的原刊登链接不同');
+  const records=next.submissions.filter(row=>row.receipt?.listingId===sync.payload.listingId&&row.proof.facts.photos.claimId===claim.id);
+  ensure(records.length<=1&&sync.submissionId===(records[0]?.id||null)&&(!linked.submissionId||linked.submissionId===sync.submissionId),'货盘关联历史与原刊登提交不一致');
+  ensure(!sync.receipt||sync.receipt.setId===claim.setId,'货盘关联历史的回执不属于原照片套组');
+  if(['pending','dispatching','uncertain'].includes(sync.state)){ensure(!activeClaims.has(sync.claimId),'同一照片领取存在多个未完成的货盘关联请求');activeClaims.add(sync.claimId);}
  }
  return {db:staged,changed:!same(staged,db),reconciledSubmissionIds,completedJobIds,pendingSupplierSyncIds:staged.publicationSupplierSync.filter(row=>row.state!=='synced').map(row=>row.id)};
 }

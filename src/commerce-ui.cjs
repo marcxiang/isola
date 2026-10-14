@@ -14,8 +14,10 @@
   const completedStates = new Set(['completed', 'complete', 'done', 'succeeded']);
   const cancelledStates = new Set(['cancelled', 'canceled', 'rejected']);
   const stateNames = {queued:'待执行', pending:'待执行', running:'执行中', waiting:'等待条件', awaiting_result:'等待结果', retry_wait:'等待检查', needs_review:'需要核对', pending_review:'需要核对', waiting_review:'需要核对', review:'需要核对', unknown:'结果未知', uncertain:'结果未知', blocked:'已暂停', failed:'执行失败', error:'执行失败', completed:'已完成', complete:'已完成', done:'已完成', succeeded:'已完成', cancelled:'已取消', canceled:'已取消', rejected:'已拒绝', paused:'已暂停', disabled:'未启用', enabled:'已启用', ready:'待执行', active:'在售中', listed:'在售中', fulfilling:'履约中', target_reached:'销售目标已达成', waiting_sale:'等待成交', awaiting_sale:'等待成交', draft:'草稿', unverified:'待验证'};
-  const jobNames = {listing:'商品上架', list:'商品上架', publish:'商品上架', reply:'回复消息', message:'回复消息', messages:'检查消息', offer:'处理报价', offers:'检查报价', accept_offer:'接受报价', label:'获取运单', shipping_label:'获取运单', shipment:'获取运单', fulfillment:'面单与货盘履约', procurement:'货盘采购', purchase:'货盘采购', order:'货盘采购', reconcile:'核对结果', sync:'同步货盘'};
+  const jobNames = {listing:'商品上架', list:'商品上架', publish:'商品上架', reply:'回复消息', message:'回复消息', messages:'检查消息', offer:'处理报价', offers:'检查报价', accept_offer:'接受报价', sale_confirmation:'确认成交', label:'获取运单', shipping_label:'获取运单', shipment:'获取运单', fulfillment:'面单与货盘履约', procurement:'货盘采购', purchase:'货盘采购', order:'货盘采购', reconcile:'核对结果', sync:'同步货盘'};
   const stepNames = {pending:'检查执行条件',claim_photos:'领取商品图片',prepare_listing:'准备刊登草稿',publish_listing:'提交刊登',record_listing:'记录刊登回执',draft_reply:'准备商品回复',send_reply:'发送回复',check_offer:'核对报价',accept_offer:'接受报价',download_label:'下载并核对运单',check_stock_price:'核对库存与采购价',wms_checkout:'核对可用仓库',create_supplier_order:'提交货盘订单',verified:'核对完成'};
+  Object.assign(stateNames,{sale_pending_confirmation:'成交待确认'});
+  Object.assign(stepNames,{check_catalog:'核对当前账号衣橱',prepare_photos:'准备并校验原照片',upload_photos:'上传并核对照片',verify_listing:'核对实际刊登结果',publication_reconciled:'已关联原刊登',confirm_sale:'核对原成交',sale_confirmed:'成交已核对',sale_confirmation:'核对原成交'});
   const pageDetails = {overview:['商品运营','查看每个商品在哪个环境销售，以及接下来需要做什么。'],accounts:['账号中心','固定设备环境，管理登录与需要接管的账号。'],plans:['上架计划','为每个环境设置商品、销售目标与价格规则。'],inventory:['货盘与图片','核对商品库存，区分自己的图片与他人占用的套装。'],jobs:['任务记录','检查每一步的执行状态与外部平台回执。'],settings:['连接与规则','连接货盘，并为后台执行设置明确的范围。']};
   let state = {settings:{},connection:{status:'not_configured'},profiles:[],accounts:[],products:[],photoSets:[],photoPreparations:[],plans:[],jobs:[],events:[],publications:[],running:false,readiness:{vinted:'unverified'}};
   let currentPage = 'overview', settingsDirty = false, photoProductId = '', selectedJobId = '', selectedPlanId = '', toastTimer;
@@ -98,17 +100,34 @@
     return Object.fromEntries(Object.entries(value).filter(([key])=>allowed.has(key)).map(([key,item])=>[key,photoDiagnostic(item,depth+1)]));
   }
   function isConnected() { return ['connected','ok','ready','authenticated','success'].includes(state.connection.status); }
+  function salesOnly() { return state.readiness.salesOnly===true; }
+  function automaticListing() { const caps=state.readiness.capabilities||{};return Object.hasOwn(caps,'listingPublish')?caps.listingPublish===true:caps.publish===true; }
+  function automaticCapabilities() { const caps=state.readiness.capabilities||{};return [
+    ['自动刊登',automaticListing()],['消息回复',caps.messages===true],['报价接受',caps.offers===true],
+    ...(salesOnly()?[['成交确认',caps.saleConfirmation===true],['卖出后补上',caps.saleConfirmation===true&&automaticListing()]]:[['运单与采购',caps.shippingLabel===true&&caps.procurement===true]])
+  ]; }
+  function remainingSalesText() { const pending=automaticCapabilities().filter(([,ready])=>!ready).map(([name])=>name);return pending.length?`${pending.join('、')}仍待验证。`:'各项已接通，仍需逐项核对当前账号、商品和页面回执。'; }
+  function purchaseJob(job) { return ['fulfillment','procurement','purchase','order','label','shipping_label','shipment'].includes(job?.type); }
+  function renderSalesScope() {
+    const only=salesOnly();
+    document.querySelectorAll('[data-purchase-control]').forEach(node=>{node.hidden=only;node.querySelectorAll('input,select').forEach(field=>{field.disabled=only;});});
+    $('#execution-rules-title').textContent=only?'后台售卖规则':'执行与采购规则';
+    $('#execution-rules-description').textContent=only?'按计划推进上架与售卖；每一步以当前功能状态和核对回执为准。':'先限定执行范围，再启动持续调度。';
+    $('#execution-stop-note').textContent=only?'缺货、图片冲突、页面变化、账号验证或提交结果不明确时，保留原记录并停止该任务，等待核对。':'缺货、图片冲突、页面变化、账户验证、金额不匹配或订单提交结果未知时，保留任务记录并等待核对。';
+    $('#association-scope-note').textContent=only?'请在对应环境中打开这次提交的商品详情页。本次检查只读取当前活动页面；确认关联保存已核对的刊登，不会再次发布。':'请在对应环境中打开这次提交的商品详情页。本次检查只读取当前活动页面；确认关联仅保存本机记录，不会再次发布或提交采购。';
+    $('#plan-automation-note').textContent=`勾选后保存本计划的规则；${remainingSalesText()}提交结果不明确时停止核对。`;
+  }
   function changePage(page) { currentPage = page in pageDetails ? page : 'overview'; document.querySelectorAll('.page-section').forEach(section => { section.hidden = section.id !== `page-${currentPage}`; }); document.querySelectorAll('[data-page]').forEach(button => { const active=button.dataset.page===currentPage; button.classList.toggle('active',active); if(active)button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current'); }); $('#page-title').textContent=pageDetails[currentPage][0]; $('#page-description').textContent=pageDetails[currentPage][1]; $('#readiness').hidden=currentPage==='accounts';$('.header-actions').hidden=currentPage==='accounts'; }
 
   function applyState(incoming) {
     if (!incoming || typeof incoming !== 'object') return;
-    state = {...state,...incoming,settings:{...state.settings,...incoming.settings},connection:{...state.connection,...incoming.connection},readiness:{...state.readiness,...incoming.readiness}};
+    state = {...state,...incoming,settings:{...state.settings,...incoming.settings},connection:{...state.connection,...incoming.connection},readiness:incoming.readiness?{...incoming.readiness}:state.readiness};
     for (const key of ['profiles','accounts','products','photoSets','photoPreparations','plans','jobs','events','publications']) if (!Array.isArray(state[key])) state[key]=[];
     reconcilePublicationAttempts();
     if(associationReport){const record=openPublication(associationPlanId);if(!record||record.id!==associationReport.submissionId||record.state!=='uncertain'||record.attemptCount!==1)associationReviewToken='';}
     $('#load-error').hidden = !state.faulted;
     if (state.faulted) $('#load-error').textContent = '运营数据无法安全写入，外部操作已停止。请检查本机存储后重新打开应用。';
-    renderSummary(); renderPlans(); renderInventory(); renderJobs(); renderEvents(); renderConnection(); renderControls();
+    renderSalesScope(); renderSummary(); renderPlans(); renderInventory(); renderJobs(); renderEvents(); renderConnection(); renderControls();
     if (!settingsDirty) fillSettings();
     if (jobDialog.open && selectedJobId) renderJobDetail();
     if (photoDialog.open && selectedPhotoPlanId) renderPhotoReport();
@@ -217,29 +236,27 @@
     $('#stat-products').textContent=state.products.length; $('#stat-photo-sets').textContent=`${state.photoSets.length} 套图片`;
     $('#stat-complete').textContent=state.jobs.filter(job=>completedStates.has(job.state)).length; $('#stat-review').textContent=attention.length;
     $('#nav-review-count').textContent=attention.length; $('#nav-review-count').hidden=!attention.length;
-    const verified=state.readiness.vinted==='verified', capabilities=state.readiness.capabilities||{};
+    const capabilities=state.readiness.capabilities||{}, automatic=automaticCapabilities(), available=automatic.filter(([,ready])=>ready), allReady=automatic.length>0&&available.length===automatic.length;
     const manualPublish=typeof api.inspectPublication==='function'&&typeof api.submitPublication==='function';
     const association=typeof api.inspectPublishedListing==='function'&&typeof api.associatePublishedListing==='function';
-    $('#readiness').classList.toggle('ready',verified);
-    $('#readiness-title').textContent=verified ? '网页执行流程已验证' : `${manualPublish?'手动上架可用':'资料准备可用'} · 后台业务待验证`;
-    $('#readiness-message').textContent=verified ? (state.readiness.message||'任务将按当前规则执行，结果不明确时暂停并保留记录。') : manualPublish?'可准备资料和照片，逐项核对后手动发布一次。启动调度不会启用下方仍待验证的业务。':'可连接货盘、保存计划并准备资料和照片；当前版本尚未提供手动发布入口。';
+    $('#readiness').classList.toggle('ready',allReady);
+    $('#readiness-title').textContent=available.length?(allReady?`${salesOnly()?'后台售卖':'后台业务'}流程可用`:'后台部分流程可用'):`${manualPublish?'手动上架可用':'资料准备可用'} · 后台业务待验证`;
+    $('#readiness-message').textContent=available.length?`后台可按计划执行${available.map(([name])=>name).join('、')}。每个步骤核对账号、商品和回执；提交结果不明确时停止并保留原记录。`:manualPublish?'可准备资料和照片，逐项核对后手动发布一次。启动调度不会启用下方仍待验证的业务。':'可连接货盘、保存计划并准备资料和照片；当前版本尚未提供手动发布入口。';
     const capabilityList=$('#readiness-capabilities');capabilityList.replaceChildren();
     for(const [name,available,detail] of [
       ['资料与照片',capabilities.inspect!==false&&typeof api.prepareDraft==='function'&&typeof api.uploadPhotos==='function','可准备'],
       ['手动发布',manualPublish,'核对后可用'],
       ['原刊登关联',association,'核对后可用'],
-      ['自动刊登',verified&&capabilities.publish===true,'已验证'],
-      ['消息与报价',verified&&capabilities.messages===true&&capabilities.offers===true,'已验证'],
-      ['运单与采购',verified&&capabilities.shippingLabel===true&&capabilities.procurement===true,'已验证']
+      ...automatic.map(([name,ready])=>[name,ready,'可用'])
     ]){const item=el('li');item.append(el('span','',name),badge(available?detail:name==='手动发布'||name==='原刊登关联'?'未接通':'待验证',available?'good':'neutral'));capabilityList.append(item);}
     const unresolved=state.plans.filter(plan=>(openPublication(plan.id)&&!publishedPublication(plan.id))||publicationAttempts.has(String(plan.id))), inspectable=unresolved.filter(plan=>canInspectAssociation(plan.id)).length;
     $('#readiness-next').hidden=!unresolved.length;
     $('#readiness-next').textContent=unresolved.length?`${unresolved.length} 个计划的发布结果待核对。${inspectable?`${inspectable} 个可在对应环境打开原商品页后，点击「核对原刊登」。`:''}${inspectable<unresolved.length?`${inspectable?'其余计划':'请'}查看「任务记录」与原页面，保留原提交等待人工核对。`:''}不要重复发布。`:'';
-    $('#workflow-status').textContent=verified?'流程已验证':'后台业务待验证'; $('#workflow-status').className=`pill ${verified?'good':'neutral'}`;
+    $('#workflow-status').textContent=allReady?'各项流程可用':available.length?'部分流程可用':'后台业务待验证'; $('#workflow-status').className=`pill ${allReady?'good':'neutral'}`;
     $('#operations-runner-title').textContent=state.faulted?'运营存储异常，执行已停止':state.running?'后台调度已启动':state.configBusy?'正在处理连接或照片配置':state.settings.backgroundEnabled?'后台已暂停':'后台持续调度未开启';
     const running=state.jobs.filter(job=>job.state==='running').length, queued=state.jobs.filter(job=>['queued','pending','retry_wait'].includes(job.state)).length;
     $('#operations-runner-summary').textContent=`${new Set(active.map(plan=>plan.profileId)).size} 个已配置环境 · 最多并行 ${number(state.settings.maxConcurrent)||1} 个环境 · ${running} 个任务执行中`;
-    $('#operations-runner-detail').replaceChildren(badge(`${queued} 个任务等待处理`),badge(`${attention.length} 个任务需要核对`,attention.length?'warn':'neutral'),badge(verified?'网页流程已验证':'自动业务尚未启用',verified?'good':'warn'));
+    $('#operations-runner-detail').replaceChildren(badge(`${queued} 个任务等待处理`),badge(`${attention.length} 个任务需要核对`,attention.length?'warn':'neutral'),...(!available.length?[badge('自动业务尚未启用','warn')]:[]),...automatic.map(([name,ready])=>badge(`${name}：${ready?'可用':'待验证'}`,ready?'good':'neutral')));
   }
   function sortedPlanJobs(id) {
     return state.jobs.filter(job=>same(job.planId,id)).sort((a,b)=>String(b.updatedAt||b.createdAt||'').localeCompare(String(a.updatedAt||a.createdAt||'')));
@@ -252,11 +269,12 @@
     if(openPublication(plan.id)&&!publishedPublication(plan.id)||publicationAttempts.has(String(plan.id)))return {key:'attention',label:'发布结果待核对',tone:'warn',next:'已有一次发布调用或提交记录，请核对原刊登页面，不要重复点击发布。',job};
     if(review)return {key:'attention',label:stateNames[review.state]||'需要核对',tone:'warn',next:error||'打开任务记录，核对当前页面和原回执。',job};
     if(running)return {key:'running',label:'执行中',tone:'good',next:`${jobNames[running.type]||running.type} · ${stepNames[running.step]||running.step||'正在执行'}`,job};
-    if(plan.activeListingId)return {key:'listed',label:'已有在售记录',tone:'good',next:!plan.enabled?'计划已停用；已保存的刊登记录仍保留。':state.readiness.vinted!=='verified'?'刊登记录已保存；消息、报价与成交监测仍待流程验证。':state.running?'等待成交，检查消息与报价。':'启动调度后检查消息、报价与成交。',job};
+    if(waiting?.scheduling&&['waiting','blocked','paused'].includes(waiting.scheduling.state))return {key:'pending',label:waiting.scheduling.state==='blocked'?'等待核对':waiting.scheduling.state==='paused'?'已暂停':'等待条件',tone:waiting.scheduling.state==='blocked'?'warn':'neutral',next:[waiting.scheduling.reason,waiting.scheduling.nextAction].filter(Boolean).join(' '),job};
+    if(plan.activeListingId){const caps=state.readiness.capabilities||{},enabled=[...(plan.autoReply&&caps.messages===true?['回复消息']:[]),...(plan.autoAcceptOffers&&caps.offers===true?['接受符合底价的报价']:[]),...(caps.saleConfirmation===true?['确认成交']:[])];return {key:'listed',label:'已有在售记录',tone:'good',next:!plan.enabled?'计划已停用；已保存的刊登记录仍保留。':`${enabled.length?`${state.running?'按计划':'启动调度后可'}${enabled.join('、')}。`:'刊登记录已保存。'}${remainingSalesText()}`,job};}
     if(waiting&&waiting.type!=='listing')return {key:plan.enabled?'pending':'paused',label:plan.enabled?'待执行':'计划未启用',tone:'neutral',next:`${jobNames[waiting.type]||waiting.type} · ${stepNames[waiting.step]||waiting.step||'等待执行条件'}`,job};
     if(number(plan.targetCount)>0&&number(plan.completedCount)>=number(plan.targetCount))return {key:'target_reached',label:'目标已达成',tone:'good',next:'累计销售目标已完成，不再补充上架。',job};
     if(!plan.enabled)return {key:'paused',label:'计划未启用',tone:'neutral',next:'尚无在售回执；核对资料后启用计划。',job};
-    if(state.readiness.vinted!=='verified')return {key:'pending',label:'待发布',tone:'neutral',next:typeof api.submitPublication==='function'?'准备资料与照片，点击「核对发布条件」。全部通过后可手动发布；后台自动刊登尚未启用。':'准备资料与照片，核对当前页面。此版本尚未提供手动发布入口。',job};
+    if(!automaticListing())return {key:'pending',label:'待发布',tone:'neutral',next:typeof api.submitPublication==='function'?'准备资料与照片，点击「核对发布条件」。全部通过后可手动发布；后台自动刊登尚未启用。':'准备资料与照片，核对当前页面。此版本尚未提供手动发布入口。',job};
     return {key:'pending',label:'待发布',tone:'neutral',next:state.running?'等待同一环境的前序任务结束，再检查上架条件。':'启动调度后检查库存、图片与刊登资料。',job};
   }
   function listingReceiptURL(plan) {
@@ -286,7 +304,7 @@
     const result=$('#publication-submission-result');result.replaceChildren();result.hidden=reportKind!=='publication';if(result.hidden)return;
     const record=openPublication(selectedPlanId),attempt=publicationAttempts.get(String(selectedPlanId));
     if(publishedPublication(selectedPlanId)&&!attempt){
-      result.append(el('div','report-status good','已核对发布成功，刊登回执已保存。'),el('p','field-hint',`提交记录：${record.id}`),el('p','field-hint',`在售商品编号：${find(state.plans,selectedPlanId).activeListingId}`),el('p','field-hint','已有在售商品，不能重复发布。消息、报价、运单及采购仍按各自的流程验证状态运行。'));return;
+      result.append(el('div','report-status good','已核对发布成功，刊登回执已保存。'),el('p','field-hint',`提交记录：${record.id}`),el('p','field-hint',`在售商品编号：${find(state.plans,selectedPlanId).activeListingId}`),el('p','field-hint',`已有在售商品，不能重复发布。${remainingSalesText()}`));return;
     }
     if(record||attempt){
       const message=attempt?.pending?'正在发送一次发布请求并核对页面，请保持当前环境打开。':attempt?.message||record?.reason||'原发布提交记录尚未完成核对，请查看原刊登页面。';
@@ -328,7 +346,7 @@
     const detail=$('#publication-association-detail'),plan=find(state.plans,associationPlanId),record=openPublication(associationPlanId);detail.replaceChildren();
     detail.append(el('p','report-plan',`${plan?.name||productName(plan?.productId)} · ${profileName(plan?.profileId)}`));
     if(record)detail.append(el('p','field-hint',`原提交记录：${record.id}`));
-    if(associationResult){detail.append(el('div','report-status good','已保存本机关联。'),el('p','field-hint',`在售商品编号：${associationResult.listingId}`),el('p','field-hint','本次仅记录已核对的刊登，没有重新发布或提交采购。'));renderAssociationControls();return;}
+    if(associationResult){detail.append(el('div','report-status good','已保存本机关联。'),el('p','field-hint',`在售商品编号：${associationResult.listingId}`),el('p','field-hint',salesOnly()?'本次记录已核对的原刊登，没有重新发布。':'本次仅记录已核对的刊登，没有重新发布或提交采购。'));renderAssociationControls();return;}
     if(associationError)detail.append(el('div','form-error',associationError));
     if(!associationReport){if(!associationError)detail.append(el('p','report-loading','正在读取对应环境的当前商品页…'));renderAssociationControls();return;}
     const report=associationReport,grid=el('dl','detail-grid');
@@ -594,16 +612,18 @@
     const job=find(state.jobs,selectedJobId), detail=$('#job-detail');detail.replaceChildren();
     if(!job){detail.append(empty('该任务记录不可用。'));$('#reconcile-form').hidden=true;$('#retry-form').hidden=true;return;}
     const grid=el('dl','detail-grid');for(const [name,value] of [['任务编号',job.id],['任务类型',jobNames[job.type] || job.type],['浏览器环境',profileName(job.profileId)],['商品',productName(job.productId)],['状态',stateNames[job.state] || job.state],['当前步骤',stepNames[job.step] || job.step || '—'],['创建时间',when(job.createdAt)],['更新时间',when(job.updatedAt)]])grid.append(el('dt','',name),el('dd','',value));detail.append(grid);
+    if(job.scheduling&&['waiting','blocked','paused'].includes(job.scheduling.state)){detail.append(el('h3','','当前等待条件'),el('p','',job.scheduling.reason||'等待执行条件'),el('p','field-hint',job.scheduling.nextAction||''));}
     if(job.error){detail.append(el('h3','','需要核对的问题'),el('div','form-error',typeof job.error==='string'?job.error:typeof job.error.message==='string'?job.error.message:'请核对真实页面和原请求记录。'));}
     if(job.result&&typeof job.result==='object'){
       const receipt=el('dl','detail-grid');
       for(const [key,name] of [['externalId',job.type==='listing'?'刊登编号':job.type==='fulfillment'?'货盘订单编号':'外部回执编号'],['listingId','刊登编号'],['orderId','订单编号'],['wmsStatus','仓库状态'],['status','回执状态'],['message','说明']])if(typeof job.result[key]==='string'||typeof job.result[key]==='number')receipt.append(el('dt','',name),el('dd','',job.result[key]));
       if(receipt.childElementCount)detail.append(el('h3','','执行回执'),receipt);
     }
-    const canReconcile=reviewStates.has(job.state)&&job.type==='fulfillment'&&!!job.result?.externalId;
+    const canReconcile=!salesOnly()&&reviewStates.has(job.state)&&job.type==='fulfillment'&&!!job.result?.externalId;
     $('#reconcile-form').hidden=!canReconcile;
-    $('#retry-form').hidden=job.canRetry!==true;
-    if(reviewStates.has(job.state)&&!canReconcile&&job.canRetry!==true)detail.append(el('p','field-hint','此任务需要核对真实页面或原请求回执。当前版本不会仅凭手工填写编号重新执行，记录会继续保留。'));
+    const canRetry=job.canRetry===true&&!(salesOnly()&&purchaseJob(job));$('#retry-form').hidden=!canRetry;
+    if(salesOnly()&&purchaseJob(job))detail.append(el('p','field-hint','这是旧版的历史任务，售卖模式保留原记录，相关操作已停用。'));
+    else if(reviewStates.has(job.state)&&!canReconcile&&!canRetry)detail.append(el('p','field-hint','此任务需要核对真实页面或原请求回执。当前版本不会仅凭手工填写编号重新执行，记录会继续保留。'));
   }
 
   function reportList(parent,title,items,tone='') {
@@ -622,7 +642,7 @@
   function renderPageReport() {
     const detail=$('#preflight-detail');detail.replaceChildren();$('#preflight-title').textContent=reportKind==='draft'?'填写页面结果':reportKind==='publication'?'核对发布条件':'核对刊登资料';
     $('#preflight-dialog .preflight-note b').textContent=reportKind==='publication'?'只读取并核对发布条件':'填写页面只准备表单';
-    $('#preflight-dialog .preflight-note p').textContent=reportKind==='publication'?'逐项核对账号、商品资料、价格和上传照片；本次检查不会点击发布或保存草稿。':'按计划填写能够核对的字段，缺少的内容会列出；不会点击发布、发送消息、接受报价或提交采购。图片与网页选项仍需逐项核对。';
+    $('#preflight-dialog .preflight-note p').textContent=reportKind==='publication'?'逐项核对账号、商品资料、价格和上传照片；本次检查不会点击发布或保存草稿。':salesOnly()?'按计划准备商品表单，缺少的内容会列出。资料、图片与网页选项仍需逐项核对，填写完成后不会直接发布。':'按计划填写能够核对的字段，缺少的内容会列出；不会点击发布、发送消息、接受报价或提交采购。图片与网页选项仍需逐项核对。';
     const plan=find(state.plans,selectedPlanId);detail.append(el('p','report-plan',`${plan?.name||'上架计划'} · ${profileName(plan?.profileId)}`));
     if(reportError){detail.append(el('div','form-error',reportError));return;}
     if(!pageReport){detail.append(el('p','report-loading',reportKind==='draft'?'正在核对并填写页面…':'正在读取商品、图片与当前网页…'));return;}
@@ -631,7 +651,7 @@
       const submitted=!!openPublication(selectedPlanId)||publicationAttempts.has(String(selectedPlanId)),published=!!publishedPublication(selectedPlanId)&&!publicationAttempts.has(String(selectedPlanId));
       detail.append(el('div',`report-status ${published||report.readyForPublication&&!submitted?'good':'warn'}`,published?'刊登回执已验证并保存，以下为此前的发布条件检查。':submitted?'以下为提交前的检查记录；当前发布结果仍需核对。':report.readyForPublication?pageReport.manualPublicationEnabled===false?'当前发布条件已核对；手动发布尚未启用。':'当前发布条件已核对，可手动发布一次。':'发布条件仍有待核对项目，本次检查未执行发布。'));
       if(Array.isArray(report.checks)&&report.checks.length){const checks=el('div','report-checks');for(const item of report.checks.slice(0,60)){const row=el('div','report-check'),body=el('div');body.append(el('b','',typeof item.name==='string'?item.name:'检查项'));if(typeof item.detail==='string')body.append(el('p','',item.detail));row.append(badge(item.ok===true?'已通过':'待核对',item.ok===true?'good':'warn'),body);checks.append(row);}detail.append(checks);}
-      reportList(detail,'仍需处理',report.blockers,'warning');if(typeof report.message==='string'&&!submitted)detail.append(el('p','field-hint',report.message));detail.append(el('p','field-hint','这里仅执行当前商品的单次发布；消息、报价、运单和采购仍按各自的流程验证状态运行。'));return;
+      reportList(detail,'仍需处理',report.blockers,'warning');if(typeof report.message==='string'&&!submitted)detail.append(el('p','field-hint',report.message));detail.append(el('p','field-hint',`这里执行当前商品的单次发布。${remainingSalesText()}`));return;
     }
     if(reportKind==='draft'){
       detail.append(el('div','report-status','仅填写页面，尚未发布商品。'));
@@ -643,7 +663,7 @@
     }
     detail.append(el('div',`report-status ${report.readyForFields?'good':'warn'}`,report.readyForFields?'可以尝试填写已核对的字段；商品尚未发布。':'仍有待核对项目，请补充资料或处理当前页面。'));
     const grid=el('dl','detail-grid');
-    for(const [name,value] of [['检查时间',when(report.checkedAt)],['SKU',report.product?.sku],['商品名称',report.product?.name],['货盘描述',report.supplierFacts?.description],['货盘品牌',report.supplierFacts?.brand],['货盘成色',report.supplierFacts?.condition],['库存',report.product?.stock??'待核对'],['采购价',currency(report.product?.priceCents)],['可领取图片套数',report.photos?.availableCount??'待核对'],['自己的图片套数',report.photos?.ownCount??'待核对'],['图片总套数',report.photos?.totalCount??'待核对'],['网页标题',report.page?.title],['网页地址',report.page?.url],['当前账号',report.page?.accountLabel]])if(value!==undefined&&value!==null&&value!=='')grid.append(el('dt','',name),el('dd','',value));
+    for(const [name,value] of [['检查时间',when(report.checkedAt)],['SKU',report.product?.sku],['商品名称',report.product?.name],['货盘描述',report.supplierFacts?.description],['货盘品牌',report.supplierFacts?.brand],['货盘成色',report.supplierFacts?.condition],['库存',report.product?.stock??'待核对'],[salesOnly()?'货盘价格':'采购价',currency(report.product?.priceCents)],['可领取图片套数',report.photos?.availableCount??'待核对'],['自己的图片套数',report.photos?.ownCount??'待核对'],['图片总套数',report.photos?.totalCount??'待核对'],['网页标题',report.page?.title],['网页地址',report.page?.url],['当前账号',report.page?.accountLabel]])if(value!==undefined&&value!==null&&value!=='')grid.append(el('dt','',name),el('dd','',value));
     detail.append(grid);
     if(Array.isArray(report.checks)&&report.checks.length){detail.append(el('h3','','逐项核对'));const checks=el('div','report-checks');for(const item of report.checks.slice(0,60)){const row=el('div','report-check'),body=el('div');body.append(el('b','',typeof item.name==='string'?item.name:'检查项'));if(typeof item.detail==='string')body.append(el('p','',item.detail));row.append(badge(item.ok===true?'已通过':'待核对',item.ok===true?'good':'warn'),body);checks.append(row);}detail.append(checks);}
     reportList(detail,'缺少资料',report.missing,'warning');
@@ -675,7 +695,7 @@
     if(!plan&&state.profiles.length===1)fields.profileId.value=String(state.profiles[0].id);
     updateProductInfo(!plan);planDialog.showModal();
   }
-  function updateProductInfo(resetPrice=false) {const product=find(state.products,planForm.elements.productId.value);$('#plan-product-info').textContent=product?`SKU ${product.sku || '—'} · 库存 ${product.stock ?? '待核对'} · 采购价 ${currency(product.priceCents)} · 可用图片 ${product.photoSetsAvailable ?? '待核对'} 套`:'选择货盘商品后查看库存和图片。';if(resetPrice){planForm.elements.listingPrice.value='';planForm.elements.minOffer.value='';for(const field of Object.values(listingFields))planForm.elements[field].value='';} }
+  function updateProductInfo(resetPrice=false) {const product=find(state.products,planForm.elements.productId.value);$('#plan-product-info').textContent=product?`SKU ${product.sku || '—'} · 库存 ${product.stock ?? '待核对'} · ${salesOnly()?'货盘价格':'采购价'} ${currency(product.priceCents)} · 可用图片 ${product.photoSetsAvailable ?? '待核对'} 套`:'选择货盘商品后查看库存和图片。';if(resetPrice){planForm.elements.listingPrice.value='';planForm.elements.minOffer.value='';for(const field of Object.values(listingFields))planForm.elements[field].value='';} }
 
   document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener('click',()=>changePage(button.dataset.page)));
   const workspaceMenu=$('#workspace-commerce-menu'),workspaceToggle=$('#workspace-commerce-toggle');
@@ -715,10 +735,10 @@
   act($('#run-once'),'once',()=>api.runOnce(),'检查完成，请查看任务记录');
   act($('#sync'),'sync',()=>api.sync(),'货盘已同步');
   act($('#connect'),'connect',()=>api.connect(),()=>isConnected()?'货盘连接成功':'已完成连接检查，请查看结果');
-  settingsForm.addEventListener('submit',event=>{event.preventDefault();void request('settings',async()=>{const fields=settingsForm.elements, baseURL=fields.baseURL.value.trim();if(baseURL){const url=new URL(baseURL);if(!['https:','http:'].includes(url.protocol))throw Error('API 地址必须使用 HTTP 或 HTTPS。');}const input={baseURL,token:fields.token.value,clearToken:fields.clearToken.checked,backgroundEnabled:fields.backgroundEnabled.checked,maxConcurrent:integer(fields.maxConcurrent.value,1,3,'并行环境数'),perOrderLimitCents:cents(fields.perOrderLimit.value,'单笔采购上限'),dailyLimitCents:cents(fields.dailyLimit.value,'每日采购上限'),fulfillmentMethod:fields.fulfillmentMethod.value,accountType:'personal',market:'FR'};if(input.dailyLimitCents&&input.perOrderLimitCents>input.dailyLimitCents)throw Error('单笔采购上限不能高于每日采购上限。');await api.saveSettings(input);fields.token.value='';fields.clearToken.checked=false;settingsDirty=false;},'设置已保存').catch(()=>{});});
+  settingsForm.addEventListener('submit',event=>{event.preventDefault();void request('settings',async()=>{const fields=settingsForm.elements, baseURL=fields.baseURL.value.trim();if(baseURL){const url=new URL(baseURL);if(!['https:','http:'].includes(url.protocol))throw Error('API 地址必须使用 HTTP 或 HTTPS。');}const input={baseURL,token:fields.token.value,clearToken:fields.clearToken.checked,backgroundEnabled:fields.backgroundEnabled.checked,maxConcurrent:integer(fields.maxConcurrent.value,1,3,'并行环境数'),perOrderLimitCents:salesOnly()?0:cents(fields.perOrderLimit.value,'单笔采购上限'),dailyLimitCents:salesOnly()?0:cents(fields.dailyLimit.value,'每日采购上限'),fulfillmentMethod:salesOnly()?(state.settings.fulfillmentMethod||'wms'):fields.fulfillmentMethod.value,accountType:'personal',market:'FR'};if(input.dailyLimitCents&&input.perOrderLimitCents>input.dailyLimitCents)throw Error('单笔采购上限不能高于每日采购上限。');await api.saveSettings(input);fields.token.value='';fields.clearToken.checked=false;settingsDirty=false;},'设置已保存').catch(()=>{});});
   planForm.addEventListener('submit',event=>{event.preventDefault();$('#plan-error').hidden=true;void request('plan',async()=>{const fields=planForm.elements,product=find(state.products,fields.productId.value);if(!find(state.profiles,fields.profileId.value))throw Error('请选择可用的浏览器环境。');if(!product)throw Error('请选择货盘商品。');const listingPriceCents=cents(fields.listingPrice.value,'上架价格',true),minOfferCents=cents(fields.minOffer.value,'最低接受价格',true);if(minOfferCents>listingPriceCents)throw Error('最低接受价格不能高于上架价格。');const input={profileId:fields.profileId.value,productId:fields.productId.value,sku:product.sku || '',name:product.name || product.sku || '',targetCount:integer(fields.targetCount.value,1,1000,'累计销售目标'),listingPriceCents,minOfferCents,currency:'EUR',enabled:fields.enabled.checked,autoReply:fields.autoReply.checked,autoAcceptOffers:fields.autoAcceptOffers.checked,reuseOwnPhotos:fields.reuseOwnPhotos.checked,replyPolicy:fields.replyPolicy.value.trim(),listing:Object.fromEntries(Object.entries(listingFields).map(([key,field])=>[key,fields[field].value.trim()]))};if(fields.id.value)input.id=fields.id.value;await api.savePlan(input);planDialog.close();},'计划已保存').catch(error=>{$('#plan-error').textContent=cleanError(error);$('#plan-error').hidden=false;});});
-  $('#reconcile-form').addEventListener('submit',event=>{event.preventDefault();void request('resolve',()=>api.resolve(selectedJobId,'reconcile',{}),'原订单检查完成，请查看任务状态').catch(()=>{});});
-  $('#retry-form').addEventListener('submit',event=>{event.preventDefault();if(find(state.jobs,selectedJobId)?.canRetry!==true)return;void request('resolve',()=>api.resolve(selectedJobId,'retry',{}),'任务已重新排队，尚未执行').catch(()=>{});});
+  $('#reconcile-form').addEventListener('submit',event=>{event.preventDefault();if(salesOnly())return;void request('resolve',()=>api.resolve(selectedJobId,'reconcile',{}),'原订单检查完成，请查看任务状态').catch(()=>{});});
+  $('#retry-form').addEventListener('submit',event=>{event.preventDefault();const job=find(state.jobs,selectedJobId);if(job?.canRetry!==true||salesOnly()&&purchaseJob(job))return;void request('resolve',()=>api.resolve(selectedJobId,'retry',{}),'任务已重新排队，尚未执行').catch(()=>{});});
   api.onState(applyState);
   void refresh().catch(error=>{$('#load-error').textContent=`无法读取工作台状态：${cleanError(error)}`;$('#load-error').hidden=false;});
 })();

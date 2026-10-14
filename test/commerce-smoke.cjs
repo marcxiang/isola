@@ -65,15 +65,17 @@ module.exports = async function commerceSmoke(api, check) {
       view.webContents.on('render-process-gone',(_,details)=>consoleErrors.push('Renderer exited: '+details.reason));
       await loading;await frames();
       const rendered=await view.webContents.executeJavaScript(`({title:document.title,node:typeof require,bridge:typeof window.commerce.state,ready:document.querySelector('#readiness-title').textContent,capabilities:document.querySelector('#readiness-capabilities').textContent,manualPublish:typeof window.commerce.submitPublication,association:typeof window.commerce.associatePublishedListing,hidden:document.querySelector('#load-error').hidden})`);
-      assert.equal(rendered.node,'undefined');assert.equal(rendered.bridge,'function');assert.match(rendered.title,/运营工作台/);assert.equal(rendered.ready,'手动上架可用 · 后台业务待验证');assert.equal(rendered.hidden,true);
+      const state=await invoke('state'),salesOnly=state.readiness.salesOnly===true,listingReady=state.readiness.capabilities?.listingPublish===true||state.readiness.capabilities?.listingPublish===undefined&&state.readiness.capabilities?.publish===true;
+      assert.equal(rendered.node,'undefined');assert.equal(rendered.bridge,'function');assert.match(rendered.title,/运营工作台/);assert.equal(rendered.ready,listingReady?'后台部分流程可用':'手动上架可用 · 后台业务待验证');assert.equal(rendered.hidden,true);
       assert.equal(rendered.manualPublish,'function');assert.equal(rendered.association,'function');
-      for(const label of ['资料','照片','手动发布','原刊登','自动刊登','消息','报价','运单','采购'])assert.ok(rendered.capabilities.includes(label),'Missing readiness capability: '+label);
+      for(const label of ['资料','照片','手动发布','原刊登','自动刊登','消息','报价',...(salesOnly?['成交确认','卖出后补上']:['运单','采购'])])assert.ok(rendered.capabilities.includes(label),'Missing readiness capability: '+label);
       const capabilityRows=await view.webContents.executeJavaScript(`Array.from(document.querySelectorAll('#readiness-capabilities li'),item=>item.textContent)`);
-      assert.equal(capabilityRows.length,6);assert.match(capabilityRows[1],/手动发布.*核对后可用/);assert.match(capabilityRows[2],/原刊登关联.*核对后可用/);for(const row of capabilityRows.slice(3))assert.match(row,/待验证/);
-      const state=await invoke('state');assert.equal(state.readiness.vinted,'unverified');assert.equal(state.settings.backgroundEnabled,false);assert.equal(state.running,false);assert.deepEqual(consoleErrors,[]);
-      for(const capability of ['publish','messages','offers','shippingLabel','procurement'])assert.equal(state.readiness.capabilities[capability],false,'Readiness copy must not enable '+capability);
+      assert.equal(capabilityRows.length,salesOnly?8:7);assert.match(capabilityRows[1],/手动发布.*核对后可用/);assert.match(capabilityRows[2],/原刊登关联.*核对后可用/);assert.match(capabilityRows[3],listingReady?/可用/:/待验证/);for(const row of capabilityRows.slice(4))assert.match(row,/待验证/);
+      assert.equal(state.settings.backgroundEnabled,false);assert.equal(state.running,false);assert.deepEqual(consoleErrors,[]);
+      for(const capability of ['messages','offers','shippingLabel','procurement'])assert.equal(state.readiness.capabilities[capability],false,'Readiness copy must not enable '+capability);
+      if(salesOnly){assert.equal(state.readiness.capabilities.saleConfirmation,false);assert.doesNotMatch(rendered.capabilities,/采购|运单/);}
       assert.equal(requests.length,0);assert.equal(engine.db.publications.submissions.length,0);
-      return {isolatedRenderer:true,readiness:state.readiness.vinted,manualControlsAvailable:true,backgroundCapabilitiesDisabled:5,externalRequests:0};
+      return {isolatedRenderer:true,readiness:state.readiness.vinted,manualControlsAvailable:true,automaticListingAvailable:listingReady,salesOnly,externalRequests:0};
     });
 
     await check('commerce settings form encrypts local API token and never returns it through UI state',async()=>{
@@ -105,7 +107,7 @@ module.exports = async function commerceSmoke(api, check) {
 
     await check('commerce plan form rejects fractional cents and requires explicit sale prices',async()=>{
       const blank=await view.webContents.executeJavaScript(`(()=>{document.querySelector('[data-page="plans"]').click();document.querySelector('#new-plan').click();const form=document.querySelector('#plan-form');form.elements.profileId.value=${JSON.stringify(profile.id)};form.elements.productId.value='commerce-product-1';form.elements.productId.dispatchEvent(new Event('change',{bubbles:true}));return {price:form.elements.listingPrice.value,min:form.elements.minOffer.value,enabled:form.elements.enabled.checked,help:document.querySelector('#plan-product-info').textContent};})()`);
-      assert.equal(blank.price,'');assert.equal(blank.min,'');assert.equal(blank.enabled,false);assert.match(blank.help,/采购价/);
+      assert.equal(blank.price,'');assert.equal(blank.min,'');assert.equal(blank.enabled,false);assert.match(blank.help,engine.state().readiness.salesOnly?/货盘价格/:/采购价/);
       await view.webContents.executeJavaScript(`(()=>{const form=document.querySelector('#plan-form');form.elements.targetCount.value='3';form.elements.listingPrice.value='24.905';form.elements.minOffer.value='19.50';form.requestSubmit();return true;})()`);
       await waitFor(()=>view.webContents.executeJavaScript(`!document.querySelector('#plan-error').hidden`),'fractional-cent validation');
       assert.equal(engine.db.plans.length,0);assert.match(await view.webContents.executeJavaScript(`document.querySelector('#plan-error').textContent`),/两位小数/);
@@ -155,16 +157,16 @@ module.exports = async function commerceSmoke(api, check) {
       return {wrongAccountRejected:true,sourceChangeRejected:true,sameAccountRotationPreservedPlan:true};
     });
 
-    await check('unverified production Vinted adapter pauses queue with zero supplier or marketplace writes',async()=>{
+    await check('sales runtime keeps a closed account queued with zero supplier or marketplace writes',async()=>{
       await invoke('setPlanEnabled',plan.id,true);
       const before=requests.length;
       await view.webContents.executeJavaScript(`document.querySelector('#run-once').click()`);
-      await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='needs_review'),'unverified live adapter review state');await frames();
-      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'needs_review');assert.match(job.error,/未联调|未验证/);assert.equal(job.mutationPending,false);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
+      await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='queued'&&job.blockedReason==='PROFILE_NOT_OPEN'),'closed environment waiting state');await frames();
+      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'queued');assert.equal(job.blockedReason,'PROFILE_NOT_OPEN');assert.match(job.error,/打开.*环境/);assert.equal(job.mutationPending,false);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
       assert.equal(requests.length,before);assert.equal(requests.filter(request=>request.method!=='GET').length,0);
       await view.webContents.executeJavaScript(`document.querySelector('[data-page="jobs"]').click();document.querySelector('#jobs button').click()`);await frames();
       const receipt=await view.webContents.executeJavaScript(`({text:document.querySelector('#job-detail').innerText,reconcileHidden:document.querySelector('#reconcile-form').hidden})`);
-      assert.match(receipt.text,/需要核对/);assert.match(receipt.text,/未联调|未验证/);assert.equal(receipt.reconcileHidden,true);
+      assert.match(receipt.text,/待执行|等待|排队/);assert.match(receipt.text,/打开.*环境/);assert.equal(receipt.reconcileHidden,true);
       await view.webContents.executeJavaScript(`document.querySelector('#job-dialog').close()`);
       await invoke('runOnce');assert.equal(engine.db.jobs.length,1);assert.equal(requests.length,before);
       return {jobState:job.state,writeRequests:0,duplicateJobs:0};

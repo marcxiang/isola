@@ -4,6 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
+const {inspectQueue}=require('../src/commerce-scheduler.cjs');
 
 module.exports=async function commerceDashboardSmoke(_api,check){
   const {BrowserWindow}=require('electron');
@@ -33,7 +34,7 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       assert.equal(result.readiness,'资料准备可用 · 后台业务待验证');
       for(const label of ['资料','照片','手动发布','原刊登','自动刊登','消息','报价','运单','采购'])assert.ok(result.capabilities.includes(label),'Missing readiness capability: '+label);
       const capabilityRows=await js(`Array.from(document.querySelectorAll('#readiness-capabilities li'),item=>item.textContent)`);
-      assert.equal(capabilityRows.length,6);assert.match(capabilityRows[1],/手动发布.*未接通/);assert.match(capabilityRows[2],/原刊登关联.*未接通/);for(const row of capabilityRows.slice(3))assert.match(row,/待验证/);
+      assert.equal(capabilityRows.length,7);assert.match(capabilityRows[1],/手动发布.*未接通/);assert.match(capabilityRows[2],/原刊登关联.*未接通/);for(const row of capabilityRows.slice(3))assert.match(row,/待验证/);
       const pending=result.rows.find(row=>row.id==='unpublished'),listed=result.rows.find(row=>row.id==='listed'),review=result.rows.find(row=>row.id==='review');
       assert.equal(pending.state,'pending');assert.match(pending.text,/待发布 · 暂无回执/);assert.doesNotMatch(pending.text,/已有在售记录/);
       assert.match(pending.text,/Paris A/);assert.match(pending.text,/5,00/);assert.match(pending.text,/3,00/);assert.match(pending.text,/0 \/ 2/);
@@ -109,6 +110,60 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       assert.deepEqual(result.calls.slice(before),[{name:'inspectPublication',args:['unpublished']}]);assert.equal(result.open,true);assert.equal(result.title,'核对发布条件');assert.match(result.text,/请先上传并核对照片/);
       assert.equal(result.calls.some(call=>['submitPublication','associatePublishedListing'].includes(call.name)),false);
       await js(`document.querySelector('#preflight-dialog').close()`);return {planOnlyInspection:true,publicationWrites:0,associationWrites:0};
+    });
+    await check('sales-only dashboard exposes each automatic capability independently of the global readiness label',async()=>{
+      const changed=structuredClone(fixture);changed.readiness={vinted:'unverified',salesOnly:true,capabilities:{listingPublish:true,messages:false,offers:false,saleConfirmation:false,shippingLabel:true,procurement:true}};await update(changed);
+      const before=(await js('window.dashboardFixture.calls()')).length;
+      const result=await js(`({title:document.querySelector('#readiness-title').textContent,rows:Array.from(document.querySelectorAll('#readiness-capabilities li'),item=>item.textContent),runner:document.querySelector('#operations-runner-detail').textContent,plan:document.querySelector('[data-plan-id="unpublished"]').innerText,listed:document.querySelector('[data-plan-id="listed"]').innerText})`);
+      assert.equal(result.title,'后台部分流程可用');assert.equal(result.rows.length,8);assert.ok(result.rows.some(row=>/自动刊登.*可用/.test(row)));
+      for(const label of ['消息回复','报价接受','成交确认','卖出后补上'])assert.ok(result.rows.some(row=>row.includes(label)&&row.includes('待验证')),label);
+      assert.doesNotMatch(result.rows.join(' '),/采购|运单/);assert.match(result.runner,/自动刊登：可用/);assert.match(result.runner,/成交确认：待验证/);
+      assert.match(result.plan,/启动调度后检查库存、图片与刊登资料/);assert.doesNotMatch(result.plan,/后台自动刊登尚未启用/);assert.match(result.listed,/成交确认.*仍待验证/);
+      assert.equal((await js('window.dashboardFixture.calls()')).length,before);return {globalUnverifiedAllowsReadyStage:true,unreadyStagesExplicit:4,externalActions:0};
+    });
+    await check('sales-only settings remove purchase controls and cannot restore old procurement actions',async()=>{
+      const changed=structuredClone(fixture);changed.readiness={vinted:'unverified',salesOnly:true,capabilities:{listingPublish:true,messages:false,offers:false,saleConfirmation:false}};changed.settings={...changed.settings,perOrderLimitCents:2500,dailyLimitCents:10000,fulfillmentMethod:'self'};changed.jobs[0].canRetry=true;changed.jobs[0].result={externalId:'original-order'};await update(changed);
+      await js(`document.querySelector('[data-page="settings"]').click()`);
+      const settings=await js(`({title:document.querySelector('#execution-rules-title').textContent,hidden:Array.from(document.querySelectorAll('[data-purchase-control]')).every(item=>item.hidden),disabled:['perOrderLimit','dailyLimit','fulfillmentMethod'].every(name=>document.querySelector('#settings-form').elements[name].disabled),text:document.querySelector('#page-settings').innerText})`);
+      assert.equal(settings.title,'后台售卖规则');assert.equal(settings.hidden,true);assert.equal(settings.disabled,true);assert.doesNotMatch(settings.text,/采购上限|货盘履约方式/);
+      const before=(await js('window.dashboardFixture.calls()')).length;
+      await js(`(()=>{const form=document.querySelector('#settings-form');form.elements.perOrderLimit.value='bad';form.elements.dailyLimit.value='999999';form.requestSubmit();})()`);await frames();
+      const saved=(await js('window.dashboardFixture.calls()')).slice(before).find(call=>call.name==='saveSettings');assert.ok(saved);assert.equal(saved.args[0].perOrderLimitCents,0);assert.equal(saved.args[0].dailyLimitCents,0);assert.equal(saved.args[0].fulfillmentMethod,'self');
+      await js(`document.querySelector('[data-page="jobs"]').click();Array.from(document.querySelectorAll('#jobs tr')).find(row=>row.innerText.includes('丝巾')).querySelector('button').click()`);await frames();
+      const detail=await js(`({reconcileHidden:document.querySelector('#reconcile-form').hidden,retryHidden:document.querySelector('#retry-form').hidden,text:document.querySelector('#job-detail').textContent})`);
+      assert.equal(detail.reconcileHidden,true);assert.equal(detail.retryHidden,true);assert.match(detail.text,/旧版的历史任务/);
+      const beforeResolve=(await js('window.dashboardFixture.calls()')).length;
+      await js(`document.querySelector('#reconcile-form').dispatchEvent(new Event('submit',{cancelable:true}));document.querySelector('#retry-form').dispatchEvent(new Event('submit',{cancelable:true}))`);await frames();assert.equal((await js('window.dashboardFixture.calls()')).length,beforeResolve);
+      await js(`document.querySelector('#job-dialog').close()`);return {purchaseControlsHidden:true,purchaseCapsSavedAsZero:true,historicalActionsBlocked:true};
+    });
+    await check('readiness refresh revokes missing or false capabilities and restores legacy settings without stale flags',async()=>{
+      const changed=structuredClone(fixture);changed.readiness={vinted:'verified',salesOnly:true,capabilities:{listingPublish:false,publish:true,messages:true,offers:false,saleConfirmation:true}};await update(changed);
+      let rows=await js(`Array.from(document.querySelectorAll('#readiness-capabilities li'),item=>item.textContent)`);
+      for(const label of ['自动刊登','报价接受','卖出后补上'])assert.ok(rows.some(row=>row.includes(label)&&row.includes('待验证')),label);
+      for(const label of ['消息回复','成交确认'])assert.ok(rows.some(row=>row.includes(label)&&row.includes('可用')),label);
+      changed.readiness={vinted:'verified',salesOnly:true};await update(changed);rows=await js(`Array.from(document.querySelectorAll('#readiness-capabilities li'),item=>item.textContent)`);for(const row of rows.slice(3))assert.match(row,/待验证/);
+      await update(fixture);await js(`document.querySelector('[data-page="settings"]').click()`);
+      const legacy=await js(`({hidden:Array.from(document.querySelectorAll('[data-purchase-control]')).some(item=>item.hidden),disabled:document.querySelector('#settings-form').elements.perOrderLimit.disabled,title:document.querySelector('#execution-rules-title').textContent,capabilities:document.querySelector('#readiness-capabilities').textContent})`);
+      assert.equal(legacy.hidden,false);assert.equal(legacy.disabled,false);assert.equal(legacy.title,'执行与采购规则');assert.match(legacy.capabilities,/运单与采购/);assert.deepEqual(errors,[]);
+      return {explicitFalseWins:true,staleCapabilitiesRevoked:true,legacyCompatible:true};
+    });
+    await check('queued jobs project real scheduler wait conditions into plan cards and task detail without changing job state',async()=>{
+      const changed=structuredClone(fixture),at='2026-10-14T12:00:00.000Z';changed.readiness={vinted:'unverified',salesOnly:true,capabilities:{publish:true,listingPublish:true,messages:false,offers:false,saleConfirmation:false}};
+      changed.profiles=changed.profiles.map(profile=>({...profile,status:profile.id==='paris'?'closed':'running'}));
+      changed.jobs=[{id:'queued-wait',dedupeKey:'listing:unpublished:0',planId:'unpublished',productId:'vacuum',profileId:'paris',type:'listing',state:'queued',step:'pending',payload:{cycle:0},operation:null,mutationPending:false,result:null,updatedAt:at}];
+      const project=()=>{const report=inspectQueue({...changed,requireVerifiedAccount:true,accounts:[],observedAccounts:[],maxConcurrent:2},{now:Date.parse(at)});changed.jobs[0].scheduling=report.jobs[0];assert.deepEqual(report.runnableJobIds,[]);assert.equal(changed.jobs[0].state,'queued');return report.jobs[0];};
+      const before=(await js('window.dashboardFixture.calls()')).length;
+      let scheduling=project();assert.equal(scheduling.reasonCode,'PROFILE_NOT_OPEN');await update(changed);await js(`document.querySelector('[data-page="overview"]').click()`);
+      const planText=()=>js(`({state:document.querySelector('[data-plan-id="unpublished"]').dataset.operation,overview:document.querySelector('[data-plan-id="unpublished"]').textContent,plan:document.querySelector('.plan-card[data-listing-plan-id="unpublished"]').textContent})`);
+      let shown=await planText();assert.equal(shown.state,'pending');for(const text of [shown.overview,shown.plan]){assert.ok(text.includes(scheduling.reason));assert.ok(text.includes(scheduling.nextAction));assert.match(text,/等待条件/);}
+      await js(`Array.from(document.querySelectorAll('[data-plan-id="unpublished"] button')).find(button=>button.textContent==='任务记录').click();document.querySelector('#jobs button').click()`);await frames();
+      let detail=await js(`document.querySelector('#job-detail').textContent`);assert.match(detail,/当前等待条件/);assert.ok(detail.includes(scheduling.reason));assert.ok(detail.includes(scheduling.nextAction));assert.match(detail,/待执行/);
+      changed.profiles[0].status='running';scheduling=project();assert.equal(scheduling.reasonCode,'ACCOUNT_NOT_BOUND');await update(changed);
+      shown=await planText();detail=await js(`document.querySelector('#job-detail').textContent`);for(const text of [shown.overview,shown.plan,detail]){assert.ok(text.includes(scheduling.reason));assert.ok(text.includes(scheduling.nextAction));assert.doesNotMatch(text,/该环境尚未就绪/);}assert.match(shown.overview,/等待核对/);
+      changed.plans[0].enabled=false;scheduling=project();assert.equal(scheduling.reasonCode,'PLAN_PAUSED');await update(changed);shown=await planText();detail=await js(`document.querySelector('#job-detail').textContent`);for(const text of [shown.overview,shown.plan,detail]){assert.ok(text.includes(scheduling.reason));assert.ok(text.includes(scheduling.nextAction));}assert.match(shown.plan,/已暂停/);
+      changed.plans[0].enabled=true;delete changed.jobs[0].scheduling;await update(changed);shown=await planText();detail=await js(`document.querySelector('#job-detail').textContent`);assert.equal(shown.state,'pending');assert.match(shown.plan,/启动调度后检查库存、图片与刊登资料/);assert.doesNotMatch(detail,/当前等待条件/);assert.doesNotMatch(shown.plan,/该销售计划已暂停|该环境尚未绑定/);
+      assert.equal((await js('window.dashboardFixture.calls()')).length,before);await js(`document.querySelector('#job-dialog').close();document.querySelector('#clear-job-plan').click()`);await update(fixture);assert.deepEqual(errors,[]);
+      return {schedulerReasons:['PROFILE_NOT_OPEN','ACCOUNT_NOT_BOUND','PLAN_PAUSED'],queuedStatePreserved:true,legacyWithoutScheduling:true,externalActions:0};
     });
   }finally{window.destroy();fs.rmSync(dir,{recursive:true,force:true});}
 };

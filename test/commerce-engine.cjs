@@ -46,7 +46,7 @@ async function fixture(t,{client:clientOverrides={},adapter:adapterOverrides={},
   engine.db.products=[normalizeProduct(rawProduct),normalizeProduct({...rawProduct,id:'product-2',sku:'SKU-2'})];engine.persist();
   const savedPlan=plan===false?null:engine.savePlan(planInput(plan));
   const listed=async(p=savedPlan)=>{p.activeListingId='existing-'+p.id;p.status='listed';engine.persist();return p;};
-  const sale=(p=savedPlan,overrides={})=>({verified:true,type:'sale',id:'sale-'+p.id,profileId:p.profileId,listingId:p.activeListingId,paid:true,currency:'EUR',priceCents:2000,quantity:1,buyerUsername:'test-buyer',...overrides});
+  const sale=(p=savedPlan,overrides={})=>({verified:true,type:'sale',id:'sale-'+p.id,profileId:p.profileId,listingId:p.activeListingId,paid:true,cancelled:false,observedAt:new Date().toISOString(),currency:'EUR',priceCents:2000,quantity:1,buyerUsername:'test-buyer',...overrides});
   return {dir,engine,client,adapter,calls,counts,options,plan:savedPlan,listed,sale};
 }
 
@@ -296,4 +296,76 @@ test('market account binding persists its member identity and rejects a silent a
  assert.throws(()=>engine.bindMarketAccount(plan.profileId,{...account,memberId:'98765',profileURL:'https://www.vinted.fr/member/98765'}),/不同/);
  assert.throws(()=>engine.bindMarketAccount(plan.profileId,{...account,profileURL:'https://www.vinted.fr/member/98765'}));assert.throws(()=>engine.bindMarketAccount(plan.profileId,{...account,verified:false}));assert.throws(()=>engine.bindMarketAccount('missing',account));
  await engine.close();const restored=new CommerceEngine(options);try{assert.equal(restored.state().profiles.find(p=>p.id===plan.profileId).marketAccount.memberId,'123456');restored.bindMarketAccount(plan.profileId,{...account,username:'renamed-fixture'});assert.equal(restored.db.marketAccounts.length,1);}finally{await restored.close();}
+});
+
+test('platform events need a bounded buyer identity and duplicate messages/offers cannot change facts',async t=>{
+ const f=await fixture(t);await f.listed();
+ for(const buyerUsername of ['',null,' buyer ','buyer\nother'])assert.throws(()=>f.engine.ingestEvent(f.plan.id,f.sale(f.plan,{buyerUsername})),{code:'EVENT_UNVERIFIED'});
+ for(const type of ['message','offer']){
+  const event=f.sale(f.plan,{type,id:'event-'+type,text:type==='message'?'Question one':undefined}),job=f.engine.ingestEvent(f.plan.id,event);
+  assert.equal(f.engine.ingestEvent(f.plan.id,{...event}).id,job.id);
+  for(const patch of [{buyerUsername:'another-buyer'},{listingId:'other-listing'},{text:'Changed question'},{priceCents:2100}])assert.throws(()=>f.engine.ingestEvent(f.plan.id,{...event,...patch}),{code:'EVENT_CONFLICT'});
+  event.buyerUsername='mutated-after-ingest';assert.equal(job.payload.buyerUsername,'test-buyer');
+ }
+ assert.equal(f.counts.order,0);
+});
+
+test('an acceptable price never authorizes accepting a different buyer or changed offer',async t=>{
+ for(const patch of [{buyerUsername:'other-buyer'},{buyerMemberId:'999'},{profileId:'profile-2'},{priceCents:1900}]){
+  const f=await fixture(t,{adapter:{readOffer:async event=>({...event,status:'pending',...patch})}});await f.listed();
+  const job=f.engine.ingestEvent(f.plan.id,f.sale(f.plan,{type:'offer',id:'offer-original',priceCents:1800}));await f.engine.runOnce();
+  assert.equal(job.state,'needs_review');assert.equal(f.calls.filter(row=>row.name==='acceptOffer').length,0);
+ }
+});
+
+test('bound account identity and cancelled or over-price sales are never inferred from a verified flag',async t=>{
+ const f=await fixture(t);await f.listed();f.engine.bindMarketAccount(f.plan.profileId,{verified:true,memberId:'123',username:'seller',profileURL:'https://www.vinted.fr/member/123'});
+ for(const patch of [{},{memberId:'456'},{memberId:'123',cancelled:true},{memberId:'123',cancelled:undefined},{memberId:'123',priceCents:2600}])assert.throws(()=>f.engine.ingestEvent(f.plan.id,f.sale(f.plan,patch)));
+ assert.equal(f.engine.db.sales.length,0);assert.equal(f.plan.completedCount,0);
+});
+
+test('cancelled and falsely completed sales cannot silently seed a replacement listing',async t=>{
+ const f=await fixture(t);await f.listed();const job=f.engine.ingestEvent(f.plan.id,f.sale());
+ for(const change of [{state:'cancelled',result:null},{state:'rejected',result:null},{state:'completed',result:{externalId:'supplier-order'}},{state:'completed',result:{externalId:'supplier-order',verified:'yes'}}]){
+  Object.assign(job,change);f.engine.seed();assert.equal(f.engine.db.jobs.filter(row=>row.type==='listing').length,0);
+ }
+ Object.assign(job,{state:'completed',result:{externalId:'supplier-order',verified:true}});f.engine.seed();assert.equal(f.engine.db.jobs.filter(row=>row.type==='listing').length,1);
+});
+
+async function publishedFixture(t,options={}){
+ const f=await fixture(t,options),{buildPublicationProof,FORM_URL}=require('../src/vinted-publication.cjs'),{publicationJournal}=require('../src/vinted-publish-submit.cjs');
+ const at=new Date().toISOString(),profileId=f.plan.profileId,listing={title:'Local test accessory',description:'Local fixture only.',categoryPath:['Maison','Accessoires'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'};
+ Object.assign(f.plan,{listing,status:'ready'});f.engine.bindMarketAccount(profileId,{verified:true,memberId:'123',username:'seller',profileURL:'https://www.vinted.fr/member/123'});
+ const account=f.engine.db.marketAccounts[0],claim={id:'journal-claim',setId:'journal-set',profileId,productId:f.plan.productId,images:[{id:'image-1'}],listings:[]},documentKey='fixture-document';f.engine.db.claims.push(claim);f.engine.persist();
+ const input={plan:f.plan,product:{id:f.plan.productId,sku:f.plan.sku,stock:1},claim,expectedAccount:account,evidence:{profileId,tabId:'fixture-tab',documentKey,url:FORM_URL,observedAt:at,challenge:false,account:{...account,verified:true},form:{documentKey,complete:true,invalidFields:[],unknownFields:[],fields:Object.entries({...listing,priceCents:f.plan.listingPriceCents}).map(([field,value])=>({field,value,verified:true}))},photos:{documentKey,profileId,productId:f.plan.productId,claimId:claim.id,setId:claim.setId,count:1,signature:'a'.repeat(64),verified:true,busy:false,errorCount:0},publication:{documentKey,count:1,observed:true,label:'Ajouter',enabled:true}}};
+ const journal=publicationJournal(f.engine),proof=buildPublicationProof(input),record=await journal.prepare(proof);await journal.dispatchOnce(record.id,proof,async()=>{});
+ await journal.reconcile(record.id,{verified:true,mappingVerified:true,publicationStatus:'published',observedAt:new Date().toISOString(),profileId,account:{...account,verified:true},seller:{...account,verified:true},ownedByCurrentAccount:true,listingId:'98765',url:'https://www.vinted.fr/items/98765',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:documentKey},priceKind:'item',priceCents:f.plan.listingPriceCents,currency:'EUR',title:listing.title,photos:{verified:true,count:1,signature:'a'.repeat(64)}});
+ f.plan=f.engine.plan(f.plan.id);return {...f,journal,record,publicationJournal};
+}
+
+test('a journal-backed sale closes its listing, counts once and creates its original task in one snapshot',async t=>{
+ const f=await publishedFixture(t),event=f.sale(f.plan,{memberId:'123'}),snapshots=[],persist=f.engine.persist.bind(f.engine);
+ f.engine.persist=()=>{snapshots.push(JSON.parse(JSON.stringify(f.engine.db)));persist();};
+ assert.throws(()=>f.engine.ingestEvent(f.plan.id,event),{code:'PUBLICATION_SALE_TRANSACTION_REQUIRED'});
+ const job=await f.engine.ingestVerifiedEvent(f.plan.id,event);assert.equal(snapshots.length,1);
+ const saved=snapshots[0];assert.equal(saved.publications.submissions[0].closedSale.orderId,event.id);assert.equal(saved.plans[0].completedCount,1);assert.equal(saved.plans[0].activeListingId,null);assert.equal(saved.sales[0].jobId,job.id);assert.equal(saved.jobs[0].id,job.id);
+ assert.equal((await f.engine.ingestVerifiedEvent(f.plan.id,event)).id,job.id);assert.equal(snapshots.length,1);assert.equal(f.publicationJournal(f.engine),f.journal);assert.deepEqual(f.journal.state(),f.engine.db.publications);
+});
+
+test('a failed journal-backed sale snapshot keeps the complete old disk state and faults the journal',async t=>{
+ const f=await publishedFixture(t),before=fs.readFileSync(f.engine.file,'utf8'),event=f.sale(f.plan,{memberId:'123'});
+ f.engine.persist=()=>{throw Error('Simulated durable write failure');};
+ await assert.rejects(f.engine.ingestVerifiedEvent(f.plan.id,event),{code:'PUBLICATION_STORAGE_FAILED'});assert.equal(f.engine.faulted,true);assert.equal(f.journal.faulted,true);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.db.sales.length,0);assert.equal(f.engine.plan(f.plan.id).completedCount,0);assert.equal(f.engine.db.publications.submissions[0].closedSale,undefined);
+});
+
+test('sales-only mode confirms a sale without procurement and unlocks only the next matching cycle',async t=>{
+ const calls=[],f=await publishedFixture(t,{adapter:{readiness:()=>({salesOnly:true,capabilities:{saleConfirmation:true,publish:false}}),executeJob:async({engine,job,plan,signal})=>{calls.push(job.type);assert.equal(job.type,'sale_confirmation');assert.ok(signal instanceof AbortSignal);assert.equal(plan.id,job.planId);job.result={verified:true,externalId:job.payload.id,kind:'sale_confirmation'};}}});
+ const job=await f.engine.ingestVerifiedEvent(f.plan.id,f.sale(f.plan,{memberId:'123'}));assert.equal(job.type,'sale_confirmation');f.engine.seed();assert.equal(f.engine.db.jobs.length,1);
+ await f.engine.runOnce();assert.equal(job.state,'completed');assert.deepEqual(calls,['sale_confirmation']);assert.equal(f.counts.order,0);assert.equal(f.counts.claim,0);assert.equal(f.engine.plan(f.plan.id).status,'ready');
+ f.engine.seed();const replacement=f.engine.db.jobs.find(row=>row.type==='listing');assert.equal(replacement.payload.cycle,1);assert.equal(replacement.state,'queued');assert.equal(f.engine.db.publications.submissions[0].closedSale.orderId,job.payload.id);
+});
+
+test('sales-only runtime cannot execute a legacy procurement task even when flags are accidentally enabled',async t=>{
+ let executed=0;const f=await fixture(t,{adapter:{readiness:()=>({salesOnly:true,capabilities:{shippingLabel:true,procurement:true}}),executeJob:async()=>{executed++;}}});await f.listed();
+ const job=f.engine.enqueue('fulfillment',f.plan,f.sale(),'legacy-procurement');assert.equal(await f.engine.runJob(job),false);await f.engine.runOnce();assert.equal(executed,0);assert.equal(f.counts.order,0);assert.equal(job.state,'queued');
 });

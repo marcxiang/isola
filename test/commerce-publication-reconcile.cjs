@@ -13,7 +13,7 @@ async function fixture(){
  const db={version:1,plans:[plan],claims:[claim],jobs:[job],marketAccounts:[account],publications:journal.state(),sales:[],encryptedToken:'PRIVATE-UNCHANGED'};
  const evidence={verified:true,mappingVerified:true,publicationStatus:'published',observedAt:at,profileId,account:{...account,verified:true},seller:{...account,verified:true},ownedByCurrentAccount:true,listingId:'98765',url:'https://www.vinted.fr/items/98765',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:documentKey},priceKind:'item',priceCents:500,currency:'EUR',title:listing.title,photos:{verified:true,count:1,signature:'a'.repeat(64)}};
  await journal.reconcile(record.id,evidence);
- return {db,next:journal.state(),journal,record,evidence,run(source=db,next=journal.state()){return project(source,next,{now:NOW});}};
+ return {db,next:journal.state(),journal,record,evidence,input,run(source=db,next=journal.state()){return project(source,next,{now:NOW});}};
 }
 
 test('one staged snapshot includes publication, active listing, claim link, old job completion and an unsent supplier association',async()=>{
@@ -80,4 +80,45 @@ test('sale closure cannot be committed as a partial publication-only transaction
  const f=await fixture(),db=f.run().db;await f.journal.releaseAfterSale(f.record.id,{verified:true,profileId:'profile-1',memberId:'123',listingId:'98765',orderId:'order-1',paid:true,cancelled:false,quantity:1,priceCents:500,currency:'EUR',observedAt:at});
  assert.throws(()=>project(db,f.journal.state(),{now:NOW}),{code:'PUBLICATION_SALE_PROJECTION_REQUIRED'});
  db.publications=f.journal.state();db.plans[0].completedCount=1;db.plans[0].activeListingId=null;db.plans[0].status='fulfilling';const result=project(db,db.publications,{now:NOW});assert.equal(result.db.plans[0].activeListingId,null);assert.equal(result.db.plans[0].status,'fulfilling');assert.equal(result.db.plans[0].completedCount,1);
+});
+
+test('only the current original profile lease permits a running listing job to receive its publication result',async()=>{
+ const f=await fixture();f.db.jobs[0].state='running';
+ for(const activeLeases of [[],[{profileId:'other-profile',jobId:'job-1'}],[{profileId:'profile-1',jobId:'other-job'}]])assert.throws(()=>project(f.db,f.next,{now:NOW,activeLeases}),{code:'PUBLICATION_PROJECTION_CONFLICT'});
+ const result=project(f.db,f.next,{now:NOW,activeLeases:[{profileId:'profile-1',jobId:'job-1'}]});assert.equal(result.db.jobs[0].state,'completed');assert.equal(result.db.jobs[0].result.externalId,'98765');assert.equal(f.db.jobs[0].state,'running');
+});
+
+test('a verified supplier read receipt survives later publication projections without inventing another write',async()=>{
+ const f=await fixture(),db=f.run().db,row=db.publicationSupplierSync[0];row.state='synced';row.receipt={claimId:row.claimId,setId:'set-1',productId:row.productId,platform:'Vinted',listingId:row.payload.listingId,listingUrl:row.payload.listingUrl,observedAt:at,source:'claim_detail'};
+ const result=project(db,db.publications,{now:NOW});assert.deepEqual(result.db.publicationSupplierSync[0],row);assert.deepEqual(result.pendingSupplierSyncIds,[]);
+ row.receipt.setId='wrong-set';assert.throws(()=>project(db,db.publications,{now:NOW}),{code:'PUBLICATION_PROJECTION_CONFLICT'});
+});
+
+async function reusedPhotoFixture(){
+ const f=await fixture();let db=f.run().db;const first=db.publicationSupplierSync[0];first.state='synced';first.receipt={claimId:first.claimId,setId:'set-1',productId:first.productId,platform:'Vinted',listingId:first.payload.listingId,listingUrl:first.payload.listingUrl,observedAt:at,source:'claim_detail'};
+ await f.journal.releaseAfterSale(f.record.id,{verified:true,profileId:'profile-1',memberId:'123',listingId:'98765',orderId:'order-1',paid:true,cancelled:false,quantity:1,priceCents:500,currency:'EUR',observedAt:at});
+ db.publications=f.journal.state();Object.assign(db.plans[0],{completedCount:1,activeListingId:null,status:'ready'});
+ const input=clone(f.input);input.plan=clone(db.plans[0]);input.claim=clone(db.claims[0]);input.evidence.documentKey='100.3';for(const key of ['form','photos','publication'])input.evidence[key].documentKey='100.3';
+ const proof=buildPublicationProof(input,{now:NOW}),record=await f.journal.prepare(proof);await f.journal.dispatchOnce(record.id,proof,async()=>{});db.publications=f.journal.state();
+ const receipt={...clone(f.evidence),listingId:'98766',url:'https://www.vinted.fr/items/98766',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:'100.3'}};await f.journal.reconcile(record.id,receipt);db=project(db,f.journal.state(),{now:NOW}).db;
+ const payload={action:'published',platform:'Vinted',listingId:'98766',listingUrl:receipt.url},id='mark-listed-'+require('node:crypto').createHash('sha256').update(JSON.stringify(['claim-1','98766'])).digest('hex');
+ const later={id,kind:'mark_listed',claimId:'claim-1',profileId:'profile-1',productId:'product-1',submissionId:record.id,state:'pending',attemptCount:0,operation:null,receipt:null,payload,createdAt:at,updatedAt:at,reason:'旧版保存的后续周期关联'};
+ return {db,first:clone(first),later};
+}
+
+test('photo reuse keeps the first supplier binding and preserves a later pending history row unchanged',async()=>{
+ const f=await reusedPhotoFixture();assert.equal(f.db.publicationSupplierSync.length,1,'A later sales cycle must not create another supplier association');assert.deepEqual(f.db.publicationSupplierSync[0],f.first);
+ f.db.publicationSupplierSync.unshift(f.later);const before=clone(f.db),result=project(f.db,f.db.publications,{now:NOW+1000});
+ assert.equal(result.changed,false);assert.deepEqual(result.db,before);assert.deepEqual(result.db.publicationSupplierSync[1],f.first);assert.deepEqual(result.pendingSupplierSyncIds,[f.later.id]);assert.equal(result.db.plans[0].activeListingId,'98766');assert.equal(result.db.claims[0].listings.length,2);
+});
+
+test('additional same-claim history must retain its own original publication, request and receipt identity',async()=>{
+ const changes=[row=>row.profileId='other-profile',row=>row.productId='other-product',row=>row.submissionId='other-submission',row=>row.payload.listingUrl+='-changed',row=>row.state='synced',row=>row.operation={idempotencyKey:'invented'}];
+ for(const change of changes){const f=await reusedPhotoFixture();change(f.later);f.db.publicationSupplierSync.push(f.later);const before=clone(f.db);assert.throws(()=>project(f.db,f.db.publications,{now:NOW}),{code:'PUBLICATION_PROJECTION_CONFLICT'},String(change));assert.deepEqual(f.db,before);}
+ const f=await reusedPhotoFixture();Object.assign(f.db.publicationSupplierSync[0],{state:'pending',receipt:null});f.db.publicationSupplierSync.push(f.later);assert.throws(()=>project(f.db,f.db.publications,{now:NOW}),{code:'PUBLICATION_PROJECTION_CONFLICT'});
+});
+
+test('missing first supplier history is restored only for review when a later association already exists',async()=>{
+ const f=await reusedPhotoFixture();f.db.publicationSupplierSync=[f.later];const result=project(f.db,f.db.publications,{now:NOW});
+ assert.equal(result.db.publicationSupplierSync.length,2);assert.deepEqual(result.db.publicationSupplierSync[0],f.later);const first=result.db.publicationSupplierSync.find(row=>row.id===f.first.id);assert.equal(first.state,'needs_review');assert.equal(first.attemptCount,0);assert.equal(first.operation,null);assert.equal(first.receipt,null);assert.deepEqual(first.payload,f.first.payload);
 });

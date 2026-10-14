@@ -2,7 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {CommerceEngine}=require('../src/commerce-engine.cjs');
-const {preparePhotos,readPreparedPhotos,MAX_IMAGE_BYTES,READ_TIMEOUT_MS}=require('../src/commerce-photos.cjs');
+const {preparePhotos,preparePhotosForJob,readPreparedPhotos,MAX_IMAGE_BYTES,READ_TIMEOUT_MS}=require('../src/commerce-photos.cjs');
 const baseURL='https://sku.example.test/api/v1';
 const profiles=[{id:'profile-1',name:'First'},{id:'profile-2',name:'Second'}];
 const product={id:'product-1',sku:'SKU TEST',name:'Fixture item',stock:5,unit_price_cents:500};
@@ -24,6 +24,23 @@ async function fixture(t,{client:overrides={},onChange=()=>{}}={}){
  return {get engine(){return engine;},plan,client,calls,dir,options,prepare:options=>preparePhotos(engine,plan.id,{validateImage:decode,...options}),restart:async()=>{await engine.close();engine=new CommerceEngine(options);return engine;}};
 }
 function saved(f){return JSON.parse(fs.readFileSync(f.engine.file,'utf8'));}
+
+test('background photos require the exact active job lease and never expose a configuration bypass',async t=>{
+ const f=await fixture(t),engine=f.engine;f.plan.enabled=true;engine.seed();const job=engine.db.jobs[0],controller=new AbortController();job.state='running';
+ await assert.rejects(preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode}),{code:'STOPPED'});assert.equal(f.calls.length,0);
+ const lease=engine.leases.acquire(job.profileId,job.id);engine.active.set(job.profileId,controller);
+ try{
+  await assert.rejects(preparePhotosForJob(engine,job,{signal:new AbortController().signal,validateImage:decode}),{code:'STOPPED'});assert.equal(f.calls.length,0);
+  const result=await preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode});assert.equal(result.summary.ready,true);assert.equal(engine.configPending,0);assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,1);
+  const again=await preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode});assert.deepEqual(again.manifest,result.manifest);assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,1);
+ }finally{engine.active.delete(job.profileId);engine.leases.release(lease);}
+});
+
+test('disabling a background plan during supplier reads prevents the permanent photo claim',async t=>{
+ let f;f=await fixture(t,{client:{me:async()=>{f.plan.enabled=false;return {user:{id:'supplier-1'}};}}});const engine=f.engine;f.plan.enabled=true;engine.seed();const job=engine.db.jobs[0],controller=new AbortController();job.state='running';const lease=engine.leases.acquire(job.profileId,job.id);engine.active.set(job.profileId,controller);
+ try{await assert.rejects(preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode}),{code:'STOPPED'});assert.equal(f.calls.some(c=>c.name==='claimPhotos'),false);assert.equal(engine.db.photoPreparations.length,0);}
+ finally{engine.active.delete(job.profileId);engine.leases.release(lease);}
+});
 
 test('preparation persists exact request before claiming, saves private JPEGs, and returns only a sanitized public summary',async t=>{
  let f;f=await fixture(t,{client:{claimPhotos:async(payload,options)=>{const row=saved(f).photoPreparations[0];assert.equal(row.state,'claiming');assert.deepEqual(row.payload,{productId:product.id,setId:set.id});assert.deepEqual(payload,row.payload);assert.equal(options.idempotencyKey,row.idempotencyKey);assert.ok(fs.existsSync(path.join(f.dir,'prepared-photos',row.id)));return receipt;}}});

@@ -33,6 +33,43 @@ module.exports=async function aiProfiles(api,check){
   await check('browser toolbar sessions are separate from websites and from other environment toolbars',async()=>{
    assert.notEqual(wa.webContents.session,wb.webContents.session);assert.notEqual(wa.webContents.session,api.sesFor(a));await wa.webContents.executeJavaScript('localStorage.setItem("isolation-toolbar","a")');assert.equal(await wb.webContents.executeJavaScript('localStorage.getItem("isolation-toolbar")'),null);
   });
+  await check('real AI IPC refuses a background-owned account without interrupting its draft and leaves another account usable',async()=>{
+   const engine=api.getCommerce(),controller=new AbortController(),draft=new AbortController(),lease=engine.leases.acquire(a.id,'fixture-ai-background-owner');assert.ok(lease);assert.equal(engine.active.has(a.id),false);engine.active.set(a.id,controller);wa.vintedDraftController=draft;
+   const before=requests.length;
+   try{
+    await assert.rejects(wa.webContents.executeJavaScript("window.browser.aiStart('must not run during background ownership')"),/后台任务/);
+    await assert.rejects(wa.webContents.executeJavaScript('window.browser.aiResume()'),/后台任务/);
+    assert.equal(draft.signal.aborted,false);assert.equal(controller.signal.aborted,false);assert.equal(wa.aiAgent.state.running,false);assert.equal(requests.length,before);
+    holdB=false;const other=await wb.webContents.executeJavaScript("window.browser.aiStart('Read the other account while first account is occupied')");assert.equal(other.status,'complete');assert.ok(requests.slice(before).every(row=>row.who==='b'));assert.equal(controller.signal.aborted,false);
+    return {realIPC:true,ownerPreserved:true,otherAccountCanRun:true};
+   }finally{holdB=true;wa.vintedDraftController=null;if(engine.active.get(a.id)===controller)engine.active.delete(a.id);engine.leases.release(lease);}
+  });
+  await check('real AI start and resume IPC refuse a page whose navigation is still pending',async()=>{
+   const before=requests.length;wa.navigationPending=true;
+   try{
+    await assert.rejects(wa.webContents.executeJavaScript("window.browser.aiStart('must not run during navigation')"),/后台任务/);
+    await assert.rejects(wa.webContents.executeJavaScript('window.browser.aiResume()'),/后台任务/);
+    assert.equal(wa.aiAgent.state.running,false);assert.equal(requests.length,before);
+   }finally{wa.navigationPending=false;}
+  });
+  await check('real AI start rechecks account ownership after waiting for an existing draft to release',async()=>{
+   const engine=api.getCommerce(),controller=new AbortController(),draft=new AbortController(),before=requests.length;let lease,releaseTimer;
+   assert.equal(engine.active.has(a.id),false);wa.vintedDraftController=draft;
+   draft.signal.addEventListener('abort',()=>{lease=engine.leases.acquire(a.id,'fixture-ai-during-draft-release');engine.active.set(a.id,controller);releaseTimer=setTimeout(()=>{if(wa.vintedDraftController===draft)wa.vintedDraftController=null;},50);},{once:true});
+   try{
+    await assert.rejects(wa.webContents.executeJavaScript("window.browser.aiStart('must recheck after old draft finishes')"),/后台任务/);
+    assert.ok(lease);assert.equal(draft.signal.aborted,true);assert.equal(wa.vintedDraftController,null);assert.equal(controller.signal.aborted,false);assert.equal(wa.aiAgent.state.running,false);assert.equal(requests.length,before);
+    return {checkedBeforeAndAfterDraft:true,noModelRequest:true};
+   }finally{clearTimeout(releaseTimer);wa.vintedDraftController=null;if(engine.active.get(a.id)===controller)engine.active.delete(a.id);engine.leases.release(lease);}
+  });
+  await check('real browser stop IPC cancels only the current account background operation',async()=>{
+   const engine=api.getCommerce(),ca=new AbortController(),cb=new AbortController(),la=engine.leases.acquire(a.id,'fixture-ai-stop-a'),lb=engine.leases.acquire(b.id,'fixture-ai-stop-b');assert.ok(la);assert.ok(lb);assert.equal(engine.active.has(a.id),false);assert.equal(engine.active.has(b.id),false);engine.active.set(a.id,ca);engine.active.set(b.id,cb);
+   try{
+    await wa.webContents.executeJavaScript("window.browser.navigate('stop')");assert.equal(ca.signal.aborted,true);assert.equal(cb.signal.aborted,false);assert.equal(engine.active.get(a.id),ca);assert.equal(engine.active.get(b.id),cb);
+    assert.ok(engine.leases.snapshot().some(row=>row.profileId===a.id&&row.jobId===la.jobId));assert.ok(engine.leases.snapshot().some(row=>row.profileId===b.id&&row.jobId===lb.jobId));
+    return {currentAccountCancelled:true,otherAccountPreserved:true,ownerRetainsCleanupLease:true};
+   }finally{if(engine.active.get(a.id)===ca)engine.active.delete(a.id);if(engine.active.get(b.id)===cb)engine.active.delete(b.id);engine.leases.release(la);engine.leases.release(lb);}
+  });
   await check('concurrent model histories, bearer keys, pause and stop remain scoped to their own window',async()=>{
    const ta=wa.aiAgent.start('Read the alpha-only goal marker'),tb=wb.aiAgent.start('Read the beta-only goal marker');await until(()=>requests.some(row=>row.who==='a')&&requests.some(row=>row.who==='b'));
    wa.aiAgent.pause();await until(()=>wa.aiAgent.state.status==='paused');assert.equal(wb.aiAgent.state.running,true);assert.equal(wb.aiAgent.pauseRequested,false);assert.equal(wb.aiAgent.controller.signal.aborted,false);

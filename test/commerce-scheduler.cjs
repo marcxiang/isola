@@ -34,3 +34,21 @@ test('duplicate or malformed account proofs do not select a convenient identity'
 test('legacy records with the same marketplace member in two environments remain blocked',()=>{const f=fixture();f.accounts=[{platform:'vinted-fr',profileId:'profile-1',memberId:'123'},{platform:'vinted-fr',profileId:'profile-2',memberId:'123'}];assert.equal(first(f).reasonCode,'ACCOUNT_RECORD_CONFLICT');assert.deepEqual(inspect(f).runnableJobIds,[]);});
 test('per-profile readiness cannot be inherited from a different profile',()=>{const f=fixture();f.readinessByProfile={'profile-1':{capabilities:{publish:false}},'other-profile':{capabilities:{publish:true}}};assert.equal(first(f).reasonCode,'CAPABILITY_UNVERIFIED');});
 test('finished jobs are not rerun merely because there are no enabled profiles',()=>{const f=fixture();f.jobs[0].state='completed';f.jobs[0].result={externalId:'123'};f.plans=[];f.profiles=[];assert.equal(first(f).state,'finished');assert.deepEqual(inspect(f).runnableJobIds,[]);});
+
+test('temporary capability and workspace blockers preserve retry budgets without becoming permanent failures',()=>{
+ for(const code of ['CAPABILITY_UNVERIFIED','VINTED_UNVERIFIED','PAGE_BUSY','PROFILE_NOT_OPEN']){const out=retryDecision(makeJob({attempts:2}),{code,message:'Waiting for verified page'},{now:NOW});assert.equal(out.state,'queued');assert.equal(out.attempts,2);assert.equal(out.reasonCode,code);assert.ok(Date.parse(out.retryAt)>NOW);}
+});
+
+test('sales confirmation uses a separate capability and completed matching receipts unlock replacement listings',()=>{
+ const f=fixture();f.readiness.capabilities.saleConfirmation=true;const confirmation=makeJob({id:'confirmation',dedupeKey:'vinted-order:order-1',type:'sale_confirmation',state:'queued',payload:{id:'order-1'}});f.jobs.push(confirmation);f.sales=[{planId:'plan-1',platformOrderId:'order-1',jobId:confirmation.id}];
+ assert.equal(first(f).reasonCode,'SALE_CYCLE_PENDING');assert.deepEqual(inspect(f).runnableJobIds,['confirmation']);
+ Object.assign(confirmation,{state:'completed',result:{verified:true,externalId:'order-1',kind:'sale_confirmation'}});assert.equal(first(f).state,'ready');confirmation.result.externalId='another-order';assert.equal(first(f).reasonCode,'SALE_CYCLE_PENDING');
+});
+
+test('queue projection distinguishes deliberate sales-only procurement disablement from missing capability',()=>{
+ const f=fixture();f.jobs[0].type='fulfillment';f.readiness.salesOnly=true;const row=first(f);assert.equal(row.reasonCode,'PROCUREMENT_DISABLED');assert.deepEqual(inspect(f).runnableJobIds,[]);
+});
+
+test('an unsubmitted temporary blocker preserves its actionable cause during the polling delay',()=>{
+ const f=fixture();Object.assign(f.jobs[0],{retryAt:new Date(NOW+10000).toISOString(),blockedReason:'PAGE_BUSY',error:'Wait for the existing page action'});const row=first(f);assert.equal(row.reasonCode,'PAGE_BUSY');assert.equal(row.reason,'Wait for the existing page action');assert.equal(row.state,'waiting');
+});

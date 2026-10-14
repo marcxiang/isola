@@ -19,14 +19,35 @@ function ensure(ok,code,message){if(!ok)throw error(code,message);}
 function publicationJournal(engine){
  let owned=journals.get(engine);
  if(owned){ensure(equal(engine.db.publications,owned.snapshot),'PUBLICATION_STORAGE_CHANGED','刊登记录已被另一操作改变，已停止提交');return owned.journal;}
- owned={journal:null,snapshot:null};
+ owned={journal:null,snapshot:null,saleCommits:new Map()};
  const journal=new PublicationJournal({state:engine.db.publications,persist:async state=>{
-  const before=engine.db,staged=state.submissions.some(row=>row.state==='published')?projectPublicationReconciliation(before,state).db:{...before,publications:state};
+  const before=engine.db,closures=state.submissions.filter(row=>row.closedSale&&!before.publications.submissions.find(old=>old.id===row.id)?.closedSale);
+  let staged;
+  if(closures.length){
+   ensure(closures.length===1,'PUBLICATION_SALE_PROJECTION_REQUIRED','成交必须与原任务、销量和刊登占用一起保存');
+   const record=closures[0],transaction=owned.saleCommits.get(record.id);
+   ensure(transaction&&record.closedSale.orderId===transaction.orderId,'PUBLICATION_SALE_PROJECTION_REQUIRED','成交关闭缺少主进程完整事务');
+   staged=transaction.stage(before,state);
+   ensure(staged&&typeof staged==='object'&&typeof staged.then!=='function'&&equal(staged.publications,state),'PUBLICATION_SALE_PROJECTION_REQUIRED','成交事务必须同步保存同一份已验证刊登状态');
+   staged=projectPublicationReconciliation(staged,state,{activeLeases:engine.leases?.snapshot?.()||[]}).db;
+  }else staged=state.submissions.some(row=>row.state==='published')?projectPublicationReconciliation(before,state,{activeLeases:engine.leases?.snapshot?.()||[]}).db:{...before,publications:state};
   engine.db=staged;
   try{await engine.persist();}catch(error){engine.db=before;engine.faulted=true;throw error;}
   owned.snapshot=clone(state);engine.emit?.();
  },dispatchEnabled:true});
  engine.db.publications=journal.state();owned.journal=journal;owned.snapshot=clone(engine.db.publications);journals.set(engine,owned);return journal;
+}
+
+// Main-only transaction bridge. The journal validates the paid-sale evidence;
+// the engine stages its matching sale/task/count in the same durable snapshot.
+// A closure cannot be committed by mutating engine.db or bypassing the journal.
+async function commitPublicationSale(engine,id,evidence,stage){
+ ensure(typeof stage==='function','PUBLICATION_SALE_PROJECTION_REQUIRED','成交缺少完整销售事务');
+ const journal=publicationJournal(engine),owned=journals.get(engine);
+ ensure(!owned.saleCommits.has(id),'PUBLICATION_SALE_BUSY','原刊登正在核对成交，请等待原事务结束');
+ const transaction={orderId:evidence?.orderId,stage};owned.saleCommits.set(id,transaction);
+ try{return await journal.releaseAfterSale(id,evidence);}
+ finally{if(owned.saleCommits.get(id)===transaction)owned.saleCommits.delete(id);}
 }
 
 // Run only in the adapter isolated world, against the most recent snapshot map.
@@ -239,4 +260,4 @@ class VintedPublishSubmit{
  }
 }
 
-module.exports={VintedPublishSubmit,publicationJournal,resolvePublishTarget,probeFinalPublicationDOM};
+module.exports={VintedPublishSubmit,publicationJournal,commitPublicationSale,resolvePublishTarget,probeFinalPublicationDOM};

@@ -134,7 +134,20 @@ async function chooseSet(client,plan,setId,signal,guard,reserved){
 }
 async function preparePhotos(engine,planId,{setId,signal:callerSignal,validateImage}={}){
  if(typeof validateImage!=='function')throw failure('PHOTO_DECODER','照片解码校验器未配置，未领取照片');
- return engine.configure(async(configSignal,configGuard)=>{
+ return engine.configure((configSignal,configGuard)=>preparePhotoWork(engine,planId,{setId,callerSignal,validateImage},configSignal,configGuard));
+}
+// Main-process job entry. A renderer cannot manufacture the active controller
+// or profile lease. Manual preparation still uses the configuration lock.
+async function preparePhotosForJob(engine,job,{signal,validateImage}={}){
+ if(typeof validateImage!=='function')throw failure('PHOTO_DECODER','照片解码校验器未配置，未领取照片');
+ const identity={id:job?.id,planId:job?.planId,profileId:job?.profileId,productId:job?.productId,cycle:job?.payload?.cycle};
+ const guard=()=>{
+  const rows=engine.db.jobs.filter(row=>row.id===identity.id),current=rows[0],plan=engine.db.plans.find(row=>row.id===identity.planId);
+  if(!signal||signal.aborted||engine.active.get(identity.profileId)?.signal!==signal||!engine.leases.snapshot().some(row=>row.profileId===identity.profileId&&row.jobId===identity.id)||rows.length!==1||current.state!=='running'||current.type!=='listing'||current.planId!==identity.planId||current.profileId!==identity.profileId||current.productId!==identity.productId||current.payload?.cycle!==identity.cycle||!plan?.enabled||plan.profileId!==identity.profileId||plan.productId!==identity.productId||plan.completedCount!==identity.cycle||engine.closing||engine.configPending)throw stopped();
+ };
+ guard();return preparePhotoWork(engine,identity.planId,{validateImage},signal,guard);
+}
+async function preparePhotoWork(engine,planId,{setId,callerSignal,validateImage},configSignal,configGuard){
   const controller=new AbortController(),abort=()=>controller.abort();for(const signal of [configSignal,callerSignal]){signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();}
   const signal=controller.signal,guard=()=>{if(signal.aborted)throw stopped();configGuard();if(engine.faulted)throw failure('PHOTO_STORAGE','运营存储不可用，照片准备已停止');};
   let record,started=false;
@@ -176,6 +189,5 @@ async function preparePhotos(engine,planId,{setId,signal:callerSignal,validateIm
    if(started&&record&&!engine.faulted){record.state=Object.hasOwn(record,'receipt')?'needs_review':record.firstAttemptAt?'uncertain':'prepared';record.error=error?.code==='STOPPED'?'照片准备已停止，原领取与文件记录已保留':error?.code==='PHOTO_TIMEOUT'?'请求超时，保留原编号与套组等待恢复':'照片准备未完成，请核对原领取与本地照片后重试';save();}
    throw error;
   }finally{for(const signal of [configSignal,callerSignal])signal?.removeEventListener('abort',abort);}
- });
 }
-module.exports={preparePhotos,readPreparedPhotos,summarizePreparation,restorePhotoPreparations,MAX_IMAGE_BYTES,READ_TIMEOUT_MS};
+module.exports={preparePhotos,preparePhotosForJob,readPreparedPhotos,summarizePreparation,restorePhotoPreparations,MAX_IMAGE_BYTES,READ_TIMEOUT_MS};

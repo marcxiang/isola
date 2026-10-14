@@ -8,15 +8,16 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.7**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. One real test item was published at €5 using 0.5.2. Operator-reviewed receipt association is now connected through the main process, with expiring single-use capabilities, a fresh detail read and one full database commit. It still requires matching photo evidence and live validation. It is not a completed unattended commerce system.
+The current development version is **0.5.3-dev.8**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
-- Environment management, persistent Chromium sessions, proxy configuration, AI click/scroll feedback, supplier catalog synchronization and listing plans are implemented.
-- Listing fields, photo upload and one guarded manual publication have been exercised on Vinted France. The live item was checked visually; application receipt association, buyer messages, offers, shipping labels and real supplier purchases still need end-to-end validation.
-- Supplier photo claims persist their request identity and receipt, download and validate image files, and expose previews in the workbench. Uploads are bound to the current profile and page; uncertain results are checked without selecting the files again. The France new-item page has received the test photo successfully.
-- The workbench separates manual preparation/publication/receipt association from background readiness. Listing plans expose checks directly and block new-form actions while an original submission remains unresolved.
-- The commerce adapter still blocks unattended business actions. Do not remove this guard merely to make the workflow run.
+- Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
+- A paid sale must atomically close the original listing and create a sale-confirmation task before another cycle can start. Deletion, missing pages and accepted offers do not count as paid sales.
+- Supplier photo association has a durable outbox. An uncertain request is checked by reading the original claim, never blindly resent. The supplier contract allows only the first listing association; later reuse remains in local history.
+- Messages, offer acceptance and paid-sale browser evidence still require live validation and remain disabled. Factual French reply previews and strict evidence validators are implemented, without sending unverified replies.
+- Purchase controls are hidden in sales-only mode, purchase tasks cannot run, and no purchase budget is required. Existing purchase history remains intact.
+- Earlier real TEST publication and its unresolved record are retained. Do not clear history, treat a deleted listing as a sale, or change capability flags to force progress.
 
-商品销售分布、账号核验和照片流程已接入；真实法国站 TEST 商品已按 5 欧元成功发布一次。原刊登关联后端现已接通，但原电脑的 TEST 状态仍待现场核对，禁止重复发布。消息、报价、面单及采购流程尚未跑通。办公室请先看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
+后台刊登链路已接入，逐项核对不通过就暂停；消息、报价、成交和卖出后补上仍待真实页面联调。原 TEST 的提交记录继续保留，不重复发布。办公室接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
 
 ## Features / 功能
 
@@ -29,7 +30,7 @@ The current development version is **0.5.3-dev.7**. The multi-account operations
 - OpenAI-compatible model configuration, page reading, clicking, typing, keyboard navigation and scrolling, with visible action feedback and pause/stop controls.
 - SKU Desk supplier connection, catalog/photo-set synchronization, per-environment listing plans and a durable commerce workflow engine.
 - Product-to-account sales distribution, combined filters, per-environment prices and sales targets, verified account names and actual listing receipt links.
-- Conservative handling of uncertain external results, purchase limits, bounded read retries, task leases and duplicate-operation prevention.
+- Conservative handling of uncertain external results, bounded read retries, task leases and duplicate-operation prevention.
 
 ## Device profiles / 设备与手机模拟
 
@@ -42,7 +43,7 @@ The local device check reports actual automation signals, page/Worker/iframe dif
 Use macOS or Windows and **Node.js 24**.
 
 ```sh
-git clone https://github.com/marcxiang/isola.git
+git clone --branch codex/windows-association-v053 https://github.com/marcxiang/isola.git
 cd isola
 npm ci
 npm start

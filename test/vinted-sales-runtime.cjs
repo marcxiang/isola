@@ -131,3 +131,40 @@ test('maintenance guard refuses an outbox mutation after its exact supplier leas
  f.runtime.outbox={run:async(_engine,_id,options)=>{f.engine.leases.release(lease);options.guard();mutation=true;}};
  await f.runtime.maintenance({engine:f.engine,signal:controller.signal});assert.equal(mutation,false);assert.equal(f.engine.active.size,0);assert.equal(f.engine.leases.activeProfileIds().length,0);
 });
+
+test('closed listing profiles open once under the current UI owner before catalog and photo work',async()=>{
+ const f=fixture(),w=f.windows.get('profile-1');f.windows.delete('profile-1');let opens=0;
+ f.runtime.ensureProfile=async(profileId,{guard,signal,jobId})=>{guard();assert.equal(f.runtime.uiOwner.jobId,jobId);assert.equal(signal,f.context.signal);assert.equal(f.context.job.step,'open_environment');assert.equal(f.calls.length,0);opens++;f.windows.set(profileId,w);};
+ assert.equal(f.runtime.readiness().capabilities.autoOpenProfile,true);
+ await f.runtime.requireReady('profile-1',f.context);assert.equal(opens,0);
+ await f.run();assert.equal(opens,1);assert.equal(f.clicks,1);assert.equal(f.engine.db.jobs[0].state,'completed');
+});
+
+test('closed profiles without the native opener remain waiting and never attempt a business action',async()=>{
+ const f=fixture();f.windows.clear();assert.equal(f.runtime.readiness().capabilities.autoOpenProfile,false);await assert.rejects(f.run(),{code:'PROFILE_NOT_OPEN'});assert.equal(f.calls.length,0);assert.equal(f.clicks,0);
+});
+
+test('invalid plan fields or an unbound account cannot trigger automatic profile launch',async()=>{
+ for(const change of [f=>f.engine.db.marketAccounts=[],f=>f.context.plan.listing.title='',f=>f.context.plan.listing.categoryPath=[],f=>f.context.plan.activeListingId='123']){
+  const f=fixture();f.windows.clear();change(f);let opens=0;f.runtime.ensureProfile=async()=>opens++;
+  await assert.rejects(f.run());assert.equal(opens,0);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);
+ }
+});
+
+test('cancelled startup and changed plan or account cannot proceed to catalog or permanent photo claim',async()=>{
+ for(const change of [f=>f.context.controller.abort(),f=>f.context.plan.listing.title='Changed during startup',f=>{f.engine.db.marketAccounts[0].memberId='999';f.engine.db.marketAccounts[0].profileURL='https://www.vinted.fr/member/999';}]){
+  const f=fixture(),w=f.windows.get('profile-1');f.windows.clear();f.runtime.ensureProfile=async(id,options)=>{options.guard();change(f);f.windows.set(id,w);options.guard();};
+  await assert.rejects(f.run());assert.equal(f.calls.length,0);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);
+ }
+});
+
+test('automatic launch holds the global UI owner across asynchronous startup',async()=>{
+ const entered=deferred(),release=deferred(),f=fixture(),w=f.windows.get('profile-1'),second=f.add(2);f.windows.delete('profile-1');
+ f.runtime.ensureProfile=async(id,{guard})=>{guard();assert.equal(id,'profile-1');entered.resolve();await release.promise;guard();f.windows.set(id,w);};
+ const first=f.run();await entered.promise;await assert.rejects(f.runtime.executeJob(second),{code:'WORKSPACE_BUSY'});assert.equal(f.calls.length,0);release.resolve();await first;assert.equal(f.clicks,1);assert.equal(f.runtime.uiOwner,null);
+});
+
+test('a closed profile that fails to open never starts catalog or photo work',async()=>{
+ const f=fixture();f.windows.clear();f.runtime.ensureProfile=async()=>{};
+ await assert.rejects(f.run(),{code:'PAGE_BUSY'});assert.equal(f.calls.length,0);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);
+});

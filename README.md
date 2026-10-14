@@ -8,8 +8,9 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.8**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.9**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
+- Starting the scheduler automatically opens a closed listing profile in its original persistent session, then checks the current account before preparing photos or publishing. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
 - A paid sale must atomically close the original listing and create a sale-confirmation task before another cycle can start. Deletion, missing pages and accepted offers do not count as paid sales.
 - Supplier photo association has a durable outbox. An uncertain request is checked by reading the original claim, never blindly resent. The supplier contract allows only the first listing association; later reuse remains in local history.
@@ -17,7 +18,7 @@ The current development version is **0.5.3-dev.8**. The production runtime now c
 - Purchase controls are hidden in sales-only mode, purchase tasks cannot run, and no purchase budget is required. Existing purchase history remains intact.
 - Earlier real TEST publication and its unresolved record are retained. Do not clear history, treat a deleted listing as a sale, or change capability flags to force progress.
 
-后台刊登链路已接入，逐项核对不通过就暂停；消息、报价、成交和卖出后补上仍待真实页面联调。原 TEST 的提交记录继续保留，不重复发布。办公室接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
+启动调度后，已绑定账号的上架计划会自动打开对应环境，无需逐个手动开窗。后台刊登链路已接入，逐项核对不通过就暂停；消息、报价、成交和卖出后补上仍待真实页面联调。原 TEST 的提交记录继续保留，不重复发布。办公室接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
 
 ## Features / 功能
 

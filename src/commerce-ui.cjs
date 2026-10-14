@@ -17,7 +17,7 @@
   const jobNames = {listing:'商品上架', list:'商品上架', publish:'商品上架', reply:'回复消息', message:'回复消息', messages:'检查消息', offer:'处理报价', offers:'检查报价', accept_offer:'接受报价', sale_confirmation:'确认成交', label:'获取运单', shipping_label:'获取运单', shipment:'获取运单', fulfillment:'面单与货盘履约', procurement:'货盘采购', purchase:'货盘采购', order:'货盘采购', reconcile:'核对结果', sync:'同步货盘'};
   const stepNames = {pending:'检查执行条件',claim_photos:'领取商品图片',prepare_listing:'准备刊登草稿',publish_listing:'提交刊登',record_listing:'记录刊登回执',draft_reply:'准备商品回复',send_reply:'发送回复',check_offer:'核对报价',accept_offer:'接受报价',download_label:'下载并核对运单',check_stock_price:'核对库存与采购价',wms_checkout:'核对可用仓库',create_supplier_order:'提交货盘订单',verified:'核对完成'};
   Object.assign(stateNames,{sale_pending_confirmation:'成交待确认'});
-  Object.assign(stepNames,{check_catalog:'核对当前账号衣橱',prepare_photos:'准备并校验原照片',upload_photos:'上传并核对照片',verify_listing:'核对实际刊登结果',publication_reconciled:'已关联原刊登',confirm_sale:'核对原成交',sale_confirmed:'成交已核对',sale_confirmation:'核对原成交'});
+  Object.assign(stepNames,{open_environment:'自动打开账号环境',check_catalog:'核对当前账号衣橱',prepare_photos:'准备并校验原照片',upload_photos:'上传并核对照片',verify_listing:'核对实际刊登结果',publication_reconciled:'已关联原刊登',confirm_sale:'核对原成交',sale_confirmed:'成交已核对',sale_confirmation:'核对原成交'});
   const pageDetails = {overview:['商品运营','查看每个商品在哪个环境销售，以及接下来需要做什么。'],accounts:['账号中心','固定设备环境，管理登录与需要接管的账号。'],plans:['上架计划','为每个环境设置商品、销售目标与价格规则。'],inventory:['货盘与图片','核对商品库存，区分自己的图片与他人占用的套装。'],jobs:['任务记录','检查每一步的执行状态与外部平台回执。'],settings:['连接与规则','连接货盘，并为后台执行设置明确的范围。']};
   let state = {settings:{},connection:{status:'not_configured'},profiles:[],accounts:[],products:[],photoSets:[],photoPreparations:[],plans:[],jobs:[],events:[],publications:[],running:false,readiness:{vinted:'unverified'}};
   let currentPage = 'overview', settingsDirty = false, photoProductId = '', selectedJobId = '', selectedPlanId = '', toastTimer;
@@ -241,7 +241,7 @@
     const association=typeof api.inspectPublishedListing==='function'&&typeof api.associatePublishedListing==='function';
     $('#readiness').classList.toggle('ready',allReady);
     $('#readiness-title').textContent=available.length?(allReady?`${salesOnly()?'后台售卖':'后台业务'}流程可用`:'后台部分流程可用'):`${manualPublish?'手动上架可用':'资料准备可用'} · 后台业务待验证`;
-    $('#readiness-message').textContent=available.length?`后台可按计划执行${available.map(([name])=>name).join('、')}。每个步骤核对账号、商品和回执；提交结果不明确时停止并保留原记录。`:manualPublish?'可准备资料和照片，逐项核对后手动发布一次。启动调度不会启用下方仍待验证的业务。':'可连接货盘、保存计划并准备资料和照片；当前版本尚未提供手动发布入口。';
+    $('#readiness-message').textContent=available.length?`后台可按计划执行${available.map(([name])=>name).join('、')}。${automaticListing()&&capabilities.autoOpenProfile===true?'上架时会自动打开已绑定的账号环境，无需逐个手动打开。':''}每个步骤核对账号、商品和回执；提交结果不明确时停止并保留原记录。`:manualPublish?'可准备资料和照片，逐项核对后手动发布一次。启动调度不会启用下方仍待验证的业务。':'可连接货盘、保存计划并准备资料和照片；当前版本尚未提供手动发布入口。';
     const capabilityList=$('#readiness-capabilities');capabilityList.replaceChildren();
     for(const [name,available,detail] of [
       ['资料与照片',capabilities.inspect!==false&&typeof api.prepareDraft==='function'&&typeof api.uploadPhotos==='function','可准备'],
@@ -270,6 +270,7 @@
     if(review)return {key:'attention',label:stateNames[review.state]||'需要核对',tone:'warn',next:error||'打开任务记录，核对当前页面和原回执。',job};
     if(running)return {key:'running',label:'执行中',tone:'good',next:`${jobNames[running.type]||running.type} · ${stepNames[running.step]||running.step||'正在执行'}`,job};
     if(waiting?.scheduling&&['waiting','blocked','paused'].includes(waiting.scheduling.state))return {key:'pending',label:waiting.scheduling.state==='blocked'?'等待核对':waiting.scheduling.state==='paused'?'已暂停':'等待条件',tone:waiting.scheduling.state==='blocked'?'warn':'neutral',next:[waiting.scheduling.reason,waiting.scheduling.nextAction].filter(Boolean).join(' '),job};
+    if(waiting?.scheduling?.state==='ready'&&waiting.scheduling.reasonCode==='PROFILE_AUTO_OPEN')return {key:'pending',label:'等待自动打开',tone:'neutral',next:[state.running?'': '启动调度后执行。',waiting.scheduling.reason,waiting.scheduling.nextAction].filter(Boolean).join(' '),job};
     if(plan.activeListingId){const caps=state.readiness.capabilities||{},enabled=[...(plan.autoReply&&caps.messages===true?['回复消息']:[]),...(plan.autoAcceptOffers&&caps.offers===true?['接受符合底价的报价']:[]),...(caps.saleConfirmation===true?['确认成交']:[])];return {key:'listed',label:'已有在售记录',tone:'good',next:!plan.enabled?'计划已停用；已保存的刊登记录仍保留。':`${enabled.length?`${state.running?'按计划':'启动调度后可'}${enabled.join('、')}。`:'刊登记录已保存。'}${remainingSalesText()}`,job};}
     if(waiting&&waiting.type!=='listing')return {key:plan.enabled?'pending':'paused',label:plan.enabled?'待执行':'计划未启用',tone:'neutral',next:`${jobNames[waiting.type]||waiting.type} · ${stepNames[waiting.step]||waiting.step||'等待执行条件'}`,job};
     if(number(plan.targetCount)>0&&number(plan.completedCount)>=number(plan.targetCount))return {key:'target_reached',label:'目标已达成',tone:'good',next:'累计销售目标已完成，不再补充上架。',job};
@@ -613,6 +614,7 @@
     if(!job){detail.append(empty('该任务记录不可用。'));$('#reconcile-form').hidden=true;$('#retry-form').hidden=true;return;}
     const grid=el('dl','detail-grid');for(const [name,value] of [['任务编号',job.id],['任务类型',jobNames[job.type] || job.type],['浏览器环境',profileName(job.profileId)],['商品',productName(job.productId)],['状态',stateNames[job.state] || job.state],['当前步骤',stepNames[job.step] || job.step || '—'],['创建时间',when(job.createdAt)],['更新时间',when(job.updatedAt)]])grid.append(el('dt','',name),el('dd','',value));detail.append(grid);
     if(job.scheduling&&['waiting','blocked','paused'].includes(job.scheduling.state)){detail.append(el('h3','','当前等待条件'),el('p','',job.scheduling.reason||'等待执行条件'),el('p','field-hint',job.scheduling.nextAction||''));}
+    if(job.scheduling?.state==='ready'&&job.scheduling.reasonCode==='PROFILE_AUTO_OPEN'){detail.append(el('h3','','下一步：自动打开环境'),el('p','',job.scheduling.reason),el('p','field-hint',job.scheduling.nextAction));}
     if(job.error){detail.append(el('h3','','需要核对的问题'),el('div','form-error',typeof job.error==='string'?job.error:typeof job.error.message==='string'?job.error.message:'请核对真实页面和原请求记录。'));}
     if(job.result&&typeof job.result==='object'){
       const receipt=el('dl','detail-grid');

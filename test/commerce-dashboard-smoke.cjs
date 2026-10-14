@@ -165,5 +165,19 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       assert.equal((await js('window.dashboardFixture.calls()')).length,before);await js(`document.querySelector('#job-dialog').close();document.querySelector('#clear-job-plan').click()`);await update(fixture);assert.deepEqual(errors,[]);
       return {schedulerReasons:['PROFILE_NOT_OPEN','ACCOUNT_NOT_BOUND','PLAN_PAUSED'],queuedStatePreserved:true,legacyWithoutScheduling:true,externalActions:0};
     });
+    await check('automatic listing shows the closed-profile opening stage without asking for a manual launch',async()=>{
+      const changed=structuredClone(fixture),at='2026-10-14T12:00:00.000Z';changed.readiness={vinted:'partial',salesOnly:true,capabilities:{publish:true,autoOpenProfile:true,messages:false,offers:false,saleConfirmation:false}};
+      changed.profiles=changed.profiles.map(profile=>({...profile,status:'closed'}));
+      changed.jobs=[{id:'auto-open-job',dedupeKey:'listing:unpublished:0',planId:'unpublished',productId:'vacuum',profileId:'paris',type:'listing',state:'queued',step:'pending',payload:{cycle:0},operation:null,mutationPending:false,result:null,updatedAt:at}];
+      const report=inspectQueue({...changed,requireVerifiedAccount:true,accounts:[{platform:'vinted-fr',profileId:'paris',memberId:'123'}],observedAccounts:[],maxConcurrent:2},{now:Date.parse(at)});changed.jobs[0].scheduling=report.jobs[0];assert.deepEqual(report.runnableJobIds,['auto-open-job']);assert.equal(report.jobs[0].reasonCode,'PROFILE_AUTO_OPEN');
+      const before=(await js('window.dashboardFixture.calls()')).length;await update(changed);await js(`document.querySelector('[data-page="overview"]').click()`);
+      let shown=await js(`({message:document.querySelector('#readiness-message').textContent,overview:document.querySelector('[data-plan-id="unpublished"]').textContent,plan:document.querySelector('.plan-card[data-listing-plan-id="unpublished"]').textContent})`);
+      assert.match(shown.message,/无需逐个手动打开/);for(const text of [shown.overview,shown.plan]){assert.match(text,/等待自动打开/);assert.match(text,/启动调度后执行/);assert.match(text,/无需手动打开/);}
+      await js(`Array.from(document.querySelectorAll('[data-plan-id="unpublished"] button')).find(button=>button.textContent==='任务记录').click();document.querySelector('#jobs button').click()`);await frames();assert.match(await js(`document.querySelector('#job-detail').textContent`),/下一步：自动打开环境/);
+      changed.running=true;changed.jobs[0].state='running';changed.jobs[0].step='open_environment';changed.jobs[0].scheduling={state:'running',reasonCode:'OPERATION_ACTIVE'};await update(changed);
+      for(const text of await js(`Array.from(document.querySelectorAll('[data-plan-id="unpublished"],.plan-card[data-listing-plan-id="unpublished"],#job-detail'),element=>element.textContent)`)){assert.match(text,/自动打开账号环境/);assert.doesNotMatch(text,/下一步：自动打开环境|等待自动打开/);}
+      assert.equal((await js('window.dashboardFixture.calls()')).length,before);await js(`document.querySelector('#job-dialog').close();document.querySelector('#clear-job-plan').click()`);await update(fixture);assert.deepEqual(errors,[]);
+      return {closedListingStage:true,runningStageLabel:true,externalActions:0};
+    });
   }finally{window.destroy();fs.rmSync(dir,{recursive:true,force:true});}
 };

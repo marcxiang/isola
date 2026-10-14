@@ -18,17 +18,17 @@ const binding=plan=>JSON.stringify([plan.id,plan.profileId,plan.productId,plan.s
 // independent supplier reads concurrently, but never steals focus mid-click.
 // Scope exists only in the main process; manual calls cannot waive a job lease.
 class VintedSalesRuntime extends VintedAdapter {
- constructor({openPage,validateImage,...options}){
+ constructor({openPage,ensureProfile,validateImage,...options}){
   const scope=new AsyncLocalStorage(),externalBusy=options.isBusy||(()=>false);
   super({...options,isBusy:(id,w)=>{
    const own=scope.getStore();
    if(own?.profileId===id&&own.engine.active.get(id)?.signal===own.signal&&own.engine.leases.snapshot().some(row=>row.profileId===id&&row.jobId===own.jobId))return !!w.closingPromise||!!w.navigationPending;
    return externalBusy(id,w);
   }});
-  this.scope=scope;this.openPage=openPage;this.validateImage=validateImage;this.uiOwner=null;this.outbox=createSupplierOutbox();this.maintenanceAfter=new Map();
+  this.scope=scope;this.openPage=openPage;this.ensureProfile=ensureProfile;this.validateImage=validateImage;this.uiOwner=null;this.outbox=createSupplierOutbox();this.maintenanceAfter=new Map();
  }
  readiness(){
-  const base=super.readiness();return {...base,vinted:'partial',salesOnly:true,capabilities:{...base.capabilities,publish:typeof this.openPage==='function'&&typeof this.validateImage==='function',messages:false,offers:false,saleConfirmation:false,shippingLabel:false,procurement:false},message:'售卖后台已接入照片准备、商品填写和单次发布；逐项核对通过才执行，发布结果不明确会保留原记录并暂停。消息、报价和成交页面仍待真实联调；采购不在此模式中执行。'};
+  const base=super.readiness(),publish=typeof this.openPage==='function'&&typeof this.validateImage==='function';return {...base,vinted:'partial',salesOnly:true,capabilities:{...base.capabilities,publish,autoOpenProfile:publish&&typeof this.ensureProfile==='function',messages:false,offers:false,saleConfirmation:false,shippingLabel:false,procurement:false},message:'启动后台后会自动打开计划对应环境，沿用原登录会话，核对账号并准备照片、填写商品和单次发布。登录失效或结果不明确会暂停。消息、报价和成交页面仍待真实联调；采购不在此模式中执行。'};
  }
  assertOwned({engine,job,signal},expected){
   const rows=engine.db.jobs.filter(row=>row.id===job.id),current=rows[0],plans=engine.db.plans.filter(row=>row.id===job.planId),plan=plans[0];
@@ -39,8 +39,8 @@ class VintedSalesRuntime extends VintedAdapter {
  async requireReady(profileId,context){
   if(context?.job?.type!=='listing'||!this.readiness().capabilities.publish)throw fail('CAPABILITY_UNVERIFIED','此网页步骤尚未验证，任务保留等待联调');
   this.assertOwned(context);
-  const w=this.windows.get(profileId);if(!w||w.isDestroyed())throw fail('PROFILE_NOT_OPEN','请先打开对应账号环境并完成登录');
-  if(w.aiAgent?.state?.running||w.closingPromise||w.navigationPending||w.vintedDraftController)throw fail('PAGE_BUSY','该窗口正在使用，后台将在空闲后继续');
+  const w=this.windows.get(profileId);if((!w||w.isDestroyed())&&!this.readiness().capabilities.autoOpenProfile)throw fail('PROFILE_NOT_OPEN','请先打开对应账号环境并完成登录');
+  if(w&&(w.aiAgent?.state?.running||w.closingPromise||w.navigationPending||w.vintedDraftController))throw fail('PAGE_BUSY','该窗口正在使用，后台将在空闲后继续');
   if(this.uiOwner)throw fail('WORKSPACE_BUSY','另一个账号正在操作网页，当前任务等待页面操作完成');
  }
  account(engine,profileId){
@@ -65,18 +65,26 @@ class VintedSalesRuntime extends VintedAdapter {
   return this.scope.run(owner,async()=>{
    let submitted=false,ownedTab=null;
    const guard=()=>this.assertOwned({...context,job},expected);
-   let account;const accountGuard=()=>{
+   let account;const identityGuard=()=>{
     guard();const latest=this.account(engine,profileId);if(latest.memberId!==account.memberId||latest.profileURL!==account.profileURL)throw fail('ACCOUNT_CHANGED','环境登录绑定已改变');
+   };
+   const accountGuard=()=>{
+    identityGuard();
     const w=this.windows.get(profileId);if(!w||w.isDestroyed()||w.aiAgent?.state?.running||w.closingPromise)throw fail('PAGE_BUSY','当前窗口正在被使用，已停止后台操作');
     if(ownedTab&&(w.activeTab!==ownedTab.id||ownedTab.view.webContents.isDestroyed()))throw fail('TAB_CHANGED','当前标签已切换，保留原页面等待核对');
    };
    const go=async(url,role)=>{accountGuard();ownedTab=null;const opened=await this.openPage(profileId,url,{signal,guard:accountGuard,jobId:job.id,role});ownedTab=opened?.tab;if(!ownedTab)throw fail('PAGE_CHANGED','后台页面没有返回原标签回执');accountGuard();};
    try{
     account=this.account(engine,profileId);
-    accountGuard();
+    identityGuard();
     if(plan.activeListingId||engine.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&row.state!=='cancelled'&&!row.closedSale))throw fail('PUBLICATION_EXISTS','原商品或提交记录尚未关闭，不能再次刊登');
     for(const key of ['title','description','condition','brand','color','parcel'])if(typeof plan.listing?.[key]!=='string'||!plan.listing[key].trim())throw fail('LISTING_INCOMPLETE','计划缺少已确认的商品字段：'+key);
     if(!Array.isArray(plan.listing.categoryPath)||!plan.listing.categoryPath.length)throw fail('LISTING_INCOMPLETE','计划缺少已确认的完整商品分类');
+    if(typeof this.ensureProfile==='function'){
+     this.step(context,'open_environment',expected);
+     await this.ensureProfile(profileId,{signal,guard:identityGuard,jobId:job.id});
+    }
+    accountGuard();
     this.step(context,'check_catalog',expected);
     await go(account.profileURL,'catalog');
     const catalog=await this.inspectCatalog(profileId,{expectedAccount:account,title:plan.listing.title,signal});accountGuard();

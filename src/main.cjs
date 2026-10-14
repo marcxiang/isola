@@ -77,7 +77,7 @@ function ensureCommerce(){
   const seal=value=>{if(!safeStorage.isEncryptionAvailable()||process.platform==='linux'&&safeStorage.getSelectedStorageBackend?.()==='basic_text')throw Error('系统加密不可用，无法保存密钥');return safeStorage.encryptString(value).toString('base64');};
   const unseal=value=>safeStorage.decryptString(Buffer.from(value,'base64'));
   const accounts=new AccountsStore({dir,profiles:list,seal,unseal,assertMutable:assertAccountMutable,onChange:()=>commerce?.emit()});
-  commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedSalesRuntime({windows,isBusy:id=>commerce?.active.has(id)||!!windows.get(id)?.closingPromise||!!windows.get(id)?.navigationPending,openPage:openSalesPage,validateImage:bytes=>{const image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('照片无法完整解码');return image.getSize();}}),accounts,seal,unseal,onChange:commerceChanged});
+  commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedSalesRuntime({windows,isBusy:id=>commerce?.active.has(id)||!!windows.get(id)?.closingPromise||!!windows.get(id)?.navigationPending,ensureProfile:ensureSalesProfile,openPage:openSalesPage,validateImage:bytes=>{const image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('照片无法完整解码');return image.getSize();}}),accounts,seal,unseal,onChange:commerceChanged});
   commerceAccounts=new CommerceAccountService({engine:commerce,store:accounts,openPage:openAccountPage,login:new VintedLogin(commerce.adapter)});
   commerceLoadError=false;
  }
@@ -238,9 +238,10 @@ function removeTab(w,tab) {
 async function closeTab(w,tab) {
   const closed=await closeContents(tab);if(closed)removeTab(w,tab);return closed;
 }
-function closeBrowserWindow(w) {
+function closeBrowserWindow(w,{userInitiated=true}={}) {
   if(w.isDestroyed())return Promise.resolve(true);
   if(w.closingPromise)return w.closingPromise;
+  if(userInitiated&&!quitting)commerce?.stopProfile(w.profile.id,'PROFILE_CLOSED');
   w.closingPromise=(async()=>{
     await stopPageAutomation(w);commerce?.active.get(w.profile.id)?.abort();w.controlOverlay.clear();
     const ordered=[...w.tabs].sort((a,b)=>Number(b.id===w.activeTab)-Number(a.id===w.activeTab));
@@ -291,6 +292,18 @@ async function openAccountPage(profileId,{signal,guard,freshLogin=false}){
 }
 // Only the main-process runtime can request these tabs. Keep user tabs and
 // interrupted drafts intact; a stopped AI is never silently restarted/stopped.
+async function ensureSalesProfile(profileId,{signal,guard,jobId}){
+ const valid=()=>{
+  guard();const engine=commerce;
+  if(quitting||signal.aborted||!engine||engine.active.get(profileId)?.signal!==signal||!engine.leases.snapshot().some(row=>row.profileId===profileId&&row.jobId===jobId))throw Object.assign(Error('后台启动环境已停止'),{code:'STOPPED'});
+ };
+ valid();
+ if(locks.has(profileId))throw Object.assign(Error('该环境正在启动，后台稍后继续'),{code:'PAGE_BUSY'});
+ if(!windows.has(profileId))await launch(profileId,{guard:valid,initialURL:'about:blank'});
+ valid();const w=windows.get(profileId);
+ if(!w||w.isDestroyed()||w.closingPromise||w.navigationPending||w.aiAgent?.state?.running||w.vintedDraftController)throw Object.assign(Error('该环境尚未空闲，后台稍后继续'),{code:'PAGE_BUSY'});
+ return {profileId};
+}
 async function openSalesPage(profileId,url,{signal,guard,jobId,role}){
  guard();const w=windows.get(profileId),engine=commerce;
  const valid=()=>{
@@ -344,12 +357,12 @@ async function addTab(w, target) {
   try { await configure(c, w.profile, tab); await navigateTab(w, tab, target || localFile('check.html')); } catch (e) { tab.error = e.message; sendState(w); throw e; }
   return tab;
 }
-async function launch(id) {
-  const p = profile(id); if (windows.has(id)) { windows.get(id).focus(); return; } if (locks.has(id)) throw Error('环境正在启动');
+async function launch(id,{guard=()=>{},initialURL}={}) {
+  guard();const p = profile(id); if (locks.has(id)) throw Object.assign(Error('环境正在启动'),{code:'PAGE_BUSY'});if (windows.has(id)) { windows.get(id).focus(); return; }
   locks.add(id); notify(); let w, route;
   try {
-    const s = sesFor(p); route = await createProxyRoute(p.proxy); routes.set(id, route);
-    await s.setProxy(route.config); await s.closeAllConnections();
+    const s = sesFor(p); route = await createProxyRoute(p.proxy); routes.set(id, route);guard();
+    await s.setProxy(route.config);guard();await s.closeAllConnections();guard();
     const fingerprint=fingerprintFor(p);
     const nativeLanguages=[...new Set([app.getLocale(),...app.getPreferredSystemLanguages()])].join(',');
     s.setUserAgent(fingerprint.userAgent, fingerprint.enabled?fingerprint.acceptLanguage:nativeLanguages);
@@ -369,10 +382,10 @@ async function launch(id) {
     w.on('close',e=>{w.vintedDraftController?.abort();if(w.closeApproved)return;e.preventDefault();void closeBrowserWindow(w).catch(error=>{log('window close stopped: '+error.message);const tab=w.tabs.find(t=>t.id===w.activeTab);if(tab){tab.error=error.message;sendState(w);}});});
     w.on('closed', () => { w.vintedDraftController?.abort();w.aiAgent.stop();commerce?.active.get(id)?.abort();invalidateAccountObservation(id); for (const t of [...w.tabs]) { if (!t.view.webContents.isDestroyed()) t.view.webContents.close(); } windows.delete(id); routes.delete(id); s.closeAllConnections().finally(() => route.close()).catch(() => {}); notify(); });
     // The toolbar is usable even while a tab is starting or a proxy is unavailable.
-    await w.loadFile(path.join(__dirname, 'browser.html')); await addTab(w, p.url);
+    await w.loadFile(path.join(__dirname, 'browser.html'));guard();await addTab(w, initialURL||p.url);guard();
     const openedBefore=p.lastOpenedAt;p.lastOpenedAt=new Date().toISOString();try{save();}catch{p.lastOpenedAt=openedBefore;log('recent-open metadata could not be saved');}
     log('environment started');
-  } catch (e) { log('environment startup failed: ' + e.message); if (w && !w.isDestroyed()) w.close(); else if (route) { await route.close(); routes.delete(id); } throw e; }
+  } catch (e) { log('environment startup failed: ' + e.message); if (w && !w.isDestroyed()) await closeBrowserWindow(w,{userInitiated:false}); else if (route) { await route.close(); routes.delete(id); } throw e; }
   finally { locks.delete(id); notify(); }
 }
 async function testProxy(input, endpoint = 'https://api.ipify.org?format=json') {
@@ -400,7 +413,7 @@ function managerOnly(e) { if (!manager || manager.isDestroyed() || e.sender !== 
 function browserWindow(e) { const w = BrowserWindow.fromWebContents(e.sender); if (!w || !w.profile || e.sender !== w.webContents || e.senderFrame!==w.webContents.mainFrame || e.sender.getURL()!==localFile('browser.html')) throw Error('无权访问浏览器控制'); return w; }
 function register() {
   const handle = (name, fn) => ipcMain.handle(name, (e, ...args) => { managerOnly(e); return fn(...args); });
-  handle('list', list); handle('save', saveProfile); handle('launch', launch); handle('stop', id => windows.get(id)?.close()); handle('delete', deleteProfile); handle('clear', clearProfile); handle('duplicate', duplicateProfile); handle('proxy-test', input => testProxy(input));
+  handle('list', list); handle('save', saveProfile); handle('launch', id=>launch(id)); handle('stop', id => windows.get(id)?.close()); handle('delete', deleteProfile); handle('clear', clearProfile); handle('duplicate', duplicateProfile); handle('proxy-test', input => testProxy(input));
   handle('batch', async (ids, action) => { if (!Array.isArray(ids) || ids.length > 100 || !['launch', 'stop'].includes(action)) throw Error('批量操作无效'); const failures = []; for (const id of new Set(ids)) { try { if (action === 'launch') await launch(id); else windows.get(id)?.close(); } catch (e) { failures.push({ name: profiles.find(p => p.id === id)?.name || id, error: e.message }); } } return failures; });
   handle('export', async ids => { const rows = ids?.length ? profiles.filter(p => ids.includes(p.id)) : profiles; const r = await dialog.showSaveDialog(manager, { defaultPath: 'Isola-profiles.json', filters: [{ name: 'JSON 配置', extensions: ['json'] }] }); if (r.canceled) return; fs.writeFileSync(r.filePath, JSON.stringify(exportProfiles(rows), null, 2), { mode: 0o600 }); return rows.length; });
   handle('import', async () => { const r = await dialog.showOpenDialog(manager, { filters: [{ name: 'JSON 配置', extensions: ['json'] }], properties: ['openFile'] }); if (r.canceled) return; if (fs.statSync(r.filePaths[0]).size > 2 * 1024 * 1024) throw Error('配置文件不能超过 2 MB'); const rows = importProfiles(JSON.parse(fs.readFileSync(r.filePaths[0], 'utf8'))); const before = profiles; profiles = [...profiles, ...rows]; try { save(); } catch (e) { profiles = before; throw e; } notify(); return rows.length; });
@@ -442,7 +455,7 @@ function register() {
     if(!['go','new','check','switch','close','back','forward','reload','stop'].includes(action))throw Error('浏览器操作无效');
     if(action==='stop'){
       if(w.navigationRequest)w.navigationRequest.cancelled=true;
-      w.vintedDraftController?.abort();w.aiAgent?.stop();commerce?.active.get(w.profile.id)?.abort();w.controlOverlay.clear();
+      w.vintedDraftController?.abort();w.aiAgent?.stop();commerce?.stopProfile(w.profile.id,'PROFILE_STOPPED');w.controlOverlay.clear();
       const tab=w.tabs.find(t=>t.id===w.activeTab),c=tab?.view.webContents;
       if(c&&!c.isDestroyed()){c.stop();tab.url=c.getURL();tab.loading=false;sendState(w);}
       return;

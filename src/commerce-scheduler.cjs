@@ -57,9 +57,14 @@ function inspectQueue(input,{now=Date.now()}={}){
   const counts=(values,key)=>{const map=new Map();for(const value of values){const k=value?.[key];if(k)map.set(k,(map.get(k)||0)+1);}return map;};
   const jobIds=counts(jobs,'id'),dedupes=counts(jobs,'dedupeKey'),planIds=counts(plans,'id'),profileIds=counts(profiles,'id');
   const quarantined=new Set(jobs.filter(j=>j?.state==='uncertain'||j?.mutationPending===true||(['queued','running'].includes(j?.state)&&hasEvidence(j))).map(j=>j.profileId));
+  const manuallyPaused=new Set(jobs.filter(j=>j?.state==='needs_review'&&['PROFILE_CLOSED','PROFILE_STOPPED'].includes(j.blockedReason)).map(j=>j.profileId));
   for(const job of jobs){
     let status;
-    const plan=plans.find(p=>p?.id===job?.planId),profile=profiles.find(p=>p?.id===job?.profileId);
+    const plan=plans.find(p=>p?.id===job?.planId),profile=profiles.find(p=>p?.id===job?.profileId),readiness=input.readinessByProfile?.[job?.profileId]||input.readiness;
+    // This runtime freshly verifies the original account before preparing or
+    // publishing, whether it opens the fixed profile or uses an existing window.
+    const liveAccountCheck=job?.type==='listing'&&['closed','running'].includes(profile?.status)&&readiness?.capabilities?.publish===true&&readiness?.capabilities?.autoOpenProfile===true;
+    const autoOpen=liveAccountCheck&&profile.status==='closed';
     if(!job?.id||jobIds.get(job.id)!==1||!job.dedupeKey||dedupes.get(job.dedupeKey)!==1)status=decision('blocked','DUPLICATE_JOB','任务编号或业务去重编号缺失或重复。','核对原任务，不能自动选择或重新创建。');
     else if(!STATES.has(job.state)||!CAPABILITIES[job.type])status=decision('blocked','INVALID_JOB_STATE','任务类型或状态无法识别。','保留原记录并检查数据。');
     else if(job.state==='uncertain'||job.mutationPending===true||(['queued','running'].includes(job.state)&&hasEvidence(job)))status={...reconcile(),state:'blocked'};
@@ -74,15 +79,17 @@ function inspectQueue(input,{now=Date.now()}={}){
     else if(input.configBusy)status=decision('waiting','CONFIG_BUSY','连接或配置正在更新。','等待配置保存完成。');
     else if(active.has(job.profileId))status=decision('waiting','PROFILE_BUSY','该环境已有操作正在执行。','等待原操作释放环境。');
     else if(quarantined.has(job.profileId))status=decision('blocked','PROFILE_RECONCILE_REQUIRED','该环境存在结果不明的业务操作。','先核对原操作，再恢复该账号的其他任务。');
-    else if(profile.status!=='running')status=decision('waiting','PROFILE_NOT_OPEN','该环境尚未就绪。','打开对应环境并确认账号登录。');
+    else if(manuallyPaused.has(job.profileId))status=decision('blocked','PROFILE_MANUALLY_PAUSED','此账号的后台操作已被手动停止。','先核对任务记录中被关闭或停止的原任务，再重试或取消该任务以恢复此账号。');
+    else if(profile.status!=='running'&&!autoOpen)status=decision('waiting','PROFILE_NOT_OPEN',profile.status==='starting'?'该环境正在启动或清理。':'该环境尚未就绪。',profile.status==='starting'?'等待环境启动或清理完成。':'打开对应环境并确认账号登录。');
     else if(job.type==='listing'&&(plan.activeListingId||!Number.isSafeInteger(plan.completedCount)||!Number.isSafeInteger(plan.targetCount)||plan.completedCount>=plan.targetCount||job.payload?.cycle!==plan.completedCount))status=decision('blocked','LISTING_CYCLE_CHANGED','该刊登周期已变化、已有在售商品或销售目标已完成。','核对原在售记录和累计销量，不能重复刊登。');
     else if(job.type==='listing'&&Array.isArray(input.sales)&&input.sales.some(s=>s.planId===plan.id&&!jobs.some(other=>other.id===s.jobId&&['fulfillment','sale_confirmation'].includes(other.type)&&other.planId===plan.id&&other.state==='completed'&&other.mutationPending===false&&other.result?.verified===true&&other.result?.externalId&&(other.type!=='sale_confirmation'||other.result.externalId===s.platformOrderId&&other.result.kind==='sale_confirmation'))))status=decision('blocked','SALE_CYCLE_PENDING','原成交的处理结果尚未完整核对。','先核对原成交任务，完成后才能进入下一次刊登周期。');
     else if(job.retryAt!=null&&!Number.isFinite(timestamp(job.retryAt)))status=decision('blocked','INVALID_RETRY_RECORD','任务重试时间无效。','检查任务记录后人工恢复。');
     else if(job.retryAt!=null&&timestamp(job.retryAt)>current)status=WAITING_CODES.has(job.blockedReason)?decision('waiting',job.blockedReason,clean(job.error)||'原任务正在等待已验证能力或窗口就绪。','保持原任务，等待对应前置条件完成。',{retryAt:new Date(timestamp(job.retryAt)).toISOString()}):decision('waiting','RETRY_DELAY','任务正在等待下次读取检查。','等待约定时间；无需重复点击运行。',{retryAt:new Date(timestamp(job.retryAt)).toISOString()});
     else {
-      const readiness=input.readinessByProfile?.[job.profileId]||input.readiness,missing=CAPABILITIES[job.type].filter(cap=>readiness?.capabilities?.[cap]!==true);
+      const missing=CAPABILITIES[job.type].filter(cap=>readiness?.capabilities?.[cap]!==true);
       status=readiness?.salesOnly===true&&job.type==='fulfillment'?decision('blocked','PROCUREMENT_DISABLED','当前为纯售卖模式，采购履约任务不会执行。','保留原业务记录；该模式只处理售卖和成交确认。'):missing.length?decision('blocked','CAPABILITY_UNVERIFIED','此任务所需网页步骤尚未验证：'+missing.join('、')+'。','先完成对应步骤的真实页面联调。',{missingCapabilities:missing}):accountProblem(job.profileId,job,input,current);
-      if(!status)status=decision('eligible','READY','任务前置检查通过，等待本轮调度。','运行时继续逐步核对账号、页面及业务回执。');
+      if(liveAccountCheck&&status?.reasonCode==='ACCOUNT_RECHECK_REQUIRED')status=null;
+      if(!status)status=autoOpen?decision('eligible','PROFILE_AUTO_OPEN','调度时将自动打开此账号的固定环境。','无需手动打开；重新核对登录身份和商品资料，通过后上架。'):decision('eligible','READY','任务前置检查通过，等待本轮调度。',liveAccountCheck?'执行时会重新核对当前页面的登录身份，确认一致后继续核对商品和发布回执。':'运行时继续逐步核对账号、页面及业务回执。');
     }
     rows.push({jobId:job?.id||null,profileId:job?.profileId||null,planId:job?.planId||null,type:job?.type||null,...status});
   }

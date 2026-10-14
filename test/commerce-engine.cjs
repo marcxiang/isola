@@ -113,6 +113,39 @@ test('stopping during a prepared listing prevents publication after the awaited 
   const entered=deferred(),release=deferred();const f=await fixture(t,{adapter:{prepareListing:async(p,{claim})=>{entered.resolve();await release.promise;return {productId:p.productId,priceCents:p.listingPriceCents,currency:'EUR',imageCount:claim.images.length,imagesVerified:true,claimId:claim.id,imageIds:claim.images.map(i=>i.id)};}}});const running=f.engine.runOnce();await entered.promise;f.engine.setRunning(false);release.resolve();await running;assert.equal(f.counts.listing,0);assert.equal(f.engine.active.size,0);
 });
 
+test('closing an idle profile while background runs holds its pending plans without affecting another profile',async t=>{
+ const f=await fixture(t),second=f.engine.savePlan(planInput({productId:'product-2'})),other=f.engine.savePlan(planInput({profileId:'profile-2'}));f.engine.seed();
+ const held=f.engine.db.jobs.find(job=>job.planId===f.plan.id),same=f.engine.db.jobs.find(job=>job.planId===second.id),unaffected=f.engine.db.jobs.find(job=>job.planId===other.id),beforeOther=JSON.stringify(unaffected);f.engine.running=true;
+ assert.equal(f.engine.stopProfile('profile-1','PROFILE_CLOSED'),true);assert.equal(held.state,'needs_review');assert.equal(held.blockedReason,'PROFILE_CLOSED');assert.equal(same.state,'queued');assert.equal(JSON.stringify(unaffected),beforeOther);assert.equal(f.engine.running,true);
+ assert.equal(JSON.parse(fs.readFileSync(f.engine.file,'utf8')).jobs.find(job=>job.id===held.id).blockedReason,'PROFILE_CLOSED');
+ await f.engine.runOnce();assert.equal(held.state,'needs_review');assert.equal(same.state,'queued');assert.equal(unaffected.state,'completed');assert.equal(f.counts.listing,1);assert.equal(f.calls.find(call=>call.name==='publishListing').args.plan,other.id);
+ f.engine.setRunning(false);await f.engine.resolve(held.id,'retry');await f.engine.runOnce();assert.equal(held.state,'completed');assert.equal(same.state,'queued');assert.equal(f.counts.listing,2);
+});
+
+test('closing before the first tick seeds a hold only for that profile and preserves it across restart',async t=>{
+ const f=await fixture(t);f.engine.savePlan(planInput({profileId:'profile-2'}));assert.equal(f.engine.db.jobs.length,0);f.engine.running=true;
+ assert.equal(f.engine.stopProfile('profile-1','PROFILE_CLOSED'),true);assert.equal(f.engine.db.jobs.length,1);const held=f.engine.db.jobs[0];assert.equal(held.profileId,'profile-1');assert.equal(held.state,'needs_review');assert.equal(held.blockedReason,'PROFILE_CLOSED');assert.equal(held.operation,null);assert.equal(held.mutationPending,false);assert.equal(f.counts.listing,0);
+ assert.equal(f.engine.stopProfile('profile-1','PROFILE_CLOSED'),false);assert.equal(f.engine.db.jobs.length,1);f.engine.setRunning(false);
+ const restored=new CommerceEngine(f.options);try{const saved=restored.db.jobs.find(job=>job.id===held.id);assert.equal(saved.state,'needs_review');assert.equal(saved.blockedReason,'PROFILE_CLOSED');await restored.runOnce();assert.equal(saved.state,'needs_review');assert.equal(f.calls.filter(call=>call.name==='publishListing'&&call.args.plan===f.plan.id).length,0);}finally{await restored.close();}
+});
+
+test('manual close while the scheduler is stopped leaves both seeded and unseeded plans available for later automation',async t=>{
+ const f=await fixture(t);assert.equal(f.engine.stopProfile('profile-1','PROFILE_CLOSED'),false);assert.equal(f.engine.db.jobs.length,0);f.engine.seed();const before=JSON.stringify(f.engine.db);
+ assert.equal(f.engine.stopProfile('profile-1'),false);assert.equal(JSON.stringify(f.engine.db),before);assert.throws(()=>f.engine.stopProfile('profile-1','invented'),TypeError);assert.equal(JSON.stringify(f.engine.db),before);
+});
+
+test('profile stop aborts an active business job with the original reason and waits for its normal recovery',async t=>{
+ const entered=deferred(),release=deferred();const f=await fixture(t,{adapter:{requireReady:async(_profile,{signal})=>{entered.resolve(signal);await release.promise;if(signal.aborted)throw Object.assign(Error('Adapter observed cancellation'),{code:'STOPPED'});}}});
+ const run=f.engine.runOnce(),signal=await entered.promise;assert.equal(f.engine.stopProfile('profile-1'),true);assert.equal(signal.aborted,true);assert.equal(signal.reason.code,'PROFILE_STOPPED');release.resolve();await run;
+ const job=f.engine.db.jobs[0];assert.equal(job.state,'needs_review');assert.equal(job.blockedReason,'PROFILE_STOPPED');assert.equal(job.operation,null);assert.equal(f.counts.listing,0);assert.equal(f.engine.active.size,0);
+});
+
+test('closing during a polling lease aborts polling and persists a hold before the same tick can start a listing',async t=>{
+ const entered=deferred(),release=deferred();const f=await fixture(t,{adapter:{poll:async(_profile,{signal})=>{entered.resolve(signal);await release.promise;return [];}}});f.engine.running=true;
+ const run=f.engine.runOnce(),signal=await entered.promise,owner=f.engine.active.get('profile-1');assert.equal(f.engine.stopProfile('profile-1','PROFILE_CLOSED'),true);assert.equal(signal.aborted,true);assert.equal(owner.signal.reason.code,'PROFILE_CLOSED');release.resolve();await run;
+ const job=f.engine.db.jobs[0];assert.equal(job.state,'needs_review');assert.equal(job.blockedReason,'PROFILE_CLOSED');assert.equal(f.counts.listing,0);assert.equal(f.counts.claim,0);assert.equal(f.engine.active.size,0);
+});
+
 test('a missing or unverified all-in purchase quote stops before reserving or ordering',async t=>{
   for(const quote of [null,{verified:false,currency:'EUR',totalCents:1200,productRevision:7},{verified:true,currency:'USD',totalCents:1200,productRevision:7},{verified:true,currency:'EUR',totalCents:12.5,productRevision:7}]){
     const f=await fixture(t,{adapter:{purchaseQuote:async()=>quote}});await f.listed();const job=f.engine.ingestEvent(f.plan.id,f.sale());await f.engine.runOnce();assert.equal(job.state,'needs_review');assert.equal(f.counts.order,0);assert.equal(f.engine.db.reservations.length,0);

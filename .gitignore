@@ -11,6 +11,7 @@ test-artifacts/
 *.key
 profiles.json*
 ai-settings.json*
+ai-profiles/
 commerce-state.json*
 commerce-accounts.json*
 Partitions/

@@ -15,13 +15,18 @@ body{margin:0;background:#f6f8fc;color:#25364b;font:14px -apple-system,BlinkMacS
 <p>直接读取本次页面的设备信号、自动控制迹象和渲染结果；不连接外部检测服务。手机配置属于桌面 Chromium 的移动端模拟。</p>
 <div id="summary" class="summary" role="status" aria-live="polite">正在读取环境参数…</div>
 <h2>环境一致性分析</h2><div id="findings"></div>
+<h2>浏览器兼容声明与实测品牌</h2><table id="browser-identity"></table>
 <h2>当前页面实际参数</h2><table id="configured"></table>
 <h2>系统默认项目</h2><table id="system"></table>
 <h2>手机输入与屏幕</h2><table id="mobile"></table>
 <h2>设备与自动控制检查</h2><table id="automation"></table>
 <h2>跨上下文一致性</h2><table id="contexts"><tr><td>检查状态</td><td>正在读取 Worker 与 iframe…</td></tr></table>
 <h2>图形、字体与音频</h2><table id="rendering"></table>
+<h2>WebGPU 实际适配器</h2><p>在限定时间内请求适配器并读取其信息与上限；不创建 GPUDevice、不执行着色器，不以 API 存在认定能力可用。</p><table id="webgpu"></table>
+<h2>ClientRects 布局重复采样</h2><table id="clientrects"></table>
+<h2>本机语音清单</h2><p>有限等待本机声音清单，仅显示 localService 条目；不播放、合成或发送语音。</p><table id="voices"></table>
 <h2>浏览器能力</h2><p>这里只检查 API 是否存在；没有申请或检查摄像头、麦克风、定位等权限，也没有枚举这些设备。</p><table id="capabilities"></table>
+<h2>本次检测范围</h2><table id="scope"></table>
 <p class="note">本机原生模式保留系统参数；自定义模式可能出现跨上下文差异。此版本通过 Chromium 调试协议设置页面指纹。本页未检测 SharedWorker 和 Service Worker，其参数一致性未经验证；它们可能保留宿主机参数。跨域嵌入页面也需另行检测。字体和底层设备信息可能与页面设置不同；这些设置不构成完整的系统身份伪装。Canvas、WebGL、AudioContext 未进行修改。参数一致或未发现特定自动控制信号，都不能证明网站会认定为真人或真实手机。</p>
 <details><summary>查看本次实测明细（仅本地）</summary><pre id="raw"></pre></details>
 </main>

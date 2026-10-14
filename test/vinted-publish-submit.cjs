@@ -3,6 +3,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),{EventEmitter}=require('node:events');
 const {createHash}=require('node:crypto');
 const {VintedPublishSubmit,publicationJournal}=require('../src/vinted-publish-submit.cjs');
+const {createDisplayController}=require('../src/display-transform.cjs');
 const FORM='https://www.vinted.fr/items/new',clone=value=>JSON.parse(JSON.stringify(value));
 const hash=value=>createHash('sha256').update(value).digest('hex'),photoSource='https://images.vinted.test/original.jpg';
 
@@ -47,6 +48,17 @@ test('one durable submission produces exactly one native click after visual feed
 test('another submit cannot replay an uncertain publication',async()=>{
  const f=fixture();await f.run();await assert.rejects(f.run(),{code:'PUBLICATION_EXISTS'});assert.equal(f.events.filter(event=>event.type==='mouseDown').length,1);
  const journal=publicationJournal(f.engine);assert.equal(journal,publicationJournal(f.engine));assert.equal(journal.state().submissions.length,1);
+});
+
+test('publication maps the proven CSS target once and refuses a resize during the final native read',async()=>{
+ const setup=async f=>{const controller=createDisplayController(f.contents,{metrics:{width:400,height:800},send:async()=>{}});await controller.update({scale:.5,bounds:{x:0,y:0,width:200,height:400}});await controller.configure();return controller;};
+ const good=fixture();await setup(good);await good.run();assert.deepEqual(good.events.map(event=>({type:event.type,x:event.x,y:event.y})),[{type:'mouseMove',x:45,y:60},{type:'mouseDown',x:45,y:60},{type:'mouseUp',x:45,y:60}]);assert.equal(good.engine.db.publications.submissions[0].attemptCount,1);
+ let controller;const changed=fixture({onAtomic:()=>{void controller.update({scale:.75,bounds:{x:0,y:0,width:300,height:600}});}});controller=await setup(changed);await assert.rejects(changed.run());assert.equal(changed.events.filter(event=>event.type==='mouseDown').length,0);
+});
+
+test('a native press failure still releases the started gesture once at its original point',async()=>{
+ const f=fixture({onInput:(_api,event)=>{if(event.type==='mouseDown')throw Error('Native press failed');}});
+ await assert.rejects(f.run());assert.deepEqual(f.events.map(event=>event.type),['mouseMove','mouseDown','mouseUp']);assert.deepEqual(f.events.at(-1),{type:'mouseUp',x:90,y:120,button:'left',clickCount:1});assert.equal(f.engine.db.publications.submissions[0].attemptCount,1);assert.equal(f.engine.db.publications.submissions[0].state,'uncertain');
 });
 
 test('native click navigation is persisted as a candidate, never as a completed listing receipt',async()=>{

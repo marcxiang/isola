@@ -107,7 +107,8 @@ module.exports=async function(api,check){
       const w=api.windows.get(p.id),c=w.tabs[0].view.webContents;w.show();w.focus();c.focus();c.setBackgroundThrottling(false);
       await c.executeJavaScript(`document.body.innerHTML='<button id="finger" style="display:block;margin:24px 16px;width:320px;height:160px">Phone input</button>';window.fingerEvents=[];window.fingerClicks=0;for(const type of ['pointerdown','pointerup','touchstart','touchend','click'])document.addEventListener(type,e=>fingerEvents.push({type:e.type,target:e.target.id,trusted:e.isTrusted,pointerType:e.pointerType||null}),{capture:true,passive:true});document.querySelector('#finger').onclick=()=>fingerClicks++;true`);
       await c.executeJavaScript('new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error("Phone fixture did not paint")),1500);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve(true)}));})');
-      const point=await c.executeJavaScript('(()=>{const r=document.querySelector("#finger").getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()');
+      const cssPoint=await c.executeJavaScript('(()=>{const r=document.querySelector("#finger").getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()');
+      const displayPoint=require('../src/display-transform.cjs').mapPoint(c,cssPoint),point={x:Math.round(displayPoint.x),y:Math.round(displayPoint.y)};
       const receipts=[];
       for(const kind of ['mouse','touch']){
         await c.executeJavaScript('fingerEvents=[];fingerClicks=0;true');

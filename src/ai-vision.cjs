@@ -1,5 +1,6 @@
 const { nativeImage } = require('electron');
 const { isolated } = require('./page-control.cjs');
+const {getDisplayState}=require('./display-transform.cjs');
 
 function visionError(code, message) { const error = new Error(message); error.code = code; return error; }
 function abort(signal) { if (signal?.aborted) throw visionError('ABORTED', '任务已停止'); }
@@ -73,18 +74,21 @@ async function captureModelImage(tab, { signal, allowedOrigins } = {}) {
   abort(signal);
   const c = tab?.view?.webContents;
   if (!c || c.isDestroyed()) throw visionError('VISION_UNAVAILABLE', '当前页面已关闭，无法获取视觉信息');
+  const display=getDisplayState(c);
+  if(!display.ready||display.scale!==1)throw visionError('VISION_GEOMETRY_UNSAFE','当前窗口正更新或缩小显示，已改用文字信息继续');
   const initialURL = c.getURL(), origin = originOf(initialURL);
   if (!origin || allowedOrigins && !allowedOrigins.has(origin)) throw visionError('VISION_ORIGIN_UNAPPROVED', '当前站点尚未获准读取，未截取页面');
   let png, bitmap;
   try {
     const before = await isolated(tab, GEOMETRY_SOURCE);
     abort(signal);
+    if(getDisplayState(c).version!==display.version||!getDisplayState(c).ready)throw visionError('VISION_LAYOUT_CHANGED','窗口显示比例已改变，本次不发送截图');
     const bounds = tab.view.getBounds(), zoom = c.getZoomFactor();
     checkGeometry(before, bounds, zoom);
     const captured = await c.capturePage();
     abort(signal);
     const after = await isolated(tab, GEOMETRY_SOURCE);
-    if (c.getURL() !== initialURL || after.url !== initialURL || !stableGeometry(before, after) || JSON.stringify(tab.view.getBounds()) !== JSON.stringify(bounds) || c.getZoomFactor() !== zoom) throw visionError('VISION_LAYOUT_CHANGED', '页面正在移动或跳转，本次不发送截图，暂时使用文字信息继续');
+    if (getDisplayState(c).version!==display.version||!getDisplayState(c).ready||getDisplayState(c).scale!==1||c.getURL() !== initialURL || after.url !== initialURL || !stableGeometry(before, after) || JSON.stringify(tab.view.getBounds()) !== JSON.stringify(bounds) || c.getZoomFactor() !== zoom) throw visionError('VISION_LAYOUT_CHANGED', '页面正在移动或跳转，本次不发送截图，暂时使用文字信息继续');
     if (captured.isEmpty()) throw visionError('VISION_UNAVAILABLE', '页面截图为空，暂时使用文字信息继续');
     // A PNG round-trip removes NativeImage representation-scale ambiguity on Retina displays.
     // Read physical pixel dimensions from the PNG header, then work on a 1x representation.

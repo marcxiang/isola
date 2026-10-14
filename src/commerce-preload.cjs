@@ -1,6 +1,7 @@
 'use strict';
 const {contextBridge, ipcRenderer} = require('electron');
 contextBridge.exposeInMainWorld('commerce', {
+  showEnvironments: () => ipcRenderer.invoke('commerce-home'),
   state: () => ipcRenderer.invoke('commerce-state'),
   saveSettings: input => ipcRenderer.invoke('commerce-settings-save', input),
   connect: () => ipcRenderer.invoke('commerce-connect'),

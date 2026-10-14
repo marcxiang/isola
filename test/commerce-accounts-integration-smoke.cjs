@@ -10,7 +10,7 @@ module.exports=async function accountsIntegration(api,check){
  let p,s,w,wrong;const c=api.getCommerce();
  try{
   p=api.saveProfile({name:'QA account center integration',url:'https://www.vinted.fr/',fingerprintMode:'native'});s=api.sesFor(p);s.protocol.handle('https',()=>new Response(html,{headers:{'content-type':'text/html; charset=utf-8'}}));
-  await api.openCommerce();const desk=api.getCommerceWindow().webContents;const js=code=>desk.executeJavaScript(code);
+  await api.openCommerce();const desk=api.getCommerceView().webContents;const js=code=>desk.executeJavaScript(code);
   let account;
   await check('account center IPC saves only encrypted credentials and emits a redacted account DTO',async()=>{
    const out=await js(`window.commerce.saveAccount({label:'Fixture account',login:'fixture_seller',profileId:${JSON.stringify(p.id)},password:'fixture-account-secret'})`);account=out.account;

@@ -6,6 +6,7 @@ const {PublicationJournal,buildPublicationProof,FORM_URL}=require('./vinted-publ
 const {VintedPublicationEvidence,FIELD_SPECS,probePublicationForm}=require('./vinted-publication-evidence.cjs');
 const {projectPublicationReconciliation}=require('./commerce-publication-reconcile.cjs');
 const {probeAccountDOM,memberURL}=require('./vinted-account.cjs');
+const {getDisplayState,assertDisplayVersion,mapPoint}=require('./display-transform.cjs');
 const journals=new WeakMap();
 const clone=value=>JSON.parse(JSON.stringify(value));
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
@@ -178,7 +179,7 @@ class VintedPublishSubmit{
    const accounts=engine.db.marketAccounts?.filter(account=>account.profileId===profileId)||[];
    ensure(accounts.length===1&&accounts[0].memberId===saved.expectedAccount.memberId&&accounts[0].profileURL===saved.expectedAccount.profileURL,'PUBLICATION_ACCOUNT_CHANGED','环境绑定账号已改变，未继续提交');
   };
-  context.guard=()=>{checkEngine();if(postClick){ensure(w&&!w.isDestroyed()&&w.tabs.find(tab=>tab.id===w.activeTab)===context.tab&&!contents.isDestroyed(),'PUBLICATION_PAGE_CHANGED','原发布窗口已改变');ensure(!w.aiAgent?.state?.running,'PAGE_BUSY','当前窗口已有其他控制任务');}else adapter.current(profileId,context);};
+  context.guard=()=>{checkEngine();if(postClick){ensure(w&&!w.isDestroyed()&&w.tabs.find(tab=>tab.id===w.activeTab)===context.tab&&!contents.isDestroyed(),'PUBLICATION_PAGE_CHANGED','原发布窗口已改变');ensure(!w.aiAgent?.state?.running,'PAGE_BUSY','当前窗口已有其他控制任务');}else{adapter.current(profileId,context);if(contents){assertDisplayVersion(contents,context.displayVersion);ensure(context.tab.isInputVisible?.()!==false,'INPUT_SURFACE_UNAVAILABLE','请先显示原发布窗口并切换到当前标签页');}}};
   const capture=(kind,url,mainFrame=true)=>{
    if(mainFrame===false)return;if(!clickIssued){controller.abort();return;}if(navigationClosed)return;
    const identity=candidateURL(url);if(!identity){if(url!==FORM_URL){navigationClosed=true;navigationResolve(null);}return;}
@@ -189,7 +190,7 @@ class VintedPublishSubmit{
   const started=(_event,url,_inPlace,mainFrame)=>capture('did-start-navigation',url,mainFrame),committed=(_event,url)=>capture('did-navigate',url,true),inPage=(_event,url,mainFrame)=>capture('did-navigate-in-page',url,mainFrame);
   try{
    if(signal?.aborted)throw error('STOPPED','刊登提交已停止');signal?.addEventListener('abort',cancel,{once:true});
-   checkEngine();const selected=adapter.current(profileId,context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;w.vintedDraftController=controller;
+   checkEngine();const selected=adapter.current(profileId,context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;context.displayVersion=getDisplayState(contents).version;context.guard();w.vintedDraftController=controller;
    timer=setTimeout(()=>{timedOut=true;controller.abort();},this.timeoutMs);
    contents.on?.('did-start-navigation',started);contents.on?.('did-navigate',committed);contents.on?.('did-navigate-in-page',inPage);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);
    const initialProof=await this.proof(saved,reader,context);record=await journal.prepare(initialProof);context.guard();
@@ -213,8 +214,10 @@ class VintedPublishSubmit{
     // No awaits, snapshot refreshes, target lookups, focus or visual callbacks
     // after this single final read: verify synchronously and dispatch input.
     const point=verifyFinalPublication(finalState,finalProof,saved,adapter,context.tab,target.elementId);context.guard();
-    const x=Math.round(point.x),y=Math.round(point.y);contents.sendInputEvent({type:'mouseMove',x,y});context.guard();
-    clickIssued=true;postClick=true;contents.sendInputEvent({type:'mouseDown',x,y,button:'left',clickCount:1});contents.sendInputEvent({type:'mouseUp',x,y,button:'left',clickCount:1});
+    const displayPoint=mapPoint(contents,point,context.displayVersion),x=Math.round(displayPoint.x),y=Math.round(displayPoint.y);contents.sendInputEvent({type:'mouseMove',x,y});context.guard();
+    clickIssued=true;postClick=true;
+    try{contents.sendInputEvent({type:'mouseDown',x,y,button:'left',clickCount:1});}
+    finally{if(!contents.isDestroyed())contents.sendInputEvent({type:'mouseUp',x,y,button:'left',clickCount:1});}
    },{signal:context.signal,timeoutMs:this.dispatchTimeoutMs});}
    finally{clearTimeout(dispatchTimer);dispatchDeadline=null;}
    await this.feedback(context,'performed',target);

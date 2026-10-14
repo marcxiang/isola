@@ -37,15 +37,15 @@ module.exports = async function commerceSmoke(api, check) {
   });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
   const baseURL = `http://127.0.0.1:${server.address().port}/api/v1`;
-  let window, wrongWindow, profile, engine, originalDB, originalConnection, plan;
+  let view, wrongWindow, profile, engine, originalDB, originalConnection, plan;
   const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
   const waitFor = async (predicate,message) => {
     const deadline = Date.now()+8000;
     while(Date.now()<deadline) { if(await predicate()) return; await sleep(30); }
     throw Error('Timed out: '+message);
   };
-  const frames = async () => {window.show();window.focus();let timer;try{await Promise.race([window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'),new Promise(resolve=>{timer=setTimeout(resolve,500);})]);}finally{clearTimeout(timer);}};
-  const invoke = (method,...args) => window.webContents.executeJavaScript(`window.commerce[${JSON.stringify(method)}](...${JSON.stringify(args)})`);
+  const frames = async () => {api.getManager().show();api.getManager().focus();view.webContents.focus();let timer;try{await Promise.race([view.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'),new Promise(resolve=>{timer=setTimeout(resolve,500);})]);}finally{clearTimeout(timer);}};
+  const invoke = (method,...args) => view.webContents.executeJavaScript(`window.commerce[${JSON.stringify(method)}](...${JSON.stringify(args)})`);
   try {
     engine = api.getCommerce();
     assert.equal(engine.running,false,'Commerce smoke requires an idle engine');
@@ -54,43 +54,43 @@ module.exports = async function commerceSmoke(api, check) {
     originalDB = JSON.parse(JSON.stringify(engine.db)); originalConnection = {...engine.connection};
     profile = api.saveProfile({name:'QA 运营法国环境',url:'https://www.vinted.fr',fingerprintMode:'native',width:1200,height:760});
 
-    await check('commerce window loads isolated renderer and truthful readiness without console errors',async()=>{
-      const loading = api.openCommerce();window=api.getCommerceWindow();
-      window.webContents.on('console-message',(event,level,message)=>{
+    await check('commerce view loads isolated renderer and truthful readiness without console errors',async()=>{
+      const loading = api.openCommerce();view=api.getCommerceView();
+      view.webContents.on('console-message',(event,level,message)=>{
         const details=event.details || event;
         const severity=typeof level==='number'?level:(typeof level==='object'?level.level:details.level);
         const text=typeof message==='string'?message:(typeof level==='object'?level.message:details.message);
         if(severity===3||severity==='error')consoleErrors.push(String(text || 'Renderer console error'));
       });
-      window.webContents.on('render-process-gone',(_,details)=>consoleErrors.push('Renderer exited: '+details.reason));
+      view.webContents.on('render-process-gone',(_,details)=>consoleErrors.push('Renderer exited: '+details.reason));
       await loading;await frames();
-      const rendered=await window.webContents.executeJavaScript(`({title:document.title,node:typeof require,bridge:typeof window.commerce.state,ready:document.querySelector('#readiness-title').textContent,hidden:document.querySelector('#load-error').hidden})`);
+      const rendered=await view.webContents.executeJavaScript(`({title:document.title,node:typeof require,bridge:typeof window.commerce.state,ready:document.querySelector('#readiness-title').textContent,hidden:document.querySelector('#load-error').hidden})`);
       assert.equal(rendered.node,'undefined');assert.equal(rendered.bridge,'function');assert.match(rendered.title,/运营工作台/);assert.match(rendered.ready,/联调准备/);assert.equal(rendered.hidden,true);
       const state=await invoke('state');assert.equal(state.readiness.vinted,'unverified');assert.equal(state.settings.backgroundEnabled,false);assert.equal(state.running,false);assert.deepEqual(consoleErrors,[]);
       return {isolatedRenderer:true,readiness:state.readiness.vinted};
     });
 
     await check('commerce settings form encrypts local API token and never returns it through UI state',async()=>{
-      await window.webContents.executeJavaScript(`(()=>{document.querySelector('[data-page="settings"]').click();const form=document.querySelector('#settings-form');form.elements.baseURL.value=${JSON.stringify(baseURL)};form.elements.token.value=${JSON.stringify(token)};form.elements.maxConcurrent.value='2';form.elements.perOrderLimit.value='0.00';form.elements.dailyLimit.value='0.00';form.elements.backgroundEnabled.checked=false;form.elements.fulfillmentMethod.value='wms';form.dispatchEvent(new Event('input',{bubbles:true}));form.requestSubmit();return true;})()`);
+      await view.webContents.executeJavaScript(`(()=>{document.querySelector('[data-page="settings"]').click();const form=document.querySelector('#settings-form');form.elements.baseURL.value=${JSON.stringify(baseURL)};form.elements.token.value=${JSON.stringify(token)};form.elements.maxConcurrent.value='2';form.elements.perOrderLimit.value='0.00';form.elements.dailyLimit.value='0.00';form.elements.backgroundEnabled.checked=false;form.elements.fulfillmentMethod.value='wms';form.dispatchEvent(new Event('input',{bubbles:true}));form.requestSubmit();return true;})()`);
       await waitFor(()=>engine.state().settings.hasToken,'encrypted API settings to save');
-      await waitFor(()=>window.webContents.executeJavaScript(`document.querySelector('#settings-form').elements.token.value===''`),'token form to clear after save');await frames();
+      await waitFor(()=>view.webContents.executeJavaScript(`document.querySelector('#settings-form').elements.token.value===''`),'token form to clear after save');await frames();
       const publicState=await invoke('state'), disk=fs.readFileSync(engine.file,'utf8');
       assert.equal(publicState.settings.hasToken,true);assert.equal(publicState.settings.baseURL,baseURL);assert.equal(publicState.settings.perOrderLimitCents,0);assert.equal(publicState.settings.dailyLimitCents,0);
       assert.equal(JSON.stringify(publicState).includes(token),false);assert.equal(disk.includes(token),false);assert.ok(JSON.parse(disk).encryptedToken);
-      const text=await window.webContents.executeJavaScript('document.body.innerText');assert.equal(text.includes(token),false);assert.match(text,/普通账号/);
+      const text=await view.webContents.executeJavaScript('document.body.innerText');assert.equal(text.includes(token),false);assert.match(text,/普通账号/);
       return {encryptedOnDisk:true,tokenRedacted:true,purchaseLimits:0};
     });
 
     await check('commerce connects and syncs catalog through actual localhost SKU Desk transport',async()=>{
-      await window.webContents.executeJavaScript(`document.querySelector('#connect').click()`);
+      await view.webContents.executeJavaScript(`document.querySelector('#connect').click()`);
       await waitFor(()=>engine.connection.status==='connected','SKU account connection');
       // Connection state is emitted before the renderer's request finally
       // releases its controls. Wait for the actual sync action to be usable.
-      await waitFor(()=>window.webContents.executeJavaScript(`!document.querySelector('#sync').disabled`),'sync control after connection');
-      await window.webContents.executeJavaScript(`document.querySelector('[data-page="inventory"]').click();document.querySelector('#sync').click()`);
+      await waitFor(()=>view.webContents.executeJavaScript(`!document.querySelector('#sync').disabled`),'sync control after connection');
+      await view.webContents.executeJavaScript(`document.querySelector('[data-page="inventory"]').click();document.querySelector('#sync').click()`);
       await waitFor(()=>engine.db.products.length===2&&engine.db.photoSets.length===3,'catalog and photo sets sync');await frames();
       const state=await invoke('state');assert.equal(state.connection.account,'QA SKU Desk');assert.equal(state.products[0].priceCents,790);assert.equal(state.products[0].stock,12);assert.equal(state.photoSets[1].claimedByMe,true);
-      const table=await window.webContents.executeJavaScript(`({products:document.querySelectorAll('#products tr').length,sets:document.querySelectorAll('.photo-set').length,photos:document.querySelector('#photo-sets').innerText})`);
+      const table=await view.webContents.executeJavaScript(`({products:document.querySelectorAll('#products tr').length,sets:document.querySelectorAll('.photo-set').length,photos:document.querySelector('#photo-sets').innerText})`);
       assert.equal(table.products,2);assert.equal(table.sets,3);assert.match(table.photos,/可领取/);assert.match(table.photos,/已被你领取/);assert.match(table.photos,/已被他人使用/);
       for(const route of ['/api/v1/me','/api/v1/products','/api/v1/photos/sets'])assert.ok(requests.some(request=>request.path===route&&request.method==='GET'));
       for(const request of requests.filter(request=>request.path!=='/api/v1/me')){assert.equal(request.query.page,'1');assert.equal(request.query.pageSize,'100');}
@@ -98,29 +98,29 @@ module.exports = async function commerceSmoke(api, check) {
     });
 
     await check('commerce plan form rejects fractional cents and requires explicit sale prices',async()=>{
-      const blank=await window.webContents.executeJavaScript(`(()=>{document.querySelector('[data-page="plans"]').click();document.querySelector('#new-plan').click();const form=document.querySelector('#plan-form');form.elements.profileId.value=${JSON.stringify(profile.id)};form.elements.productId.value='commerce-product-1';form.elements.productId.dispatchEvent(new Event('change',{bubbles:true}));return {price:form.elements.listingPrice.value,min:form.elements.minOffer.value,enabled:form.elements.enabled.checked,help:document.querySelector('#plan-product-info').textContent};})()`);
+      const blank=await view.webContents.executeJavaScript(`(()=>{document.querySelector('[data-page="plans"]').click();document.querySelector('#new-plan').click();const form=document.querySelector('#plan-form');form.elements.profileId.value=${JSON.stringify(profile.id)};form.elements.productId.value='commerce-product-1';form.elements.productId.dispatchEvent(new Event('change',{bubbles:true}));return {price:form.elements.listingPrice.value,min:form.elements.minOffer.value,enabled:form.elements.enabled.checked,help:document.querySelector('#plan-product-info').textContent};})()`);
       assert.equal(blank.price,'');assert.equal(blank.min,'');assert.equal(blank.enabled,false);assert.match(blank.help,/采购价/);
-      await window.webContents.executeJavaScript(`(()=>{const form=document.querySelector('#plan-form');form.elements.targetCount.value='3';form.elements.listingPrice.value='24.905';form.elements.minOffer.value='19.50';form.requestSubmit();return true;})()`);
-      await waitFor(()=>window.webContents.executeJavaScript(`!document.querySelector('#plan-error').hidden`),'fractional-cent validation');
-      assert.equal(engine.db.plans.length,0);assert.match(await window.webContents.executeJavaScript(`document.querySelector('#plan-error').textContent`),/两位小数/);
+      await view.webContents.executeJavaScript(`(()=>{const form=document.querySelector('#plan-form');form.elements.targetCount.value='3';form.elements.listingPrice.value='24.905';form.elements.minOffer.value='19.50';form.requestSubmit();return true;})()`);
+      await waitFor(()=>view.webContents.executeJavaScript(`!document.querySelector('#plan-error').hidden`),'fractional-cent validation');
+      assert.equal(engine.db.plans.length,0);assert.match(await view.webContents.executeJavaScript(`document.querySelector('#plan-error').textContent`),/两位小数/);
     });
 
     await check('commerce saves cumulative sales plan with EUR cents and renders isolated environment rules',async()=>{
-      await window.webContents.executeJavaScript(`(()=>{const form=document.querySelector('#plan-form');form.elements.listingPrice.value='24,90';form.elements.minOffer.value='19.50';form.elements.autoReply.checked=true;form.elements.autoAcceptOffers.checked=true;form.elements.reuseOwnPhotos.checked=true;form.elements.replyPolicy.value='仅根据已确认商品信息回答';form.elements.listingTitle.value='Chemise QA';form.elements.listingDescription.value='Description précise du test';form.elements.listingCategoryPath.value='Femmes / Vêtements';form.elements.listingCondition.value='Très bon état';form.requestSubmit();return true;})()`);
-      await waitFor(()=>engine.db.plans.length===1,'sales plan save');await waitFor(()=>window.webContents.executeJavaScript(`!document.querySelector('#plan-dialog').open`),'plan editor close');await frames();
+      await view.webContents.executeJavaScript(`(()=>{const form=document.querySelector('#plan-form');form.elements.listingPrice.value='24,90';form.elements.minOffer.value='19.50';form.elements.autoReply.checked=true;form.elements.autoAcceptOffers.checked=true;form.elements.reuseOwnPhotos.checked=true;form.elements.replyPolicy.value='仅根据已确认商品信息回答';form.elements.listingTitle.value='Chemise QA';form.elements.listingDescription.value='Description précise du test';form.elements.listingCategoryPath.value='Femmes / Vêtements';form.elements.listingCondition.value='Très bon état';form.requestSubmit();return true;})()`);
+      await waitFor(()=>engine.db.plans.length===1,'sales plan save');await waitFor(()=>view.webContents.executeJavaScript(`!document.querySelector('#plan-dialog').open`),'plan editor close');await frames();
       plan=engine.db.plans[0];assert.equal(plan.profileId,profile.id);assert.equal(plan.productId,'commerce-product-1');assert.equal(plan.targetCount,3);assert.equal(plan.listingPriceCents,2490);assert.equal(plan.minOfferCents,1950);assert.equal(plan.currency,'EUR');assert.equal(plan.enabled,false);assert.equal(plan.reuseOwnPhotos,true);assert.equal(plan.activeListingId,null);assert.equal(plan.listing.title,'Chemise QA');assert.deepEqual(plan.listing.categoryPath,['Femmes','Vêtements']);assert.equal(plan.listing.condition,'Très bon état');
-      const text=await window.webContents.executeJavaScript(`document.querySelector('#plans').innerText`);assert.match(text,/QA 法国衬衫/);assert.match(text,/QA 运营法国环境/);assert.match(text,/累计成交/);assert.match(text,/一个在售商品/);
+      const text=await view.webContents.executeJavaScript(`document.querySelector('#plans').innerText`);assert.match(text,/QA 法国衬衫/);assert.match(text,/QA 运营法国环境/);assert.match(text,/累计成交/);assert.match(text,/一个在售商品/);
       return {targetSales:plan.targetCount,listingPriceCents:plan.listingPriceCents,minOfferCents:plan.minOfferCents,enabled:false};
     });
 
     await check('commerce preflight UI reads product details without writes and names the missing browser step',async()=>{
       const before=requests.length;
-      await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('#plans button')).find(b=>b.textContent==='核对资料').click()`);
-      await waitFor(()=>window.webContents.executeJavaScript(`document.querySelector('#preflight-dialog').open&&document.querySelector('#preflight-detail').innerText.includes('请先打开对应浏览器环境')`),'preflight result to identify closed environment');
-      const report=await window.webContents.executeJavaScript(`({text:document.querySelector('#preflight-detail').innerText,fillDisabled:document.querySelector('#preflight-fill').disabled})`);
+      await view.webContents.executeJavaScript(`Array.from(document.querySelectorAll('#plans button')).find(b=>b.textContent==='核对资料').click()`);
+      await waitFor(()=>view.webContents.executeJavaScript(`document.querySelector('#preflight-dialog').open&&document.querySelector('#preflight-detail').innerText.includes('请先打开对应浏览器环境')`),'preflight result to identify closed environment');
+      const report=await view.webContents.executeJavaScript(`({text:document.querySelector('#preflight-detail').innerText,fillDisabled:document.querySelector('#preflight-fill').disabled})`);
       assert.match(report.text,/Chemise QA/);assert.match(report.text,/Description exacte du fournisseur QA/);assert.match(report.text,/没有|未验证|尚未验证/);assert.equal(report.fillDisabled,true);
       assert.ok(requests.slice(before).some(r=>r.path==='/api/v1/products/commerce-product-1'));assert.ok(requests.slice(before).some(r=>r.query.productId===plan.productId));assert.ok(requests.slice(before).every(r=>r.method==='GET'));
-      await window.webContents.executeJavaScript(`document.querySelector('#preflight-dialog').close()`);
+      await view.webContents.executeJavaScript(`document.querySelector('#preflight-dialog').close()`);
       return {supplierReadOnly:true,missingBrowserReported:true,fieldFillDisabled:true};
     });
 
@@ -152,14 +152,14 @@ module.exports = async function commerceSmoke(api, check) {
     await check('unverified production Vinted adapter pauses queue with zero supplier or marketplace writes',async()=>{
       await invoke('setPlanEnabled',plan.id,true);
       const before=requests.length;
-      await window.webContents.executeJavaScript(`document.querySelector('#run-once').click()`);
+      await view.webContents.executeJavaScript(`document.querySelector('#run-once').click()`);
       await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='needs_review'),'unverified live adapter review state');await frames();
       const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'needs_review');assert.match(job.error,/未联调|未验证/);assert.equal(job.mutationPending,false);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
       assert.equal(requests.length,before);assert.equal(requests.filter(request=>request.method!=='GET').length,0);
-      await window.webContents.executeJavaScript(`document.querySelector('[data-page="jobs"]').click();document.querySelector('#jobs button').click()`);await frames();
-      const receipt=await window.webContents.executeJavaScript(`({text:document.querySelector('#job-detail').innerText,reconcileHidden:document.querySelector('#reconcile-form').hidden})`);
+      await view.webContents.executeJavaScript(`document.querySelector('[data-page="jobs"]').click();document.querySelector('#jobs button').click()`);await frames();
+      const receipt=await view.webContents.executeJavaScript(`({text:document.querySelector('#job-detail').innerText,reconcileHidden:document.querySelector('#reconcile-form').hidden})`);
       assert.match(receipt.text,/需要核对/);assert.match(receipt.text,/未联调|未验证/);assert.equal(receipt.reconcileHidden,true);
-      await window.webContents.executeJavaScript(`document.querySelector('#job-dialog').close()`);
+      await view.webContents.executeJavaScript(`document.querySelector('#job-dialog').close()`);
       await invoke('runOnce');assert.equal(engine.db.jobs.length,1);assert.equal(requests.length,before);
       return {jobState:job.state,writeRequests:0,duplicateJobs:0};
     });
@@ -196,7 +196,7 @@ module.exports = async function commerceSmoke(api, check) {
   } finally {
     if(wrongWindow&&!wrongWindow.isDestroyed())wrongWindow.destroy();
     if(engine){if(engine.running)engine.setRunning(false);if(originalDB){engine.db=originalDB;engine.connection=originalConnection;engine.persist();engine.emit();}}
-    if(window&&!window.isDestroyed())window.close();
+    await api.showEnvironmentManager();
     if(profile)await api.deleteProfile(profile.id);
     server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
   }

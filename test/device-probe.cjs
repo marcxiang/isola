@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm');
-const {read,compare,audio,analyze}=require('../src/device-probe.cjs');
+const {read,compare,audio,analyze,browserIdentity,webgpu,clientRects,voices,detectionScope}=require('../src/device-probe.cjs');
 function fixture(overrides={}){
  const page={ua:'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/144.0.0.0 Mobile Safari/537.36',platform:'Linux armv8l',language:'fr-FR',languages:['fr-FR','fr'],timezone:'Europe/Paris',cpu:8,memory:8,webdriver:false,uaData:{brands:[{brand:'Chromium',version:'144'}],mobile:true,platform:'Android'},hints:{mobile:true,platform:'Android'},maxTouchPoints:5,input:{pointerCoarse:true,hover:false},screen:{width:412,height:915,dpr:2.625},automation:{controlGlobals:[]},...overrides};
  return {page,comparisons:{worker:{verified:true,consistent:true,differences:[],fields:['ua','platform']},iframe:{verified:true,consistent:true,differences:[],fields:['ua','platform','maxTouchPoints']}},graphics:{canvasStable:true},audio:{available:true,sampleRate:44100,value:124.04,repeatValue:124.04,stable:true,finite:true}};
@@ -61,4 +61,69 @@ test('audio reports actual repeated offline samples without opening media device
 });
 test('empty analyzer input preserves uncertainty and never invents mobile capability',()=>{
  const report=analyze({});assert.equal(report.mobile,false);assert.equal(report.reportedOS,null);assert.equal(report.counts.unavailable,2);assert.equal(finding(report,'touch'),undefined);assert.match(finding(report,'os-consistency').detail,/未知/);
+});
+
+test('high entropy model and form factors are measured without converting the Chromium brand to Google Chrome',async()=>{
+ const requested=[],scope={navigator:{userAgent:'Mozilla/5.0 Chrome/152.0.1234.9',platform:'Win32',languages:['en'],userAgentData:{brands:[{brand:'Chromium',version:'152'}],mobile:false,platform:'Windows',getHighEntropyValues:async keys=>{requested.push(keys);return {model:'Pixel 7',formFactors:['Mobile'],fullVersionList:[{brand:'Chromium',version:'152.0.1234.9'}]};}}},Intl};
+ const page=await read(scope),identity=browserIdentity(page);assert.equal(requested.length,1);assert.ok(requested[0].includes('model'));assert.ok(requested[0].includes('formFactors'));assert.equal(page.hintsStatus,'measured');assert.equal(identity.model,'Pixel 7');assert.deepEqual(identity.formFactors,['Mobile']);assert.equal(identity.uaCompatibility,'Chrome 兼容声明');assert.equal(identity.uaVersion,'152.0.1234.9');assert.deepEqual(identity.reportedBrands,[{brand:'Chromium',version:'152'}]);assert.deepEqual(identity.fullVersionList,[{brand:'Chromium',version:'152.0.1234.9'}]);assert.match(identity.explanation,/不将 Chromium 改名为 Google Chrome/);
+ const ios=browserIdentity({ua:'Mozilla/5.0 CriOS/152.0.0.0 Mobile'});assert.equal(ios.uaCompatibility,'CriOS 兼容声明');assert.equal(ios.model,null);assert.equal(ios.formFactors,null);assert.deepEqual(ios.reportedBrands,[]);
+});
+
+test('older Client Hints implementations retain measurable fields when formFactors is rejected',async()=>{
+ const calls=[],navigator={userAgent:'ua',languages:[],userAgentData:{brands:[],getHighEntropyValues:async keys=>{calls.push(keys);if(keys.includes('formFactors'))throw Error('unsupported hint');return {model:'Measured model',architecture:'arm'};}}};
+ const result=await read({navigator,Intl});assert.equal(calls.length,2);assert.equal(result.hints.model,'Measured model');assert.equal(result.hints.architecture,'arm');assert.equal(browserIdentity(result).formFactors,null);
+});
+
+test('WebGPU requests an actual adapter and reports its own metadata and limits without creating a device',async()=>{
+ let adapters=0,devices=0;const result=await webgpu({navigator:{gpu:{requestAdapter:async()=>{adapters++;return {info:{vendor:'measured vendor',architecture:'measured arch',device:'measured device',description:'measured description',subgroupMinSize:4},limits:{maxTextureDimension2D:8192,maxBindGroups:4,maxBufferSize:268435456},features:new Set(['texture-compression-bc']),requestDevice:()=>{devices++;throw Error('must not request device');}};}}}});
+ assert.equal(result.status,'measured');assert.equal(result.adapterAvailable,true);assert.equal(result.info.vendor,'measured vendor');assert.equal(result.limits.maxTextureDimension2D,8192);assert.equal(result.limits.maxBufferSize,268435456);assert.deepEqual(result.features,['texture-compression-bc']);assert.equal(adapters,1);assert.equal(devices,0);
+});
+
+test('WebGPU API existence, absent adapters and redacted identities never imply fully available hardware',async()=>{
+ assert.equal((await webgpu({navigator:{}})).status,'unavailable');
+ const missing=await webgpu({navigator:{gpu:{requestAdapter:async()=>null}}});assert.equal(missing.apiPresent,true);assert.equal(missing.adapterAvailable,false);assert.equal(missing.status,'unavailable');
+ const redacted=await webgpu({navigator:{gpu:{requestAdapter:async()=>({info:{vendor:'',architecture:'',device:'',description:''},limits:{maxBindGroups:4}})}}});assert.equal(redacted.status,'measured');assert.equal(redacted.identityStatus,'limited');assert.equal(redacted.info.vendor,'');assert.match(redacted.reason,/未据此猜测/);
+ const denied=await webgpu({navigator:{gpu:{requestAdapter:async()=>{throw Error('GPU disabled');}}}});assert.equal(denied.status,'limited');assert.equal(denied.adapterAvailable,false);
+ const infoDenied=await webgpu({navigator:{gpu:{requestAdapter:async()=>({get info(){throw Error('adapter identity restricted');}})}}});assert.equal(infoDenied.status,'limited');assert.equal(infoDenied.adapterAvailable,true);
+});
+
+test('WebGPU timeout returns an unconfirmed state and does not start extra reads on a late adapter',async()=>{
+ let resolveAdapter,infoReads=0;const task=webgpu({navigator:{gpu:{requestAdapter:()=>new Promise(resolve=>{resolveAdapter=resolve;})}}},{timeoutMs:15});
+ const result=await task;assert.equal(result.status,'timeout');assert.equal(result.adapterAvailable,false);resolveAdapter({get info(){infoReads++;return {vendor:'too late'};}});await new Promise(setImmediate);assert.equal(infoReads,0);
+});
+
+function layoutScope(samples){
+ let reads=0,removed=0,appended=0;const scope={document:{body:{append(){appended++;}},createElement(tag){return tag==='div'?{style:{},setAttribute(){},append(){},remove(){removed++;}}:{set textContent(value){},getClientRects(){const sample=samples[Math.min(reads++,samples.length-1)];if(sample instanceof Error)throw sample;return sample;}};}}};
+ return {scope,counts:()=>({reads,removed,appended})};
+}
+const rect={x:0.125,y:2,width:40,height:18,top:2,right:40.125,bottom:20,left:0.125};
+
+test('ClientRects measures repeated finite geometry and removes its local sample on success or restriction',()=>{
+ const stable=layoutScope([[rect],[rect]]),result=clientRects(stable.scope);assert.equal(result.status,'measured');assert.equal(result.finite,true);assert.equal(result.stable,true);assert.equal(result.sample[0].x,0.125);assert.deepEqual(stable.counts(),{reads:2,removed:1,appended:1});
+ const changed=layoutScope([[rect],[{...rect,width:41}]]);assert.equal(clientRects(changed.scope).stable,false);
+ const bad=layoutScope([Error('layout unavailable')]);assert.equal(clientRects(bad.scope).status,'limited');assert.equal(bad.counts().removed,1);
+ assert.equal(clientRects({}).status,'unavailable');assert.equal(clientRects(layoutScope([[],[]]).scope).status,'unavailable');
+});
+
+function voiceScope(initial=[]){
+ const listeners=new Set();let current=initial,speechCalls=0;
+ return {scope:{speechSynthesis:{getVoices:()=>current,addEventListener:(type,handler)=>{assert.equal(type,'voiceschanged');listeners.add(handler);},removeEventListener:(_type,handler)=>listeners.delete(handler),speak:()=>{speechCalls++;throw Error('must never speak');}}},set(value){current=value;for(const listener of [...listeners])listener();},counts:()=>({listeners:listeners.size,speechCalls})};
+}
+test('voices waits for a local catalog, lists local metadata only and never speaks',async()=>{
+ const f=voiceScope([{name:'Remote service',lang:'en-US',localService:false}]),promise=voices(f.scope,{timeoutMs:100});
+ f.set([{name:'Local French',lang:'fr-FR',localService:true,default:true},{name:'Remote service',lang:'en-US',localService:false},{name:'Unknown locality',lang:'en-US'}]);
+ const result=await promise;assert.equal(result.status,'measured');assert.equal(result.count,1);assert.equal(result.unlistedCount,2);assert.deepEqual(result.voices,[{name:'Local French',lang:'fr-FR',default:true,localService:true}]);assert.deepEqual(f.counts(),{listeners:0,speechCalls:0});
+});
+
+test('voices missing, restricted and timed-out catalogs remain unavailable or limited and always remove listeners',async()=>{
+ assert.equal((await voices({})).status,'unavailable');
+ const empty=voiceScope(),result=await voices(empty.scope,{timeoutMs:10});assert.equal(result.status,'timeout');assert.equal(result.count,0);assert.match(result.reason,/不能据此认定/);assert.equal(empty.counts().listeners,0);
+ const remote=voiceScope([{name:'Remote',localService:false}]);assert.equal((await voices(remote.scope,{timeoutMs:10})).status,'limited');assert.deepEqual(remote.counts(),{listeners:0,speechCalls:0});
+ const denied=await voices({speechSynthesis:{getVoices(){throw Error('blocked');}}});assert.equal(denied.status,'limited');
+});
+
+test('new diagnostics expose uncertainty in analysis and scope instead of claiming device authenticity or storage isolation',()=>{
+ const data=fixture();data.webgpu={status:'unavailable',apiPresent:true,adapterAvailable:false,reason:'No adapter'};data.clientRects={status:'measured',finite:true,stable:false,count:2};data.voices={status:'timeout',reason:'Not loaded'};
+ const report=analyze(data);assert.equal(finding(report,'webgpu').status,'unavailable');assert.equal(finding(report,'clientrects').status,'mismatch');assert.equal(finding(report,'voices').status,'unavailable');assert.equal(finding(report,'browser-identity').status,'limited');
+ const scope=detectionScope(data);for(const id of ['storage-isolation','public-ip','webrtc-leak','tls-dns','other-contexts','sensitive-devices'])assert.equal(scope.find(row=>row.id===id).status,'not-tested');assert.equal(scope.find(row=>row.id==='identity').status,'not-verifiable');assert.match(scope.find(row=>row.id==='storage-isolation').detail,/主进程/);assert.match(scope.find(row=>row.id==='identity').detail,/不保证/);
 });

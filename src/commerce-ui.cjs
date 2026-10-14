@@ -157,7 +157,7 @@
     return {key:'saved',label:'待登录',tone:'neutral'};
   }
   function accountResultText(account){
-    const result=account.lastResult;if(!result)return account.hasPassword?'登录密码已保存，打开环境后可尝试登录。':'尚未保存密码；可编辑补充，或打开环境手动登录。';
+    const result=account.lastResult;if(!result||result.status==='saved')return account.hasPassword?'登录密码已保存，打开环境后可尝试登录。':'尚未保存密码；可编辑补充，或打开环境手动登录。';
     if(['logged_in','authenticated','verified'].includes(result.status))return '最近一次账号菜单读取已完成；当前会话仍以实际窗口为准。';
     if(['awaiting_user','awaiting_result','submitted','manual_required','needs_manual','challenge','uncertain'].includes(result.status)||/SUBMIT|UNCERTAIN|CHALLENGE|CAPTCHA|MANUAL|AWAIT|MFA|TWO_FACTOR/i.test(result.code||''))return '请手动接管当前窗口，完成登录或验证后点击“核对登录”；不要重复提交结果未明的登录。';
     if(['error','failed','blocked'].includes(result.status))return '最近登录未完成，请检查账号资料并打开窗口处理；遇到验证请手动接管。';
@@ -652,6 +652,7 @@
   function updateProductInfo(resetPrice=false) {const product=find(state.products,planForm.elements.productId.value);$('#plan-product-info').textContent=product?`SKU ${product.sku || '—'} · 库存 ${product.stock ?? '待核对'} · 采购价 ${currency(product.priceCents)} · 可用图片 ${product.photoSetsAvailable ?? '待核对'} 套`:'选择货盘商品后查看库存和图片。';if(resetPrice){planForm.elements.listingPrice.value='';planForm.elements.minOffer.value='';for(const field of Object.values(listingFields))planForm.elements[field].value='';} }
 
   document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener('click',()=>changePage(button.dataset.page)));
+  $('#workspace-environments').addEventListener('click',()=>{void api.showEnvironments().catch(error=>toast(cleanError(error)));});
   document.querySelectorAll('[data-close]').forEach(button=>button.addEventListener('click',()=>document.getElementById(button.dataset.close).close()));
   $('#new-account').addEventListener('click',()=>editAccount());
   $('#account-search').addEventListener('input',renderAccounts);$('#account-status').addEventListener('change',renderAccounts);

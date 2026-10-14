@@ -6,7 +6,9 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 ## Project status / 当前状态
 
-The current development version is **0.5.3-dev.4**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. One real test item was published at €5 using 0.5.2. Operator-reviewed receipt association is now connected through the main process, with expiring single-use capabilities, a fresh detail read and one full database commit. It still requires matching photo evidence and live validation. It is not a completed unattended commerce system.
+本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
+
+The current development version is **0.5.3-dev.5**. The multi-account operations dashboard, durable photo preparation, native upload verification, account binding and publication checks are integrated. A guarded manual publication step records one attempt before clicking; an uncertain result blocks another submission. One real test item was published at €5 using 0.5.2. Operator-reviewed receipt association is now connected through the main process, with expiring single-use capabilities, a fresh detail read and one full database commit. It still requires matching photo evidence and live validation. It is not a completed unattended commerce system.
 
 - Environment management, persistent Chromium sessions, proxy configuration, AI click/scroll feedback, supplier catalog synchronization and listing plans are implemented.
 - Listing fields, photo upload and one guarded manual publication have been exercised on Vinted France. The live item was checked visually; application receipt association, buyer messages, offers, shipping labels and real supplier purchases still need end-to-end validation.
@@ -18,6 +20,8 @@ The current development version is **0.5.3-dev.4**. The multi-account operations
 ## Features / 功能
 
 - Separate persistent Chromium sessions for browsing profiles, with tabs and configuration import/export.
+- One main window for environment management and commerce, with separate normal/automation profile lists and per-environment encrypted model settings.
+- Fixed custom-device viewports with proportional display when the outer window resizes; screen, DPR, touch and device identity remain configured independently of the host window.
 - An encrypted Vinted account center with fixed profile bindings, dedicated one-attempt email/password login, verified account-menu receipts and manual handoff for security challenges. Real-account authentication still requires live validation.
 - Native-device mode and configurable user agent, language, timezone and viewport settings.
 - HTTP and SOCKS5 proxies, including authentication, connection checks and local SOCKS bridging.

@@ -28,7 +28,7 @@ module.exports=async(api,check)=>{
   res.end(JSON.stringify(out));
  });
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port;
- const reset=async(next,protocol='responses',visionEnabled=false)=>{mode=next;count=0;requests=[];events=[];const c=w.tabs[0].view.webContents;await c.loadURL(origin+'/page');if(visionEnabled){w.show();w.focus();c.focus();c.setBackgroundThrottling(false);await c.executeJavaScript('new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error("Vision fixture did not paint")),1500);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve(true)}));})');}saveSettings({baseURL:origin+'/v1',protocol,model:'flow-qa',apiKey:'',maxSteps:10,visionEnabled});};
+ const reset=async(next,protocol='responses',visionEnabled=false)=>{mode=next;count=0;requests=[];events=[];const c=w.tabs[0].view.webContents;await c.loadURL(origin+'/page');if(visionEnabled){w.show();w.focus();c.focus();c.setBackgroundThrottling(false);await c.executeJavaScript('new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error("Vision fixture did not paint")),1500);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve(true)}));})');}saveSettings({baseURL:origin+'/v1',protocol,model:'flow-qa',apiKey:'',maxSteps:10,visionEnabled},p.id);};
  try{
   p=api.saveProfile({name:'QA AI flow',url:origin+'/page',fingerprintMode:'native',width:1100,height:800});await api.launch(p.id);w=api.windows.get(p.id);const c=w.tabs[0].view.webContents;originalThrottling=c.getBackgroundThrottling();
   const emit=w.aiAgent.emit.bind(w.aiAgent);w.aiAgent.emit=()=>{events.push(JSON.parse(JSON.stringify(w.aiAgent.state)));emit();};

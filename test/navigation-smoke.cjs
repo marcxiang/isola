@@ -65,7 +65,7 @@ module.exports=async function navigationSmoke(api,check){
   });
   await check('open listing IPC keeps existing page and reuses exact form tab without reload',async()=>{
    engine=api.getCommerce();originalPlans=engine.db.plans.slice();engine.db.plans.push({id:'qa-navigation-plan',profileId:profile.id,productId:'qa-nav',sku:'QA-NAV'});
-   await api.openCommerce();const desk=api.getCommerceWindow().webContents;
+   await api.openCommerce();const desk=api.getCommerceView().webContents;
    const open=()=>desk.executeJavaScript(`window.commerce.openListing('qa-navigation-plan')`);
    const oldTab=tab,oldCount=w.tabs.length;let result=await open();assert.equal(result.profileId,profile.id);assert.equal(result.url,'https://www.vinted.fr/items/new');assert.equal(w.tabs.length,oldCount+1);assert.ok(w.tabs.includes(oldTab));const form=w.tabs.find(t=>t.id===w.activeTab);await form.view.webContents.executeJavaScript(`window.marker='preserved'`);result=await open();assert.equal(w.tabs.length,oldCount+1);assert.equal(await form.view.webContents.executeJavaScript('window.marker'),'preserved');
    engine.db.plans=originalPlans;originalPlans=null;
@@ -74,7 +74,7 @@ module.exports=async function navigationSmoke(api,check){
    engine=api.getCommerce();const plans=engine.db.plans.slice(),claims=engine.db.claims.slice();
    const plan={id:'qa-active-listing',profileId:profile.id,productId:'qa-nav',sku:'QA-NAV',activeListingId:'123456'},receipt={listingId:'123456',url:'https://www.vinted.fr/items/123456-fixture'};
    engine.db.plans.push(plan);engine.db.claims.push({id:'qa-nav-claim',profileId:profile.id,productId:plan.productId,listings:[receipt]});
-   try{await api.openCommerce();const desk=api.getCommerceWindow().webContents,open=()=>desk.executeJavaScript(`window.commerce.openActiveListing('qa-active-listing')`),before=w.tabs.slice();
+   try{await api.openCommerce();const desk=api.getCommerceView().webContents,open=()=>desk.executeJavaScript(`window.commerce.openActiveListing('qa-active-listing')`),before=w.tabs.slice();
     const result=await open();assert.equal(result.profileId,profile.id);assert.equal(result.url,receipt.url);assert.equal(w.tabs.length,before.length+1);assert.ok(before.every(tab=>w.tabs.includes(tab)));
     const current=w.tabs.find(tab=>tab.id===w.activeTab);await current.view.webContents.executeJavaScript(`window.listingMarker='preserved'`);await open();assert.equal(w.tabs.length,before.length+1);assert.equal(await current.view.webContents.executeJavaScript('window.listingMarker'),'preserved');
     receipt.url='https://outside-fixture.invalid/items/123456';await assert.rejects(open(),/没有可核对/);assert.equal(w.tabs.length,before.length+1);

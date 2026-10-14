@@ -78,6 +78,7 @@ module.exports = async function visionRegression(api, check) {
     await check('custom emulated viewport is rejected when native view geometry differs', async () => {
       customProfile = api.saveProfile({ name: 'QA custom visual geometry', url: origin, fingerprintMode: 'custom', width: 1200, height: 760 });
       await api.launch(customProfile.id); customWindow = api.windows.get(customProfile.id);
+      customWindow.setSize(820,620,false);await new Promise(resolve=>setTimeout(resolve,150));await customWindow.tabs[0].display.whenReady();
       const customTab = customWindow.tabs[0], bounds = customTab.view.getBounds();
       const viewport = await customTab.view.webContents.executeJavaScript('({width:innerWidth,height:innerHeight})');
       assert.ok(Math.abs(viewport.width - bounds.width) > 1 || Math.abs(viewport.height - bounds.height) > 1, 'Fixture must exercise mismatched emulation geometry');

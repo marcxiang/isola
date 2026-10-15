@@ -6,11 +6,12 @@ const {SKUDeskClient}=require('../src/sku-desk.cjs');
 const {preflight,prepareDraft,collect,READ_TIMEOUT_MS,FIELD_TIMEOUT_MS}=require('../src/commerce-preflight.cjs');
 
 const rawProduct={id:'supplier-test-id',sku:'test',name:'TEST ACCESSOIRE',description:'Accessoire de test, dimensions indiquées dans les photos.',stock:5,unit_price_cents:500,revision:1};
+const confirmedListing={title:'Confirmed fixture title',description:'Confirmed fixture description.',categoryPath:['Maison','Accessoires'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'};
 const page={url:'https://www.vinted.fr/items/new',title:'Vends tes articles',fields:[{label:'Titre',value:''}],accountLabel:'Fixture seller'};
 const claim=(id,overrides={})=>({id,setId:'set-'+id,profileId:'profile-one',productId:rawProduct.id,listings:[],images:[{url:'/api/v1/photos/images/'+id}],...overrides});
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};};
 
-async function fixture(t,{product=rawProduct,sets=()=>({sets:[],total:0}),adapter={},listing={}}={}){
+async function fixture(t,{product=rawProduct,sets=()=>({sets:[],total:0}),adapter={},listing=confirmedListing}={}){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'isola-preflight-test-')),requests=[],prepared=[];
   const client=new SKUDeskClient({baseURL:'https://sku.example.test/api/v1',token:'FAKE-FIXTURE-TOKEN',fetchImpl:async(url,options)=>{
     const parsed=new URL(url);requests.push({method:options.method,path:parsed.pathname,query:Object.fromEntries(parsed.searchParams),signal:options.signal});
@@ -57,21 +58,21 @@ test('a foreign product photo or malformed later page cannot partially replace c
   }
 });
 
-test('field readiness is separate from publishing and does not require or acquire photos',async t=>{
-  const f=await fixture(t),report=await preflight(f.engine,f.plan.id);
+test('live partial-field readiness does not authorize offline preparation of unconfirmed plan fields',async t=>{
+  const f=await fixture(t,{listing:{}}),report=await preflight(f.engine,f.plan.id);
   assert.equal(report.readyForFields,true);assert.equal(report.photos.totalCount,0);assert.equal(report.checks.find(c=>c.name==='图片套组').ok,false);assert.equal(report.checks.find(c=>c.name==='Vinted 分类').ok,false);assert.equal(report.checks.find(c=>c.name==='真实发布能力').ok,false);assert.ok(report.missing.some(text=>text.includes('发布回执')));
-  const result=await prepareDraft(f.engine,f.plan.id);assert.equal(f.prepared.length,1);assert.equal(result.published,false);assert.equal(result.saved,false);assert.equal(result.draftComplete,false);assert.equal(f.engine.db.claims.length,0);assert.equal(f.engine.db.jobs.length,0);assert.ok(f.requests.every(r=>r.method==='GET'));
+  const result=await prepareDraft(f.engine,f.plan.id);assert.equal(f.prepared.length,0);assert.equal(result.preflight.readyForFields,false);assert.equal(result.published,false);assert.equal(result.saved,false);assert.equal(result.draftComplete,false);assert.equal(f.engine.db.claims.length,0);assert.equal(f.engine.db.jobs.length,0);assert.equal(f.requests.length,2);
 });
 
-test('missing product description blocks form preparation rather than inventing details',async t=>{
-  const f=await fixture(t,{product:{...rawProduct,description:'   '}}),result=await prepareDraft(f.engine,f.plan.id);
-  assert.equal(result.preflight.readyForFields,false);assert.equal(result.preflight.listing.description,'');assert.ok(result.missing.some(text=>text.includes('描述')));assert.deepEqual(result.filled,[]);assert.equal(result.published,false);assert.equal(result.saved,false);assert.equal(f.prepared.length,0);
+test('missing saved description blocks form preparation without fetching or inventing supplier details',async t=>{
+  const f=await fixture(t,{listing:{...confirmedListing,description:''}}),result=await prepareDraft(f.engine,f.plan.id);
+  assert.equal(result.preflight.readyForFields,false);assert.equal(result.preflight.listing.description,'');assert.ok(result.missing.some(text=>text.includes('描述')));assert.deepEqual(result.filled,[]);assert.equal(result.published,false);assert.equal(result.saved,false);assert.equal(f.prepared.length,0);assert.equal(f.requests.length,0);
 });
 
 test('explicit listing values and sale price reach the adapter exactly, without substituting supplier cost or claims',async t=>{
   const listing={title:'Titre confirmé',description:'Description confirmée.\nDimensions : 10 cm.',categoryPath:['Maison','Décoration'],condition:'Très bon état',brand:'Sans marque',size:'Unique',color:'Noir',parcel:'Petit'};
   const f=await fixture(t,{product:{...rawProduct,unit_price_cents:125},listing});const result=await prepareDraft(f.engine,f.plan.id);
-  assert.equal(f.prepared.length,1);assert.equal(f.prepared[0].profileId,f.plan.profileId);assert.deepEqual(f.prepared[0].listing,{...listing,priceCents:500});assert.ok(f.prepared[0].signal instanceof AbortSignal);assert.equal(result.preflight.product.priceCents,125);assert.equal(f.engine.db.claims.length,0);
+  assert.equal(f.prepared.length,1);assert.equal(f.prepared[0].profileId,f.plan.profileId);assert.deepEqual(f.prepared[0].listing,{...listing,priceCents:500});assert.ok(f.prepared[0].signal instanceof AbortSignal);assert.equal(result.preflight.product.priceCents,500);assert.equal(result.preflight.stockVerified,false);assert.equal(f.engine.db.claims.length,0);assert.equal(f.requests.length,0);
 });
 
 test('a non-listing page or inspection error blocks field preparation',async t=>{
@@ -149,4 +150,47 @@ test('a hanging later photo page times out without replacing any earlier catalog
   }}),before=fs.readFileSync(f.engine.file,'utf8');
   t.mock.timers.enable({apis:['setTimeout']});const pending=preflight(f.engine,f.plan.id),rejected=assert.rejects(pending,e=>e.code==='READ_TIMEOUT');await entered.promise;t.mock.timers.tick(READ_TIMEOUT_MS);await rejected;
   assert.equal(requestSignal.aborted,true);assert.equal(f.engine.state().configBusy,false);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.db.photoSets.length,1);release.resolve();await Promise.resolve();await Promise.resolve();assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);t.mock.timers.reset();
+});
+
+test('manual saved-plan preparation never opens credentials or creates a supplier client, even without a saved token',async t=>{
+  const f=await fixture(t),before={products:JSON.stringify(f.engine.db.products),sets:JSON.stringify(f.engine.db.photoSets),claims:JSON.stringify(f.engine.db.claims),jobs:JSON.stringify(f.engine.db.jobs),publications:JSON.stringify(f.engine.db.publications),preparations:JSON.stringify(f.engine.db.photoPreparations)};let secrets=0,clients=0;
+  f.engine.db.encryptedToken='';const forbidden=()=>{secrets++;throw Error('private native credential failure');};f.engine.seal=forbidden;f.engine.unseal=forbidden;f.engine.sealAsync=forbidden;f.engine.unsealAsync=forbidden;f.engine.client=()=>{clients++;throw Error('No supplier client is allowed for manual fields');};f.engine.clientFactory=()=>{clients++;throw Error('No supplier client factory is allowed for manual fields');};
+  const result=await prepareDraft(f.engine,f.plan.id);assert.equal(f.prepared.length,1);assert.equal(secrets,0);assert.equal(clients,0);assert.equal(f.requests.length,0);assert.equal(result.preflight.mode,'saved-plan');assert.equal(result.preflight.supplierVerified,false);assert.equal(result.preflight.stockVerified,false);assert.equal(result.preflight.publicationEnabled,false);assert.equal(result.preflight.readyForPublication,false);assert.equal(result.preflight.product.stock,99);assert.deepEqual(result.preflight.photos,{source:'not-checked',availableCount:null,ownCount:null,totalCount:null,ready:false});assert.deepEqual(result.preflight.supplierFacts,{});assert.deepEqual(result.preflight.supplierFields,[]);assert.match(result.message,/离线准备.*未读取货盘 API 密钥.*未实时核对货盘库存/);assert.equal(result.message.includes('private'),false);
+  for(const [key,value] of Object.entries(before))assert.equal(JSON.stringify(f.engine.db[{sets:'photoSets',preparations:'photoPreparations'}[key]||key]),value);assert.equal(result.published,false);assert.equal(result.saved,false);assert.equal(result.draftComplete,false);
+});
+
+test('every required saved field must be explicitly confirmed before manual preparation',async t=>{
+  for(const field of ['title','description','categoryPath','condition','brand','color','parcel']){
+    const f=await fixture(t,{listing:{...confirmedListing,[field]:field==='categoryPath'?[]:''}}),before=fs.readFileSync(f.engine.file,'utf8');let clients=0;f.engine.clientFactory=()=>{clients++;throw Error('Missing saved fields must not be fetched');};
+    const result=await prepareDraft(f.engine,f.plan.id);assert.equal(result.preflight.readyForFields,false);assert.equal(f.prepared.length,0);assert.equal(clients,0);assert.equal(f.requests.length,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);if(field==='categoryPath')assert.deepEqual(result.preflight.listing[field],[]);else assert.equal(result.preflight.listing[field],'');
+  }
+});
+
+test('missing, duplicate, mismatched or cross-source cached product identities never reach the page',async t=>{
+  const changes=[f=>{f.engine.db.products=[];},f=>{f.engine.db.products.push({...f.engine.db.products[0]});},f=>{f.engine.db.products[0].sku='different';},f=>{f.engine.db.products[0].id='different';},f=>{f.engine.db.products.push({...f.engine.db.products[0],id:'another-product'});},f=>{f.engine.db.products[0].source='local';},f=>{f.engine.db.localProducts.push({id:'local-id',sku:f.plan.sku});},f=>{f.plan.sku='';},f=>{f.plan.productId='';},f=>{f.plan.source='unknown';},f=>{f.engine.db.plans.push({...f.plan});}];
+  for(const change of changes){let inspected=0;const f=await fixture(t,{adapter:{inspect:async()=>{inspected++;return page;}}});change(f);f.engine.emit=()=>{};const before=fs.readFileSync(f.engine.file,'utf8');await assert.rejects(prepareDraft(f.engine,f.plan.id),{code:'PRODUCT_MISMATCH'});assert.equal(inspected,0);assert.equal(f.prepared.length,0);assert.equal(f.requests.length,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);}
+});
+
+test('zero, unknown or non-integer cached inventory and invalid saved sale data block manual fields',async t=>{
+  for(const stock of [0,null,undefined,-1,1.5,'2',NaN,Infinity,Number.MAX_SAFE_INTEGER+1]){const f=await fixture(t);f.engine.db.products[0].stock=stock;const before=fs.readFileSync(f.engine.file,'utf8'),result=await prepareDraft(f.engine,f.plan.id);assert.equal(result.preflight.readyForFields,false);assert.equal(result.preflight.checks.find(row=>row.name==='缓存库存').ok,false);assert.equal(f.prepared.length,0);assert.equal(f.requests.length,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);}
+  for(const change of [{listingPriceCents:0},{listingPriceCents:1.5},{listingPriceCents:100000001},{currency:'USD'},{currency:undefined},{listing:{...confirmedListing,parcel:'unknown'}}]){const f=await fixture(t);Object.assign(f.plan,change);const result=await prepareDraft(f.engine,f.plan.id);assert.equal(result.preflight.readyForFields,false);assert.equal(f.prepared.length,0);assert.equal(f.requests.length,0);}
+});
+
+test('saved-plan preparation does not waive the live supplier identity and stock checks',async t=>{
+  let remote={...rawProduct};const f=await fixture(t,{product:async()=>({product:remote})});let credentials=0,clients=0;const factory=f.engine.clientFactory,unseal=f.engine.unsealAsync;f.engine.unsealAsync=async value=>{credentials++;return unseal(value);};f.engine.clientFactory=config=>{clients++;return factory(config);};
+  await prepareDraft(f.engine,f.plan.id);assert.equal(credentials,0);assert.equal(clients,0);assert.equal(f.requests.length,0);
+  remote={...rawProduct,sku:'different'};await assert.rejects(preflight(f.engine,f.plan.id),/编号或 SKU/);assert.equal(credentials,1);assert.equal(clients,1);assert.equal(f.requests.length,1);assert.equal(f.engine.db.products[0].stock,99);
+  remote={...rawProduct,stock:0};const report=await preflight(f.engine,f.plan.id);assert.equal(credentials,2);assert.equal(clients,2);assert.equal(report.readyForFields,false);assert.equal(report.checks.find(row=>row.name==='库存').ok,false);assert.equal(f.engine.db.products[0].stock,0);
+});
+
+test('changes to a saved plan, cache or environment during inspection cannot authorize field writes',async t=>{
+  for(const change of [f=>{f.plan.listing.description='Changed while reading';},f=>{f.engine.db.products[0].stock=98;},f=>{f.engine.db.products[0]={...f.engine.db.products[0]};},f=>{f.engine.profiles=()=>[];}]){
+    const entered=deferred(),release=deferred(),f=await fixture(t,{adapter:{inspect:async()=>{entered.resolve();await release.promise;return page;}}}),before=fs.readFileSync(f.engine.file,'utf8'),pending=prepareDraft(f.engine,f.plan.id);await entered.promise;change(f);release.resolve();await assert.rejects(pending,{code:'PLAN_CHANGED'});assert.equal(f.prepared.length,0);assert.equal(f.requests.length,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);
+  }
+  const f=await fixture(t),before=fs.readFileSync(f.engine.file,'utf8');await assert.rejects(prepareDraft(f.engine,f.plan.id,{beforeFields:plan=>{plan.listingPriceCents=600;}}),{code:'PLAN_CHANGED'});assert.equal(f.prepared.length,0);assert.equal(f.requests.length,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);
+});
+
+test('cancelling a saved-plan page read discards the late page without credentials, events or writes',async t=>{
+  const entered=deferred(),release=deferred(),f=await fixture(t,{adapter:{inspect:async()=>{entered.resolve();await release.promise;return page;}}}),before=fs.readFileSync(f.engine.file,'utf8'),events=f.engine.db.events.length;let secrets=0;f.engine.unsealAsync=()=>{secrets++;throw Error('No credential read is allowed');};
+  const pending=prepareDraft(f.engine,f.plan.id),rejected=assert.rejects(pending,{code:'STOPPED'});await entered.promise;f.engine.configController.abort();await rejected;release.resolve();await new Promise(setImmediate);assert.equal(secrets,0);assert.equal(f.prepared.length,0);assert.equal(f.requests.length,0);assert.equal(f.engine.db.events.length,events);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.state().configBusy,false);
 });

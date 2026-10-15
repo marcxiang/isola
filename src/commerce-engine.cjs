@@ -58,12 +58,12 @@ function boundedSecret(work,signal){
   const finish=(callback,value)=>{if(settled)return;settled=true;clearTimeout(timer);signal?.removeEventListener('abort',onAbort);callback(value);};
   const onAbort=()=>finish(reject,stopped());
   signal?.addEventListener('abort',onAbort,{once:true});
-  timer=setTimeout(()=>finish(reject,problem('SECRET_STORAGE_TIMEOUT','系统密钥访问超时，操作已停止；请检查钥匙串后重试，原密钥已保留')),SECRET_STORAGE_TIMEOUT_MS);
+  timer=setTimeout(()=>finish(reject,problem('SECRET_STORAGE_TIMEOUT','货盘 API 密钥的系统存储访问超时，操作已停止；macOS 请检查钥匙串授权后重试，原密钥已保留')),SECRET_STORAGE_TIMEOUT_MS);
   // Native async keychain work cannot be cancelled. Consume late settlements,
   // but never create a client, save a key or continue the original operation.
   Promise.resolve().then(()=>{if(signal?.aborted)throw stopped();return work();}).then(
    value=>finish(resolve,value),
-   ()=>finish(reject,problem('SECRET_STORAGE_UNAVAILABLE','系统密钥暂时无法访问，操作已停止；原密钥已保留'))
+   ()=>finish(reject,problem('SECRET_STORAGE_UNAVAILABLE','货盘 API 密钥的系统存储暂时无法访问，操作已停止；原密钥已保留'))
   );
  });
 }
@@ -174,7 +174,7 @@ class CommerceEngine{
   if(!encrypted)throw problem('NOT_CONNECTED','请先填写货盘 API 密钥并测试连接');
   const token=await boundedSecret(()=>this.unsealAsync(encrypted),signal);
   if(this.closing||this.storageFaulted()||signal?.aborted||this.db.encryptedToken!==encrypted||this.db.settings.baseURL!==baseURL)throw stopped();
-  if(typeof token!=='string'||!token.trim())throw problem('SECRET_STORAGE_UNAVAILABLE','系统密钥暂时无法访问，操作已停止；原密钥已保留');
+  if(typeof token!=='string'||!token.trim())throw problem('SECRET_STORAGE_UNAVAILABLE','货盘 API 密钥的系统存储暂时无法访问，操作已停止；原密钥已保留');
   return this.clientFactory({baseURL,token});
  }
  hasHistory(){return ['plans','jobs','claims','sales','reservations','photoPreparations'].some(key=>this.db[key].length>0);}
@@ -202,11 +202,11 @@ class CommerceEngine{
   if(next.dailyLimitCents&&next.perOrderLimitCents>next.dailyLimitCents)throw Error('单笔限额不能高于每日限额');
   let encrypted=this.db.encryptedToken;const endpointChanged=baseURL!==this.db.settings.baseURL,history=this.hasSupplierHistory();
   const token=!input.clearToken&&input.token?text(input.token,'API 密钥',4096):'',oldToken=token&&encrypted?await boundedSecret(()=>this.unsealAsync(encrypted),signal):null;guard();
-  if(token&&encrypted&&(typeof oldToken!=='string'||!oldToken.trim()))throw problem('SECRET_STORAGE_UNAVAILABLE','系统密钥暂时无法访问，操作已停止；原密钥已保留');
+  if(token&&encrypted&&(typeof oldToken!=='string'||!oldToken.trim()))throw problem('SECRET_STORAGE_UNAVAILABLE','货盘 API 密钥的系统存储暂时无法访问，操作已停止；原密钥已保留');
   const tokenChanged=!!input.clearToken||!!token&&(!encrypted||token!==oldToken);
   if(endpointChanged){if(history)throw Error('已有运营计划或历史，不能把原照片和订单切换到另一货盘');encrypted='';}
   let accountId=this.db.supplierAccountId;
-  if(input.clearToken)encrypted='';else if(token){if(history){const client=this.clientFactory({baseURL,token}),me=await boundedRead(requestSignal=>client.me({signal:requestSignal}),signal);guard();const id=this.accountIdentity(me);if(!accountId||!id||id!==accountId)throw Error('更换密钥前必须核对为同一个货盘账号，原密钥已保留');}encrypted=await boundedSecret(()=>this.sealAsync(token),signal);guard();if(typeof encrypted!=='string'||!encrypted)throw problem('SECRET_STORAGE_UNAVAILABLE','系统密钥暂时无法访问，操作已停止；原密钥已保留');}
+  if(input.clearToken)encrypted='';else if(token){if(history){const client=this.clientFactory({baseURL,token}),me=await boundedRead(requestSignal=>client.me({signal:requestSignal}),signal);guard();const id=this.accountIdentity(me);if(!accountId||!id||id!==accountId)throw Error('更换密钥前必须核对为同一个货盘账号，原密钥已保留');}encrypted=await boundedSecret(()=>this.sealAsync(token),signal);guard();if(typeof encrypted!=='string'||!encrypted)throw problem('SECRET_STORAGE_UNAVAILABLE','货盘 API 密钥的系统存储暂时无法访问，操作已停止；原密钥已保留');}
   guard();const previous={settings:this.db.settings,encryptedToken:this.db.encryptedToken,supplierAccountId:this.db.supplierAccountId,hadSupplierAccount:Object.hasOwn(this.db,'supplierAccountId'),products:this.db.products,photoSets:this.db.photoSets,productListings:this.db.productListings,connection:this.connection};
   try{if(!history&&(endpointChanged||tokenChanged)){this.db.supplierAccountId=null;this.clearSupplierCatalog();}this.db.settings=next;this.db.encryptedToken=encrypted;this.connection={status:'not_connected'};this.persist();}
   catch(error){for(const key of ['settings','encryptedToken','products','photoSets','productListings'])this.db[key]=previous[key];if(previous.hadSupplierAccount)this.db.supplierAccountId=previous.supplierAccountId;else delete this.db.supplierAccountId;this.connection=previous.connection;throw error;}

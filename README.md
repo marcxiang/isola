@@ -8,7 +8,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.25**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.26**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
 - Starting the scheduler automatically opens a closed listing profile in its original persistent session and uses that session directly for the configured listing. It does not require member binding or read the account menu. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
@@ -19,6 +19,16 @@ The current development version is **0.5.3-dev.25**. Listing plans use the selec
 - The original Mac TEST submission and relisting history remain in the original Mac data. Live preparation reached the publication check and stopped before any new publish click because the site had filled an unconfirmed optional material. Clearing that suggestion through the native picker has been checked; live publication and the complete updated automated flow remain unverified.
 
 启动计划后直接使用指定独立窗口的现有登录会话，不再把账号菜单、用户名或会员绑定作为自动上架前置。手动商品与货盘商品共用字段、原图、上传、单次提交和商品回执链路；登录失效或网站要求人工验证时，保留当前任务等待处理。原提交结果未知时仍只核对原请求，不能重新发布。办公室与 Mac 接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
+
+## 已保存资料填写不再读取货盘密钥 — 0.5.3-dev.26，2026-10-15
+
+用户确认系统钥匙串用于保护货盘 API Token 后，选择保留现有保存方式；未接入本机密钥文件、明文或其他替代存储，也未删除原密文或钥匙串条目。设置和错误提示明确这是货盘 API 密钥，避免被理解为 Vinted 额外要求的密钥。
+
+纯手动「填写页面」改为只使用完整确认的计划字段、唯一匹配的缓存商品和有效正整数缓存库存，不读取凭据、创建货盘客户端或领取照片。缺字段、身份歧义、未知/零库存、非 EUR、错误页面，以及检查期间计划、缓存或环境变化均停止；回执明确说明离线准备、未实时核对库存或照片，不能作为发布许可。本地商品路径保持原行为；「核对资料」、真实自动上架和发布前的实时商品、库存、照片检查保持。
+
+完整 Node 1240/1240 通过，零失败、零跳过；新增 Mac 隔离桌面 IPC 2/2 通过，验证真实 beforeFields 恢复并聚焦窗口、原生填写标题和描述时零密钥/货盘调用、零领取/任务/提交，以及实时预检仍在凭据不可用时停止。首次桌面第二项只因错误文案断言沿用旧词失败，修正夹具后通过，初次记录保留；没有放宽生产检查。复现命令：`npm run test:electron:focused -- --use-mock-keychain --modules=commerce-saved-draft-main-smoke`（测试使用临时资料和拦截的静态页面）。
+
+真实 dev.25 曾在原货盘凭据读取的 30 秒上限停止，未进入字段填写；原 TEST 任务、照片与密文保留，调度暂停，无新发布点击。桌面工具明确禁止访问系统 SecurityAgent 授权窗口，不能代操作；需要时由用户本人处理系统授权。dev.26 的原 TEST 现场验证仍在进行，不能把隔离检查当作真实发布结果。
 
 ## 上传后的延迟材质建议与独立回执 — 0.5.3-dev.25，2026-10-15
 

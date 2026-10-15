@@ -60,6 +60,7 @@ await require(path.join(root,'test/commerce-manual-start-ui-smoke.cjs'))(api,che
 await require(path.join(root,'test/commerce-supplier-photo-reuse-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-supplier-photo-reuse-main-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-manual-main-smoke.cjs'))(api,check);
+await require(path.join(root,'test/commerce-saved-draft-main-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-publication-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-withdrawal-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-association-ui-smoke.cjs'))(api,check);

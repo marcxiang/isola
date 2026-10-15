@@ -1,6 +1,6 @@
 'use strict';
 const {normalizeProduct,normalizeSet}=require('./commerce-engine.cjs');
-const {normalizeListing}=require('./listing-config.cjs');
+const {normalizeListing,missingListingFields}=require('./listing-config.cjs');
 const READ_TIMEOUT_MS=30000,FIELD_TIMEOUT_MS=120000;
 
 function safeText(value,max=2000){return typeof value==='string'?value.trim().slice(0,max):'';}
@@ -77,5 +77,42 @@ async function collect(engine,planId,signal,guard){
  return {planId,checkedAt:new Date().toISOString(),product,photos:local?{source:'local',availableCount:0,ownCount,totalCount:product.localPhotoCount?1:0,importedCount:product.localPhotoCount,ready:ownCount>0}:{availableCount,ownCount,totalCount:sets.length},page:page?{url:page.url,title:page.title,fields,accountLabel:page.accountLabel||''}:null,checks,missing,readyForFields:!!pageOK&&!!listing.title&&!!listing.description&&product.stock>0,supplierFields:local?[]:Object.keys(raw).filter(k=>/^[A-Za-z0-9_]{1,80}$/.test(k)).slice(0,80),supplierFacts:local?{}:supplierFacts(raw),listing};
 }
 function preflight(engine,planId){return engine.configure((signal,guard)=>collect(engine,planId,signal,guard));}
-function prepareDraft(engine,planId,{beforeFields}={}){return engine.configure(async(signal,guard)=>{const report=await collect(engine,planId,signal,guard);checkpoint(signal,guard);if(!report.readyForFields)return {filled:[],missing:report.missing,unresolved:[],draftComplete:false,published:false,saved:false,preflight:report};const plan=engine.plan(planId);if(beforeFields)await beforeFields(plan);checkpoint(signal,guard);const result=await bounded(requestSignal=>engine.adapter.prepareFields(plan.profileId,report.listing,{signal:requestSignal}),signal,{timeoutMs:FIELD_TIMEOUT_MS,code:'FIELD_TIMEOUT',message:'填写页面字段超时，页面可能已变化，请重新读取并核对；未确认保存或发布'});checkpoint(signal,guard);if(!validObject(result)||!Array.isArray(result.filled)||result.published!==false||result.saved!==false)throw Error('字段填写结果格式无法核对，请重新读取页面');engine.event('info',plan.sku+'：已填写 '+result.filled.length+' 项页面字段，未保存或发布');engine.persist();engine.emit();return {...result,draftComplete:false,published:false,saved:false,preflight:report};});}
+// A manual form fill is reversible preparation of confirmed saved fields. It
+// does not authenticate the supplier, refresh stock, acquire photos or authorize
+// publication. The live preflight and publication service retain those checks.
+async function collectSavedDraft(engine,planId,signal,guard){
+ checkpoint(signal,guard);const plan=engine.plan(planId);
+ const products=engine.db.products.filter(row=>row?.id===plan.productId),cached=products[0];
+ if(engine.db.plans.filter(row=>row.id===planId).length!==1||plan.source!==undefined&&plan.source!=='supplier'||!safeText(plan.productId,256)||safeText(plan.productId,256)!==plan.productId||!safeText(plan.sku,256)||safeText(plan.sku,256)!==plan.sku||products.length!==1||!validObject(cached)||cached.source!==undefined&&cached.source!=='supplier'||cached.sku!==plan.sku||engine.db.products.filter(row=>row?.sku===plan.sku).length!==1||(engine.db.localProducts||[]).some(row=>row?.id===plan.productId||row?.sku===plan.sku))throw failure('PRODUCT_MISMATCH','保存的货盘商品编号或 SKU 缺失、重复或与计划不一致，请同步并核对原商品；未填写页面');
+ if(engine.profiles().filter(row=>row.id===plan.profileId).length!==1)throw failure('PROFILE_MISSING','计划的固定环境不存在或不唯一，未填写页面');
+ const planBefore=JSON.stringify(plan),productBefore=JSON.stringify(cached),check=()=>{
+  checkpoint(signal,guard);
+  if(engine.plan(planId)!==plan||JSON.stringify(plan)!==planBefore||engine.db.plans.filter(row=>row.id===planId).length!==1||engine.db.products.filter(row=>row?.id===plan.productId).length!==1||engine.db.products.find(row=>row?.id===plan.productId)!==cached||JSON.stringify(cached)!==productBefore||engine.db.products.filter(row=>row?.sku===plan.sku).length!==1||(engine.db.localProducts||[]).some(row=>row?.id===plan.productId||row?.sku===plan.sku)||engine.profiles().filter(row=>row.id===plan.profileId).length!==1)throw failure('PLAN_CHANGED','填写期间保存的计划、商品或环境已改变，已停止');
+ };
+ const listing={...normalizeListing(plan.listing),priceCents:plan.listingPriceCents},missingFields=missingListingFields(listing),product=normalizeProduct(cached),stockOK=Number.isSafeInteger(cached.stock)&&cached.stock>0;
+ let page=null,pageURL=null,pageError='';
+ try{const inspected=await bounded(requestSignal=>engine.adapter.inspect(plan.profileId,{signal:requestSignal}),signal);if(!validObject(inspected)||typeof inspected.url!=='string')throw Error('页面地址或检查结果格式无效，请重新读取页面');try{pageURL=new URL(inspected.url);}catch{throw Error('页面地址格式无效，请重新读取页面');}page=inspected;}
+ catch(error){if(signal?.aborted||error?.code==='STOPPED')throw stopped();pageError=safeText(error?.message)||'读取刊登页面失败，请重新读取页面';}
+ check();const checks=[],missing=[],add=(name,ok,detail)=>{checks.push({name,ok:!!ok,detail});if(!ok)missing.push(detail);},labels={title:'商品标题',description:'商品描述',categoryPath:'Vinted 分类',condition:'成色',brand:'品牌',color:'颜色',parcel:'包裹规格'};
+ add('缓存商品身份',true,product.sku+' · '+product.name);
+ add('缓存库存',stockOK,stockOK?'保存的库存为 '+cached.stock+' 件；未实时核对货盘':cached.stock===0?'保存的库存为零，请先同步并核对库存':'保存的库存未知或无效，请先同步并核对库存');
+ for(const key of Object.keys(labels))add(labels[key],!missingFields.includes(key),missingFields.includes(key)?'请先在计划中明确确认'+labels[key]:key==='categoryPath'?listing.categoryPath.join(' / '):listing[key]);
+ const priceOK=plan.currency==='EUR'&&Number.isSafeInteger(listing.priceCents)&&listing.priceCents>0&&listing.priceCents<=100000000,parcelOK=['Petit','Moyen','Grand'].includes(listing.parcel);
+ add('售价',priceOK,priceOK?'使用计划中已确认的欧元售价':'售价必须为已保存的有效欧元金额');
+ add('包裹选项',parcelOK,parcelOK?'使用计划中已确认的 '+listing.parcel+' 包裹':'请在计划中确认 Petit / Moyen / Grand 包裹规格');
+ const pageOK=!!pageURL&&pageURL.origin==='https://www.vinted.fr'&&!pageURL.username&&!pageURL.password&&pageURL.pathname==='/items/new'&&!pageURL.search&&!pageURL.hash;
+ add('法国站刊登页',pageOK,pageError||(pageOK?'已打开法国站刊登表单':'请打开对应环境的 Vinted 刊登页面'));
+ const message='本次按已保存的计划资料离线准备页面，未读取货盘 API 密钥，未实时核对货盘库存或照片；商品尚未发布。发布前仍须通过实时商品、库存和照片检查。';
+ checks.push({name:'货盘实时核对',ok:false,detail:'本次未执行；缓存库存不代表当前可售库存'},{name:'发布权限',ok:false,detail:'本次仅填写页面，不保存草稿或发布商品'});
+ return {check,report:{planId,checkedAt:new Date().toISOString(),mode:'saved-plan',supplierVerified:false,stockVerified:false,readyForPublication:false,publicationEnabled:false,product,photos:{source:'not-checked',availableCount:null,ownCount:null,totalCount:null,ready:false},page:page?{url:page.url,title:page.title,fields:Array.isArray(page.fields)?page.fields:Array.isArray(page.controls)?page.controls:[],accountLabel:page.accountLabel||''}:null,checks,missing,readyForFields:missing.length===0,supplierFields:[],supplierFacts:{},listing,message}};
+}
+function prepareDraft(engine,planId,{beforeFields}={}){return engine.configure(async(signal,guard)=>{
+ const saved=engine.plan(planId).source!=='local',preparation=saved?await collectSavedDraft(engine,planId,signal,guard):{report:await collect(engine,planId,signal,guard),check:()=>checkpoint(signal,guard)},report=preparation.report,check=preparation.check;check();
+ if(!report.readyForFields)return {filled:[],missing:report.missing,unresolved:[],draftComplete:false,published:false,saved:false,preflight:report,...(saved?{message:report.message}:{})};
+ const plan=engine.plan(planId);if(beforeFields)await beforeFields(plan);check();
+ const result=await bounded(requestSignal=>engine.adapter.prepareFields(plan.profileId,report.listing,{signal:requestSignal}),signal,{timeoutMs:FIELD_TIMEOUT_MS,code:'FIELD_TIMEOUT',message:'填写页面字段超时，页面可能已变化，请重新读取并核对；未确认保存或发布'});check();
+ if(!validObject(result)||!Array.isArray(result.filled)||result.published!==false||result.saved!==false)throw Error('字段填写结果格式无法核对，请重新读取页面');
+ engine.event('info',plan.sku+'：已'+(saved?'按保存资料离线':'')+'填写 '+result.filled.length+' 项页面字段，未保存或发布'+(saved?'；未实时核对货盘库存':''));engine.persist();engine.emit();
+ return {...result,draftComplete:false,published:false,saved:false,preflight:report,...(saved?{message:report.message+(safeText(result.message)?' '+safeText(result.message):'')}:{})};
+});}
 module.exports={preflight,prepareDraft,collect,listingFor,supplierFacts,READ_TIMEOUT_MS,FIELD_TIMEOUT_MS};

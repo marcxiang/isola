@@ -8,6 +8,16 @@ const isMaterial=element=>element?.tag==='input'&&(LABELS.includes(normalize(ele
 const FORM_FIELDS={title:['Titre','Dis aux acheteurs ce que tu vends'],description:['Description','Ajoute des informations utiles'],categoryPath:['Catégorie','Sélectionne une catégorie'],priceCents:['Prix','0,00 €'],condition:['État','Sélectionne un état'],brand:['Marque','Sélectionne une marque'],size:['Taille','Sélectionne une taille'],color:['Couleur','Sélectionne une couleur','Sélectionne 2 couleurs maximum']};
 const fieldKey=element=>Object.keys(FORM_FIELDS).find(key=>FORM_FIELDS[key].includes(normalize(element?.label))||FORM_FIELDS[key].includes(normalize(element?.placeholder)));
 const fail=message=>problem('OPTIONAL_MATERIAL_UNVERIFIED',message||'可选材质无法安全清空，已停止后续操作');
+const euroCents=value=>{
+  if(typeof value!=='string'||/[\x00-\x1f\x7f]/.test(value))return null;
+  const match=/^(\d{1,7})(?:[,.](\d{1,2}))?(?: ?€)?$/.exec(value.replace(/[\u00a0\u202f]/g,' ').trim());
+  if(!match)return null;
+  const cents=Number(match[1])*100+Number((match[2]||'').padEnd(2,'0'));
+  return Number.isSafeInteger(cents)&&cents>0&&cents<=100000000?cents:null;
+};
+const sameOwnedValue=(key,value,owned)=>key==='priceCents'?euroCents(value)!==null&&euroCents(value)===euroCents(owned):value===owned;
+const FIELD_NAMES={title:'标题',description:'描述',categoryPath:'分类',priceCents:'价格',condition:'成色',brand:'品牌',size:'尺码',color:'颜色'};
+function changedField(key){const error=problem('EXISTING_DRAFT','商品'+(FIELD_NAMES[key]||'未识别字段')+'与本次准备记录不一致，未清空可选材质');error.materialReason=Object.hasOwn(FIELD_NAMES,key)?key:'unknown';return error;}
 
 // This is a narrow, reversible operation authorized by the seller. It never
 // grants ownership of an existing form and never writes an input or React state.
@@ -40,9 +50,9 @@ async function clearOptionalMaterial(adapter,profileId,{signal}={}) {
     for(const entry of state.values){
       const descriptor=page.elements.find(element=>element.id===entry.id),key=fieldKey(descriptor);
       if(isMaterial(descriptor))continue;
-      if(entry.value!==''&&(!key||ownership.fields[key]!==entry.value)||key&&Object.hasOwn(ownership.fields,key)&&ownership.fields[key]!==entry.value)throw problem('EXISTING_DRAFT','商品内容已被其他操作修改，未清空可选材质');
+      if(entry.value!==''&&(!key||!sameOwnedValue(key,entry.value,ownership.fields[key]))||key&&Object.hasOwn(ownership.fields,key)&&!sameOwnedValue(key,entry.value,ownership.fields[key]))throw changedField(key);
     }
-    for(const key of Object.keys(ownership.fields).filter(key=>key!=='parcel'))if(!state.values.some(entry=>fieldKey(page.elements.find(element=>element.id===entry.id))===key&&entry.value===ownership.fields[key]))throw problem('EXISTING_DRAFT','本次商品字段无法完整核对，未清空可选材质');
+    for(const key of Object.keys(ownership.fields).filter(key=>key!=='parcel'))if(!state.values.some(entry=>fieldKey(page.elements.find(element=>element.id===entry.id))===key&&sameOwnedValue(key,entry.value,ownership.fields[key])))throw changedField(key);
     if(!materials.length)return {verified:true,cleared:false,unchanged:true,published:false,saved:false};
     const material=materials[0],materialValue=state.values.find(entry=>entry.id===material.id)?.value;
     if(material.disabled||material.sensitive||material.required===true||material.required==='true'||isInvalid(material.invalid)||material.readOnly!==true||typeof materialValue!=='string')throw fail('材质控件不是已核对的可选选择器，未修改');

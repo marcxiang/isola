@@ -160,6 +160,29 @@ test('optional material accepts explicit string false accessibility states',asyn
   const f=optionalMaterialFixture({required:'false',invalid:'false'});await f.prepare();f.setMaterial('Plastique');const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,true);assert.equal(result.verified,true);assert.equal(f.calls.length,3);
 });
 
+test('optional material accepts an equivalent EUR currency suffix rendered after owned price preparation',async()=>{
+  const f=optionalMaterialFixture(),prepared=await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});assert.deepEqual(prepared.filled.map(row=>row.field),['title','priceCents']);
+  assert.equal(f.adapter.drafts.get('profile-1').fields.priceCents,'5,00');f.calls.length=0;f.values.priceCents='5,00\u00a0€';f.setMaterial('Plastique');
+  const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.verified,true);assert.equal(result.cleared,true);assert.equal(f.calls.length,3);assert.equal(f.values.priceCents,'5,00\u00a0€');assert.equal(f.adapter.drafts.get('profile-1').fields.priceCents,'5,00');
+});
+
+test('optional material price equivalence is limited to the same positive EUR cents',async()=>{
+  for(const rendered of ['5,00 €','5.00€','5,00\u202f€','5.00','5']){
+    const f=optionalMaterialFixture();await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});f.calls.length=0;f.values.priceCents=rendered;f.setMaterial('Plastique');const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,true);assert.equal(f.calls.length,3);assert.equal(f.values.priceCents,rendered);
+  }
+  for(const rendered of ['50,00 €','5,01 €','5.001','5,00 USD','€ 5,00','5,00\n€','1e2','NaN','0,00','', '-5,00','5,00 € extra']){
+    const f=optionalMaterialFixture();await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});f.calls.length=0;f.values.priceCents=rendered;f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='EXISTING_DRAFT'&&error.materialReason==='priceCents'&&!error.message.includes(rendered||'private-fixture'));assert.equal(f.calls.length,0);assert.equal(f.values.priceCents,rendered);
+  }
+});
+
+test('equivalent initial price formatting never relaxes other fields or changes during material clicks',async()=>{
+  const title=optionalMaterialFixture();await title.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});title.calls.length=0;title.values.priceCents='5,00 €';title.values.title='private-fixture manual edit';title.setMaterial('Plastique');await assert.rejects(title.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='EXISTING_DRAFT'&&error.materialReason==='title'&&!error.message.includes('private-fixture'));assert.equal(title.calls.length,0);
+  for(const changed of ['5.00 €','6,00 €']){
+    let enabled=false;const f=optionalMaterialFixture({beforeAction(api){if(enabled){enabled=false;api.values.priceCents=changed;}}});await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});f.calls.length=0;f.values.priceCents='5,00\u00a0€';f.setMaterial('Plastique');enabled=true;
+    await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),{code:'OPTIONAL_MATERIAL_UNVERIFIED'});assert.equal(f.calls.length,1);assert.equal(f.values.priceCents,changed);
+  }
+});
+
 test('optional material stops for document, tab, cancellation or manually changed owned fields',async()=>{
   const changed=optionalMaterialFixture();await changed.prepare();changed.setMaterial('Plastique');changed.values.title='Manual edit';await assert.rejects(changed.adapter.clearOptionalMaterial('profile-1'),{code:'EXISTING_DRAFT'});assert.equal(changed.calls.length,0);
   const reloaded=optionalMaterialFixture();await reloaded.prepare();reloaded.setMaterial('Plastique');reloaded.reload();await assert.rejects(reloaded.adapter.clearOptionalMaterial('profile-1'),{code:'PAGE_CHANGED'});assert.equal(reloaded.calls.length,0);
@@ -179,6 +202,8 @@ test('photo upload preserves its verified receipt while reporting optional mater
   const cleaned=await f.adapter.uploadPhotos('profile-1',{});assert.equal(cleaned.verified,true);assert.equal(cleaned.uploadReceipt,receipt.uploadReceipt);assert.equal(cleaned.optionalMaterial.cleared,true);assert.equal(clears,1);
   f.adapter.clearOptionalMaterial=async()=>{clears++;throw Object.assign(Error('可选材质无法安全清空，已停止后续操作'),{code:'OPTIONAL_MATERIAL_UNVERIFIED'});};
   const failed=await f.adapter.uploadPhotos('profile-1',{});assert.equal(failed.verified,true);assert.equal(failed.uploadReceipt,receipt.uploadReceipt);assert.equal(failed.optionalMaterial.verified,false);assert.match(failed.message,/照片已上传；可选材质清空未核对/);assert.equal(uploads,4);
+  f.adapter.clearOptionalMaterial=async()=>{throw Object.assign(Error('private-fixture value must not reach the UI'),{code:'EXISTING_DRAFT',materialReason:'priceCents'});};const ownershipFailed=await f.adapter.uploadPhotos('profile-1',{});assert.equal(ownershipFailed.optionalMaterial.code,'EXISTING_DRAFT');assert.match(ownershipFailed.message,/商品价格.*不一致/);assert.equal(ownershipFailed.message.includes('private-fixture'),false);
+  f.adapter.clearOptionalMaterial=async()=>{throw Object.assign(Error('private-fixture unknown label'),{code:'EXISTING_DRAFT',materialReason:'private-fixture label'});};const unknownFailed=await f.adapter.uploadPhotos('profile-1',{});assert.match(unknownFailed.message,/商品字段或包裹规格/);assert.equal(unknownFailed.message.includes('private-fixture'),false);
   f.adapter.photos.upload=async()=>({verified:false});await f.adapter.uploadPhotos('profile-1',{});assert.equal(clears,2);
   f.adapter.photos.upload=async()=>receipt;f.adapter.clearOptionalMaterial=async()=>{throw Object.assign(Error('stopped'),{code:'STOPPED'});};await assert.rejects(f.adapter.uploadPhotos('profile-1',{}),{code:'STOPPED'});
 });

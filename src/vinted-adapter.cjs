@@ -107,7 +107,8 @@ class VintedAdapter {
     try{return {...receipt,optionalMaterial:await this.clearOptionalMaterial(profileId,options)};}
     catch(error){
       if(options.signal?.aborted||error?.code==='STOPPED')throw error;
-      const message=error?.code==='OPTIONAL_MATERIAL_UNVERIFIED'?error.message:'可选材质未能完成清空核对，请查看当前页面';
+      const materialFields={title:'标题',description:'描述',categoryPath:'分类',priceCents:'价格',condition:'成色',brand:'品牌',size:'尺码',color:'颜色',unknown:'未识别字段'},knownErrors={PAGE_CHANGED:'商品页已重新加载，未清空可选材质',PAGE_BUSY:'商品页正在被其他操作使用，未清空可选材质',EXISTING_DRAFT:'商品字段或包裹规格与本次准备记录不一致，未清空可选材质'};
+      const message=error?.code==='OPTIONAL_MATERIAL_UNVERIFIED'?error.message:error?.code==='EXISTING_DRAFT'&&Object.hasOwn(materialFields,error.materialReason)?'商品'+materialFields[error.materialReason]+'与本次准备记录不一致，未清空可选材质':knownErrors[error?.code]||'可选材质未能完成清空核对，请查看当前页面';
       return {...receipt,optionalMaterial:{verified:false,code:error?.code||'OPTIONAL_MATERIAL_UNVERIFIED',message},message:'照片已上传；可选材质清空未核对：'+message};
     }
   }

@@ -60,11 +60,11 @@ test('missing fields, supplier identity, account binding, stock and capabilities
  for(const [change,code] of scenarios){const f=await fixture(t),plan=f.add();change(f,plan);const before=clone(f.engine.db);assert.throws(()=>f.engine.startPlan(plan.id),{code});assert.equal(plan.enabled,false);assert.equal(f.engine.running,false);assert.deepEqual(f.engine.db,before);assert.deepEqual(f.executed,[]);}
 });
 
-test('starting cannot bypass manual account stops, unknown operations or an explicitly cancelled original task',async t=>{
- for(const kind of ['manual','unknown','cancelled']){
+test('explicitly starting resumes a safe manual stop or cancelled original task but cannot bypass unknown operations',async t=>{
+ for(const kind of ['manual','unknown','cancelled','rejected']){
   const f=await fixture(t),plan=f.add();f.engine.setPlanEnabled(plan.id,true);f.engine.seed();f.engine.setPlanEnabled(plan.id,false);const job=f.engine.db.jobs[0];
-  if(kind==='manual')Object.assign(job,{state:'needs_review',blockedReason:'PROFILE_CLOSED'});else if(kind==='unknown')job.state='uncertain';else job.state='cancelled';
-  const before=clone(f.engine.db);assert.throws(()=>f.engine.startPlan(plan.id),{code:kind==='manual'?'PROFILE_MANUALLY_PAUSED':kind==='unknown'?'RECONCILE_REQUIRED':'JOB_REVIEW_REQUIRED'});assert.equal(plan.enabled,false);assert.deepEqual(f.engine.db,before);assert.deepEqual(f.executed,[]);
+  if(kind==='manual')Object.assign(job,{state:'needs_review',blockedReason:'PROFILE_CLOSED'});else if(kind==='unknown')job.state='uncertain';else job.state=kind;
+  const before=clone(f.engine.db);if(kind==='unknown'){assert.throws(()=>f.engine.startPlan(plan.id),{code:'RECONCILE_REQUIRED'});assert.equal(plan.enabled,false);assert.deepEqual(f.engine.db,before);assert.deepEqual(f.executed,[]);}else{const result=f.engine.startPlan(plan.id);assert.deepEqual(result.resumedJobIds,[job.id]);assert.equal(job.state,'queued');assert.equal(job.id,before.jobs[0].id);assert.equal(job.dedupeKey,before.jobs[0].dedupeKey);assert.deepEqual(job.payload,before.jobs[0].payload);await f.settled(1);assert.equal(f.engine.db.jobs.length,1);assert.deepEqual(f.executed,[plan.id]);}
  }
 });
 

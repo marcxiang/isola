@@ -12,10 +12,24 @@ const ACCOUNT_RESULT_CODES = Object.freeze({
   ACCOUNT_CONFLICT: '该平台账号已绑定其他指纹环境。', IDENTITY_UNVERIFIED: '尚未取得可核对的账号身份，请在当前窗口检查。',
   PAGE_UNSUPPORTED: '当前页面不支持自动登录，请在当前窗口处理。', PAGE_CHANGED: '登录页面已改变，请重新核对当前窗口。',
   FORM_NOT_FOUND: '未找到可安全填写的登录表单，请在当前窗口处理。', STOPPED: '登录操作已停止，请核对当前窗口。',
-  UNAVAILABLE: '登录暂不可用，请打开当前窗口核对。'
+  UNAVAILABLE: '登录暂不可用，请打开当前窗口核对。',
+  PAGE_NOT_READY: '当前页面尚未加载完成，请等待页面就绪后再核对。',
+  INPUT_SURFACE_UNAVAILABLE: '核对窗口未显示或当前标签页不可操作，请显示该环境后重试。',
+  PAGE_BUSY: '这个环境正在执行页面操作，请先完成或暂停该环境的任务。',
+  WINDOW_CLOSED: '对应环境或核对标签页已关闭，请重新打开后核对。'
 });
 const DEFAULT_CODE = { saved: 'SAVED', logging_in: 'LOGIN_STARTED', awaiting_user: 'LOGIN_REQUIRED', logged_in: 'LOGIN_VERIFIED', error: 'LOGIN_FAILED' };
 const REVIEW_CODES = new Set(['LOGIN_STARTED','LOGIN_OUTCOME_UNKNOWN','CHALLENGE_REQUIRED','ACCOUNT_CONFIRMATION_REQUIRED','PAGE_CHANGED','IDENTITY_UNVERIFIED']);
+const ACCOUNT_MUTATION_MESSAGES = Object.freeze({
+  ACCOUNT_BUSY: '这个账号正在登录或核对，请等待这一步结束后修改资料。',
+  ACCOUNT_HISTORY: '此账号有关联运营记录，不能换绑环境；可以修改登录资料，或仅删除本机登录资料并保留原运营绑定。',
+  ACCOUNT_BINDING_REQUIRED: '原运营记录的账号身份尚未完整保存在运营绑定中，请先核对当前账号，再删除本机登录资料。',
+  ACCOUNT_CHANGED: '本机登录资料与原运营账号绑定不一致，请先核对原身份；原资料和任务记录已保留。',
+  PROFILE_OPEN: '请先关闭需要换绑的浏览器环境，再创建或换绑账号。',
+  ACCOUNT_STORAGE_UNAVAILABLE: '账号或运营存储无法安全保存，请检查磁盘并重启应用后再修改。',
+  ACCOUNT_CLOSED: '应用正在关闭，请重新打开后修改本机登录资料。',
+  ACCOUNT_CHANGE_BLOCKED: '当前账号步骤尚未结束，或原绑定需要先核对；本机登录资料已保留。'
+});
 function accountNeedsLoginReview(account) { return account?.loginReviewPending === true || account?.status === 'logging_in' || REVIEW_CODES.has(account?.lastResult?.code); }
 const MAX_ACCOUNTS = 500, MAX_FILE_BYTES = 8 * 1024 * 1024;
 const clone = value => structuredClone(value);
@@ -102,7 +116,7 @@ class AccountsStore {
   }
   #guard(action, account, next) {
     try { const result = this.assertMutable({ action, account: account ? publicAccount(account) : null, next: next ? publicAccount(next) : null }); if (result && typeof result.then === 'function') { Promise.resolve(result).catch(() => {}); throw Error('blocked'); } if (result === false) throw Error('blocked'); }
-    catch { throw problem('ACCOUNT_CHANGE_BLOCKED', '账号正在使用或已有运营关联，暂不能修改此绑定'); }
+    catch (error) { const code=Object.hasOwn(ACCOUNT_MUTATION_MESSAGES,error?.code)?error.code:'ACCOUNT_CHANGE_BLOCKED';throw problem(code,ACCOUNT_MUTATION_MESSAGES[code]); }
   }
   #encrypt(value) {
     try { const encrypted = this.seal(value); if (typeof encrypted !== 'string' || !encrypted || encrypted === value) throw Error('invalid encryption'); return encrypted; }
@@ -168,20 +182,22 @@ class AccountsStore {
     const label = text(input.label ?? previous?.label, 80, '账号名称'), login = normalizedLogin(input.login ?? previous?.login), profileId = identifier(input.profileId ?? previous?.profileId);
     this.#profile(profileId);
     const loginChanged = !!previous && loginKey(login) !== loginKey(previous.login), rebound = !!previous && profileId !== previous.profileId;
-    if (!previous || rebound) { this.#closed(profileId); if (previous) this.#closed(previous.profileId, true); }
+    if (rebound) { this.#closed(profileId); this.#closed(previous.profileId, true); }
     if (input.clearPassword !== undefined && typeof input.clearPassword !== 'boolean') throw problem('ACCOUNT_INVALID', '密码清除选项无效');
     const passwordPresent = Object.hasOwn(input, 'password');
     if (passwordPresent && (typeof input.password !== 'string' || !input.password || input.password.length > 1024 || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(input.password))) throw problem('ACCOUNT_INVALID', '密码无效；不修改时请省略，清除时请使用明确的清除选项');
     if (input.clearPassword && passwordPresent) throw problem('ACCOUNT_INVALID', '不能同时设置和清除密码');
-    const at = now(), row = { id: previous?.id ?? randomUUID(), platform, label, login, profileId, encryptedPassword: previous?.encryptedPassword ?? '', identity: previous && !loginChanged && !rebound ? clone(previous.identity) : null, status: previous?.status ?? 'saved', lastResult: clone(previous?.lastResult ?? null), loginReviewPending: previous ? accountNeedsLoginReview(previous) : false, lastLoginAt: previous?.lastLoginAt ?? null, createdAt: previous?.createdAt ?? at, updatedAt: at };
-    if (loginChanged || rebound || passwordPresent || input.clearPassword) { row.status = 'saved'; row.lastResult = this.#result({ status: 'saved', at }); row.loginReviewPending = false; if (loginChanged || rebound) row.lastLoginAt = null; }
+    const at = now(), row = { id: previous?.id ?? randomUUID(), platform, label, login, profileId, encryptedPassword: previous?.encryptedPassword ?? '', identity: previous && !rebound ? clone(previous.identity) : null, status: previous?.status ?? 'saved', lastResult: clone(previous?.lastResult ?? null), loginReviewPending: previous ? accountNeedsLoginReview(previous) : false, lastLoginAt: previous?.lastLoginAt ?? null, createdAt: previous?.createdAt ?? at, updatedAt: at };
+    // The login name may be an updated email for the same verified member.
+    // Credentials do not retire an interrupted login or authorize another one.
+    if (rebound || (loginChanged || passwordPresent || input.clearPassword) && !accountNeedsLoginReview(previous)) { row.status = 'saved'; row.lastResult = this.#result({ status: 'saved', at }); row.loginReviewPending = false; if (rebound) row.lastLoginAt = null; }
     this.#guard(!previous ? 'create' : rebound ? 'rebind' : loginChanged ? 'change-login' : 'update', previous, row);
     if (passwordPresent) row.encryptedPassword = this.#encrypt(input.password); else if (input.clearPassword) row.encryptedPassword = '';
     const rows = clone(this.#rows), index = rows.findIndex(account => account.id === row.id); if (index < 0) rows.push(row); else rows[index] = row;
     this.#commit(rows); return publicAccount(row);
   }
   remove(id) {
-    const row = this.#account(id); this.#available(id); this.#closed(row.profileId, true); this.#guard('remove', row, null);
+    const row = this.#account(id); this.#available(id); this.#guard('remove', row, null);
     this.#commit(this.#rows.filter(account => account.id !== id).map(clone)); return { removed: true, id };
   }
   verify(id, observed) {
@@ -196,7 +212,7 @@ class AccountsStore {
     if (result.status === 'logged_in' && !previous.identity) throw problem('IDENTITY_UNVERIFIED', ACCOUNT_RESULT_CODES.IDENTITY_UNVERIFIED);
     // A failed read must report its own result without erasing the independent
     // read-before-login latch. Only fresh identity verification or an explicit
-    // credential/binding edit clears that latch.
+    // environment rebind clears that latch; ordinary credential edits do not.
     const rows = clone(this.#rows), row = rows.find(account => account.id === id); row.status = result.status; row.lastResult = result; row.loginReviewPending = accountNeedsLoginReview(previous) || accountNeedsLoginReview({status:result.status,lastResult:result}) || input.loginReviewPending === true; row.updatedAt = result.at; if (result.status === 'logged_in') row.lastLoginAt = result.at;
     this.#commit(rows); return publicAccount(row);
   }
@@ -215,4 +231,4 @@ class AccountsStore {
   }
 }
 
-module.exports = { AccountsStore, ACCOUNT_STATUSES, ACCOUNT_RESULT_CODES, normalizeIdentity, accountNeedsLoginReview };
+module.exports = { AccountsStore, ACCOUNT_STATUSES, ACCOUNT_RESULT_CODES, ACCOUNT_MUTATION_MESSAGES, normalizeIdentity, accountNeedsLoginReview };

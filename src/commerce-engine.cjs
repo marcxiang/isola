@@ -6,6 +6,7 @@ const {summarizePreparation,restorePhotoPreparations}=require('./commerce-photos
 const {restoreSupplierSync}=require('./commerce-supplier-outbox.cjs');
 const {restoreLocalProducts,localCatalog,summarizeLocalPreparation}=require('./commerce-local-products.cjs');
 const {restorePlanArchives,isPlanArchived,archivedPlanError}=require('./commerce-deletion.cjs');
+const {recoverableJob,retryPatch,restoreRow}=require('./commerce-plan-recovery.cjs');
 const {productCoverSource}=require('./commerce-product-display.cjs');
 const fs=require('node:fs'),path=require('node:path'),{randomUUID,createHash}=require('node:crypto');
 const DEFAULTS={baseURL:'https://sku.meetist.fr/api/v1',backgroundEnabled:false,maxConcurrent:2,perOrderLimitCents:0,dailyLimitCents:0,market:'FR',accountType:'personal',fulfillmentMethod:'wms'};
@@ -197,7 +198,7 @@ class CommerceEngine{
   const previous=input.id?this.db.plans.find(p=>p.id===input.id):null;if(input.id&&!previous)throw Error('计划不存在');
   if(previous&&this.isPlanArchived(previous.id))throw archivedPlanError();
   if(previous&&this.db.publications.submissions.some(r=>r.proof.facts.planId===previous.id&&isPublicationOpen(r)))throw Error('该计划已有未完成的刊登提交记录，请先核对原刊登');
-  if(previous&&(this.active.size||this.ticking||this.db.jobs.some(j=>j.planId===previous.id&&!terminal.has(j.state)&&!this.canRetry(j))))throw Error('该计划仍有执行中或已提交的任务，请先停止并核对任务再修改');
+  if(previous&&(this.profileBusy(previous.profileId)||this.profileBusy(input.profileId)||this.db.jobs.some(j=>j.planId===previous.id&&!terminal.has(j.state)&&!this.recoverableJob(j,previous,{allowQueued:true}))))throw Error('该计划的环境仍有执行中或已提交的任务，请先停止并核对原任务再修改；其他环境可继续管理');
   const plan=validatePlan(input,{profiles:this.profiles(),products:this.catalog(),previous});
   const hasPhotos=previous&&[...this.db.photoPreparations,...(this.db.localPhotoPreparations||[])].some(row=>row.planId===previous.id);
   if(previous&&previous.sku!==plan.sku&&hasPhotos)throw Error('已有照片领取的计划不能更换 SKU，原记录已保留');
@@ -217,7 +218,7 @@ class CommerceEngine{
   if(this.storageFaulted())throw Error('运营存储不可用，请修复后再启用计划');
   if(this.configPending)throw Error('货盘配置正在更新，请等待完成后启用计划');
   if(this.db.settings.backgroundEnabled!==true)throw problem('BACKGROUND_NOT_ALLOWED','请先在「连接与规则」勾选「允许后台持续调度」并保存，再启用并开始计划；本次未启用计划');
-  if(!this.running&&(this.ticking||this.active.size))throw problem('PAGE_BUSY','后台仍在停止，请等待当前步骤结束后再启用计划');
+  if(!this.running&&this.profileBusy(plan.profileId))throw problem('PAGE_BUSY','这个环境仍在停止，请等待当前步骤结束后再启用计划；其他环境可继续管理');
   const profiles=this.profiles().filter(row=>row.id===plan.profileId),products=this.catalog().filter(row=>row.id===plan.productId);
   if(profiles.length!==1||profiles[0].status==='starting')throw problem('PROFILE_MISSING','计划的固定环境不存在或尚未启动完成');
   if(products.length!==1||products[0].sku!==plan.sku)throw problem('PRODUCT_MISMATCH','商品或 SKU 已改变，请同步货盘并重新核对计划');
@@ -235,27 +236,30 @@ class CommerceEngine{
   if(accounts.some(row=>row.profileId===plan.profileId&&row.memberId!==account.memberId||row.profileId!==plan.profileId&&row.platform===account.platform&&row.memberId===account.memberId))throw problem('ACCOUNT_CONFLICT','Vinted 账号绑定冲突，请先核对原账号和环境');
   const readiness=this.adapter.readiness(plan.profileId),publish=readiness?.capabilities?.listingPublish??readiness?.capabilities?.publish;
   if(publish!==true)throw problem('CAPABILITY_UNVERIFIED','当前版本尚未提供可运行的自动上架流程');
-  if(manuallyPausedProfile(this.db.jobs,plan.profileId))throw problem('PROFILE_MANUALLY_PAUSED','这个账号已被手动停止；请先在任务记录中核对并重试或取消原任务，启用计划不会解除暂停');
   if(this.db.jobs.some(row=>row.profileId===plan.profileId&&(row.state==='uncertain'||row.mutationPending===true||['queued','running'].includes(row.state)&&(row.operation!=null||row.result!=null)))||this.db.publications.submissions.some(row=>row.proof.facts.profileId===plan.profileId&&row.state==='uncertain'&&isPublicationOpen(row)))throw problem('RECONCILE_REQUIRED','这个账号有结果未知的原操作，请先核对原任务，不能再次上架');
   if(plan.activeListingId||this.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&isPublicationOpen(row)))throw problem('PUBLICATION_EXISTS','这个计划已有在售商品或原提交记录，请核对原刊登，不能重复上架');
   if(plan.completedCount>=plan.targetCount||!saleCycleComplete(this.db,plan.id))throw problem('SALE_CYCLE_PENDING','销售目标已完成或原成交尚未核对，请先处理原记录');
   const pending=this.db.jobs.filter(row=>row.planId===plan.id&&!terminal.has(row.state)),current=this.db.jobs.filter(row=>row.type==='listing'&&row.planId===plan.id&&row.payload?.cycle===plan.completedCount&&listingRevision(row.payload?.listingRevision)===listingRevision(plan.listingRevision));
-  if(pending.some(row=>row.state==='needs_review')||current.some(row=>terminal.has(row.state)))throw problem('JOB_REVIEW_REQUIRED','原任务需要核对或已取消，请先在任务记录中明确处理，启用不会重新排队原任务');
+  const resume=current.filter(row=>['needs_review','cancelled','rejected'].includes(row.state)&&this.recoverableJob(row,plan)),resuming=new Set(resume.map(row=>row.id));
+  if(this.db.jobs.some(row=>row.profileId===plan.profileId&&row.state==='needs_review'&&['PROFILE_CLOSED','PROFILE_STOPPED'].includes(row.blockedReason)&&!resuming.has(row.id)))throw problem('PROFILE_MANUALLY_PAUSED','这个账号的另一个原任务已被手动停止；请在对应计划继续或核对原任务，本次不会清除其他计划的暂停');
+  if(pending.some(row=>row.state==='needs_review'&&!resuming.has(row.id)||row.state==='queued'&&!this.recoverableJob(row,plan,{allowQueued:true}))||current.some(row=>terminal.has(row.state)&&!resuming.has(row.id)))throw problem('JOB_REVIEW_REQUIRED','原任务的提交、周期或身份尚无法核对，请检查原记录；确定未提交的原任务可直接点击开始继续');
+  return resume;
  }
  startPlan(id){
   const plans=this.db.plans.filter(row=>row.id===id);if(plans.length!==1)throw Error('销售计划不存在或不唯一');
-  const previous=plans[0],plan={...clone(previous),enabled:true,status:'ready',updatedAt:now()};this.assertPlanStart(plan);return this.commitPlanStart(previous,plan);
+  const previous=plans[0],plan={...clone(previous),enabled:true,status:'ready',updatedAt:now()},resume=this.assertPlanStart(plan);return this.commitPlanStart(previous,plan,resume);
  }
  saveAndStartPlan(input){
-  const {previous,plan}=this.preparePlan({...input,enabled:true});this.assertPlanStart(plan);return this.commitPlanStart(previous,{...plan,status:'ready'});
+  const {previous,plan}=this.preparePlan({...input,enabled:true}),resume=this.assertPlanStart(plan);return this.commitPlanStart(previous,{...plan,status:'ready'},resume);
  }
- commitPlanStart(previous,plan){
+ commitPlanStart(previous,plan,resume=[]){
   const plansBefore=this.db.plans,previousBefore=previous&&clone(previous),eventsBefore=this.db.events.slice(),scopeBefore=this.runningPlanIds,runningBefore=this.running;
+  const jobsBefore=resume.map(job=>({job,before:clone(job)}));for(const {job}of jobsBefore)Object.assign(job,retryPatch());
   if(previous)Object.assign(previous,plan);else this.db.plans=[...this.db.plans,plan];
   this.runningPlanIds=runningBefore&&scopeBefore==null?null:new Set([...(runningBefore?scopeBefore||[]:[]),plan.id]);this.running=true;
   this.event('info',plan.name+'：已启用并开始；'+(this.runningPlanIds===null?'沿用当前全部已启用计划调度':'仅调度本次明确启动的计划'));
-  try{this.persist();}catch(error){if(previous)Object.assign(previous,previousBefore);this.db.plans=plansBefore;this.db.events=eventsBefore;this.runningPlanIds=scopeBefore;this.running=this.storageFaulted()?false:runningBefore;throw error;}
-  this.ensureRunnerTimer();this.emit();this.kickRun();return {started:true,plan:clone(previous||plan),state:this.state()};
+  try{this.persist();}catch(error){if(previous)Object.assign(previous,previousBefore);for(const {job,before}of jobsBefore)restoreRow(job,before);this.db.plans=plansBefore;this.db.events=eventsBefore;this.runningPlanIds=scopeBefore;this.running=this.storageFaulted()?false:runningBefore;throw error;}
+  this.ensureRunnerTimer();this.emit();this.kickRun();return {started:true,resumedJobIds:resume.map(job=>job.id),plan:clone(previous||plan),state:this.state()};
  }
  ensureRunnerTimer(){
   if(!this.timer)this.timer=setInterval(()=>{if(this.running)this.kickRun();},15000);
@@ -269,13 +273,10 @@ class CommerceEngine{
  setPlanEnabled(id,enabled){const plan=this.plan(id);plan.enabled=enabled===true;if(!plan.enabled){const lease=this.leases.snapshot().find(item=>item.profileId===plan.profileId),job=lease&&this.db.jobs.find(item=>item.id===lease.jobId);if(job?.planId===id)this.active.get(plan.profileId)?.abort();}plan.status=plan.enabled?'ready':'paused';plan.updatedAt=now();this.persist();this.emit();return plan;}
  isPlanArchived(id){return isPlanArchived(this.db,id);}
  plan(id,{includeArchived=false}={}){const p=this.db.plans.find(p=>p.id===id);if(!p)throw Error('销售计划不存在');if(!includeArchived&&this.isPlanArchived(id))throw archivedPlanError();return p;}
+ profileBusy(profileId){return this.active.has(profileId)||this.leases.snapshot().some(row=>row.profileId===profileId);}
+ recoverableJob(job,plan,{allowQueued=false}={}){return recoverableJob(job,plan,this.db,{allowQueued})&&(job.type!=='listing'||saleCycleComplete(this.db,plan.id));}
  canRetry(job){
-  if(job?.type==='listing'&&this.db.publications.submissions.some(r=>r.proof.facts.planId===job.planId&&isPublicationOpen(r)))return false;
-  if(!job||!['needs_review','cancelled'].includes(job.state)||!['listing','message','offer','fulfillment','sale_confirmation'].includes(job.type))return false;
-  if(job.operation!=null||job.mutationPending!==false||job.result!=null)return false;
-  const plan=this.db.plans.find(p=>p.id===job.planId);
-  if(!plan||this.isPlanArchived(plan.id)||plan.profileId!==job.profileId||plan.productId!==job.productId)return false;
-  return job.type!=='listing'||(!plan.activeListingId&&plan.completedCount<plan.targetCount&&job.payload?.cycle===plan.completedCount&&listingRevision(job.payload?.listingRevision)===listingRevision(plan.listingRevision)&&saleCycleComplete(this.db,plan.id));
+  const plan=job&&this.db.plans.find(p=>p.id===job.planId);return !!plan&&this.recoverableJob(job,plan);
  }
  enqueue(type,plan,payload={},dedupeKey){
   if(this.isPlanArchived(plan.id))throw archivedPlanError();
@@ -515,19 +516,22 @@ class CommerceEngine{
  }
  async resolve(id,action,data={}){
   if(this.closing||this.faulted)throw Error('运营队列已关闭或存储不可用，不能修改任务');
-  if(this.active.size||this.running||this.ticking||this.configPending)throw Error('请先停止后台并等待当前请求结束');const job=this.db.jobs.find(j=>j.id===id);if(!job)throw Error('任务不存在');
+  if(this.configPending)throw Error('配置正在更新，请等待完成后处理原任务');const job=this.db.jobs.find(j=>j.id===id);if(!job)throw Error('任务不存在');
   if(this.isPlanArchived(job.planId))throw archivedPlanError();
+  if(this.profileBusy(job.profileId)||job.state==='running')throw Error('这个环境仍有运行任务，请等待原步骤结束；其他环境可继续管理');
+  if(action==='reconcile'&&(this.active.size||this.running||this.ticking))throw Error('核对原请求前，请先停止后台并等待当前请求结束');
+  const before=clone(job),eventsBefore=this.db.events.slice();
   if(action==='cancel'){if(job.mutationPending||job.state==='uncertain'||job.result?.externalId)throw Error('结果不明或已有外部记录的任务不能直接取消，请先核对原记录');job.state='cancelled';job.error='用户取消了尚未提交的任务';}
   else if(action==='retry'){
-   if(!this.canRetry(job))throw Error('只有待核对或已取消、无提交记录或结果且与当前计划和刊登周期匹配的任务才能重新排队');
-   job.state='queued';job.step='pending';job.error='';job.attempts=0;job.retryAt=null;job.updatedAt=now();
+   if(!this.canRetry(job))throw Error('只有待核对、已取消或已拒绝且确定未提交、无提交记录或结果、与原计划和刊登周期匹配的任务才能重新排队');
+   Object.assign(job,retryPatch());
    this.event('info','未提交任务已重新排队；销售计划的启用状态保持不变');
   }
   else if(action==='reconcile'){
    if(!['uncertain','needs_review'].includes(job.state))throw Error('此任务不需要核对');
    if(job.type==='fulfillment'&&job.result?.externalId){const response=await this.client().order(job.result.externalId),order=response.order;if(!order||String(order.id)!==String(job.result.externalId))throw Error('货盘返回订单不匹配');if(job.result.wmsOrderId){const r=await this.client().wmsOrder(job.result.wmsOrderId);const status=r.order?.status||r.wmsStatus||r.status;if(status!=='submitted')throw Error('WMS 原订单仍未确认接单，已保持待核对');}else if(this.db.settings.fulfillmentMethod==='wms')throw Error('缺少原 WMS 编号，不能自动认定发货成功');job.state='completed';job.error='原货盘订单已核对';job.mutationPending=false;job.result.verified=true;const plan=this.plan(job.planId);plan.status=plan.completedCount>=plan.targetCount?'target_reached':'ready';}
    else throw Error('当前任务需要真实页面或原请求记录核对，不能仅凭手工填写编号恢复。记录已保留。');
-  }else throw Error('不支持的核对操作');this.persist();this.emit();return this.state();
+  }else throw Error('不支持的核对操作');try{this.persist();}catch(error){restoreRow(job,before);this.db.events=eventsBefore;throw error;}this.emit();if(action==='retry'&&this.running)this.kickRun();return this.state();
  }
  async poll({signal,generation=this.runGeneration,planIds=this.runningScope()}={}){
   if(!this.running||!this.tickCurrent(generation,signal)||typeof this.adapter.poll!=='function')return;

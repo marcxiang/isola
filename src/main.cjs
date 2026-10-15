@@ -97,13 +97,16 @@ function ensureCommerce(){
 }
 function assertAccountMutable({action,account,next}){
  if(!commerce)return;
- if(commerce.running||commerce.active.size||commerce.ticking||commerce.faulted||commerce.closing||account&&commerceAccounts?.isBusy(account.id))throw accountError('ACCOUNT_BUSY');
- const changingIdentity=['rebind','change-login','remove'].includes(action);
+ if(commerce.faulted||commerce.storageFaulted())throw accountError('ACCOUNT_STORAGE_UNAVAILABLE');
+ if(commerce.closing)throw accountError('ACCOUNT_CLOSED');
+ if(account&&(commerceAccounts?.isBusy(account.id)||commerce.accounts?.isBusy(account.id)))throw accountError('ACCOUNT_BUSY');
+ const changingIdentity=action==='rebind';
  if(changingIdentity&&account){
   const ids=new Set([account.profileId,next?.profileId].filter(Boolean));
   if(commerce.db.marketAccounts.some(row=>ids.has(row.profileId))||['plans','jobs','claims','photoPreparations','sales','reservations'].some(key=>commerce.db[key].some(row=>ids.has(row.profileId))))throw accountError('ACCOUNT_HISTORY');
  }
- if(['create','rebind','remove'].includes(action)&&[account?.profileId,next?.profileId].filter(Boolean).some(id=>windows.has(id)||locks.has(id)))throw accountError('PROFILE_OPEN');
+ if(action==='rebind'&&[account?.profileId,next?.profileId].filter(Boolean).some(id=>commerce.active.has(id)||commerce.leases.snapshot().some(lease=>lease.profileId===id)))throw accountError('ACCOUNT_BUSY');
+ if(action==='rebind'&&[account?.profileId,next?.profileId].filter(Boolean).some(id=>windows.has(id)||locks.has(id)))throw accountError('PROFILE_OPEN');
 }
 function resizeWorkspace(w){if(w.isDestroyed()||commerceOwner!==w||!commerceView||commerceView.webContents.isDestroyed())return;const [width,height]=w.getContentSize();commerceView.setBounds({x:0,y:0,width,height});}
 function showWorkspaceWindow(w){if(w.isMinimized())w.restore();w.show();w.focus();}
@@ -389,7 +392,7 @@ function waitOwnedPageReady(w,tab,url,{signal,guard,timeoutMs=10000,settleMs=0,f
   }catch(error){finish(error);}
  });
 }
-async function openAccountPage(profileId,{signal,guard,freshLogin=false,freshAccountReview=false,ownProfileURL,ownProfileHref,clickOwnProfile}){
+async function openAccountPage(profileId,{signal,guard,freshLogin=false,freshAccountReview=false,reviewCurrent=false,ownProfileURL,ownProfileHref,clickOwnProfile}){
  const ownReview=ownProfileURL!==undefined,reviewHome='https://www.vinted.fr/';
  if(freshAccountReview&&freshLogin||ownReview&&(freshLogin||freshAccountReview)||!ownReview&&(ownProfileHref!==undefined||clickOwnProfile!==undefined)||ownReview&&(typeof ownProfileURL!=='string'||!/^https:\/\/www\.vinted\.fr\/member\/[1-9]\d*$/.test(ownProfileURL)||!validOwnProfileHref(ownProfileHref,ownProfileURL)||typeof clickOwnProfile!=='function'))throw accountError('ACCOUNT_UNAVAILABLE');
  const valid=()=>{guard();if(signal.aborted)throw accountError('ACCOUNT_UNAVAILABLE');};
@@ -399,13 +402,14 @@ async function openAccountPage(profileId,{signal,guard,freshLogin=false,freshAcc
  guard();const w=windows.get(profileId);
  if(!w||w.isDestroyed())throw accountError('ACCOUNT_UNAVAILABLE');
  if(w.closingPromise||w.navigationPending||w.aiAgent?.state?.running||w.vintedDraftController)throw accountError('ACCOUNT_BUSY');
+ if(w.isMinimized())w.restore();w.show();w.focus();
  w.navigationPending=true;
  try{
   if(freshAccountReview||ownReview){
    let tab;
    if(freshAccountReview){
     const old=accountReviewTabs.get(profileId);old?.dispose();accountReviewTabs.delete(profileId);
-    tab=await addTab(w,reviewHome);valid();await waitOwnedPageReady(w,tab,reviewHome,{signal,guard:valid});const c=tab.view.webContents;
+    tab=await addTab(w,reviewHome);valid();tab.view.webContents.focus();await waitOwnedPageReady(w,tab,reviewHome,{signal,guard:valid,failure:()=>Object.assign(Error('当前页面尚未加载完成，请等待页面就绪后再核对。'),{code:'PAGE_NOT_READY'})});const c=tab.view.webContents;
     if(c.isDestroyed()||tab.error||c.getURL()!==reviewHome)throw accountError('ACCOUNT_UNAVAILABLE');
     const review={tabId:tab.id,navigationId:tab.navigationId,invalid:false};
     const changed=(_event,_url,_inPlace,isMain)=>{if(isMain!==false)review.invalid=true;};
@@ -422,13 +426,14 @@ async function openAccountPage(profileId,{signal,guard,freshLogin=false,freshAcc
    accountTabs.set(profileId,tab.id);if(w.isMinimized())w.restore();w.show();w.focus();tab.view.webContents.focus();
    return {profileId,url:tab.view.webContents.getURL(),tabId:tab.id};
   }
-  let tab=freshLogin?null:w.tabs.find(t=>t.id===accountTabs.get(profileId)&&!t.view.webContents.isDestroyed());
-  const compatible=t=>{try{const u=new URL(t.view.webContents.getURL());return u.origin==='https://www.vinted.fr'&&!u.username&&!u.password&&(freshLogin?u.href===LOGIN_URL:['/','/member/login','/member/login/email','/login'].includes(u.pathname));}catch{return false;}};
+  const compatible=t=>{try{const u=new URL(t.view.webContents.getURL());return !t.view.webContents.isDestroyed()&&u.origin==='https://www.vinted.fr'&&!u.username&&!u.password&&(freshLogin?u.href===LOGIN_URL:reviewCurrent||['/','/member/login','/member/login/email','/login'].includes(u.pathname));}catch{return false;}};
+  let tab=freshLogin?null:reviewCurrent?w.tabs.find(t=>t.id===w.activeTab&&compatible(t)):w.tabs.find(t=>t.id===accountTabs.get(profileId)&&compatible(t));
   if(!tab)tab=w.tabs.find(t=>t.id===w.activeTab&&compatible(t))||w.tabs.find(t=>!t.view.webContents.isDestroyed()&&compatible(t));
-  if(tab){w.activeTab=tab.id;resizeViews(w);sendState(w);}else tab=await addTab(w,LOGIN_URL||'https://www.vinted.fr/');
+  if(tab){w.activeTab=tab.id;resizeViews(w);sendState(w);}else tab=await addTab(w,reviewCurrent?reviewHome:LOGIN_URL);
   guard();if(w.isDestroyed()||tab.view.webContents.isDestroyed())throw accountError('ACCOUNT_UNAVAILABLE');
   accountTabs.set(profileId,tab.id);if(w.isMinimized())w.restore();w.show();w.focus();tab.view.webContents.focus();
   if(tab.error&&!tab.unloadGuard?.blocked)throw accountError('ACCOUNT_UNAVAILABLE');
+  if(reviewCurrent)await waitOwnedPageReady(w,tab,tab.view.webContents.getURL(),{signal,guard:valid,failure:()=>Object.assign(Error('当前页面尚未加载完成，请等待页面就绪后再核对。'),{code:'PAGE_NOT_READY'})});
   return {profileId,url:tab.view.webContents.getURL()};
  }finally{w.navigationPending=false;}
 }

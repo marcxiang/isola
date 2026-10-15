@@ -242,10 +242,10 @@ test('retry rejects every submitted, ambiguous, result-bearing or malformed muta
 
 test('retry rejects unknown or ineligible job states and types without modifying their records',async t=>{
   const f=await fixture(t);f.engine.seed();const job=f.engine.db.jobs[0];
-  for(const state of ['queued','running','completed','rejected','uncertain','unknown',undefined]){
-    job.state=state;const before=JSON.stringify(job);await assert.rejects(f.engine.resolve(job.id,'retry'),/待核对或已取消/);assert.equal(JSON.stringify(job),before);
+  for(const state of ['queued','running','completed','uncertain','unknown',undefined]){
+    job.state=state;const before=JSON.stringify(job);await assert.rejects(f.engine.resolve(job.id,'retry'),/待核对.*已取消|运行任务/);assert.equal(JSON.stringify(job),before);
   }
-  job.state='needs_review';job.type='unknown';await assert.rejects(f.engine.resolve(job.id,'retry'),/待核对或已取消/);assert.equal(job.type,'unknown');
+  job.state='needs_review';job.type='unknown';await assert.rejects(f.engine.resolve(job.id,'retry'),/待核对.*已取消/);assert.equal(job.type,'unknown');
 });
 
 test('retry cannot restore a stale listing cycle, completed target, existing listing or mismatched plan',async t=>{
@@ -295,19 +295,21 @@ test('a blocked unsubmitted plan can be edited without requeueing or rebinding i
   assert.throws(()=>f.engine.savePlan({...f.plan,profileId:'profile-2'}),/不能更换窗口或 SKU/);assert.throws(()=>f.engine.savePlan({...f.plan,productId:'product-2'}),/不能更换窗口或 SKU/);assert.equal(f.counts.claim,0);assert.equal(f.counts.listing,0);
 });
 
-test('plan editing rejects any running, queued, uncertain or mutation-bearing unfinished job',async t=>{
+test('plan editing rejects running, uncertain or mutation-bearing unfinished jobs but preserves safe queued tasks',async t=>{
   const f=await fixture(t);f.engine.seed();const job=f.engine.db.jobs[0],originalPrice=f.plan.listingPriceCents;
-  for(const change of [{state:'queued'},{state:'running'},{state:'uncertain'},{state:'unknown'},{state:'needs_review',operation:{kind:'claim',receipt:{claimId:'original'}}},{state:'needs_review',mutationPending:true},{state:'needs_review',result:{externalId:'original'}}]){
+  for(const change of [{state:'running'},{state:'uncertain'},{state:'unknown'},{state:'needs_review',operation:{kind:'claim',receipt:{claimId:'original'}}},{state:'needs_review',mutationPending:true},{state:'needs_review',result:{externalId:'original'}}]){
     Object.assign(job,{state:'needs_review',operation:null,mutationPending:false,result:null},change);assert.throws(()=>f.engine.savePlan({...f.plan,listingPriceCents:2900}),/执行中或已提交/);assert.equal(f.plan.listingPriceCents,originalPrice);
   }
-  Object.assign(job,{state:'needs_review',operation:null,mutationPending:false,result:null});const another=f.engine.enqueue('message',f.plan,{},'other-unfinished');assert.equal(f.engine.canRetry(job),true);assert.equal(another.state,'queued');assert.throws(()=>f.engine.savePlan({...f.plan,listingPriceCents:2900}),/执行中或已提交/);assert.equal(f.plan.listingPriceCents,originalPrice);
+  Object.assign(job,{state:'queued',operation:null,mutationPending:false,result:null});const another=f.engine.enqueue('message',f.plan,{},'other-unfinished'),before=[JSON.stringify(job),JSON.stringify(another)];assert.equal(another.state,'queued');assert.equal(f.engine.savePlan({...f.plan,listingPriceCents:2900}).listingPriceCents,2900);assert.deepEqual([JSON.stringify(job),JSON.stringify(another)],before);another.operation={kind:'reply'};assert.throws(()=>f.engine.savePlan({...f.plan,listingPriceCents:3000}),/执行中或已提交/);assert.equal(f.plan.listingPriceCents,2900);
 });
 
-test('a safe blocked plan remains uneditable while an account action or polling cycle is active',async t=>{
+test('only the target environment lease blocks safe plan editing while unrelated background work continues',async t=>{
   const f=await fixture(t);f.engine.seed();f.engine.db.jobs[0].state='needs_review';
-  f.engine.active.set('profile-2',new AbortController());try{assert.throws(()=>f.engine.savePlan({...f.plan,replyPolicy:'changed'}),/执行中或已提交/);}finally{f.engine.active.clear();}
-  f.engine.ticking=true;try{assert.throws(()=>f.engine.savePlan({...f.plan,replyPolicy:'changed'}),/执行中或已提交/);}finally{f.engine.ticking=false;}
-  assert.equal(f.plan.replyPolicy,'');assert.equal(f.engine.savePlan({...f.plan,replyPolicy:'ready to retry'}).replyPolicy,'ready to retry');
+  f.engine.active.set('profile-2',new AbortController());try{assert.equal(f.engine.savePlan({...f.plan,replyPolicy:'other profile is busy'}).replyPolicy,'other profile is busy');}finally{f.engine.active.clear();}
+  f.engine.ticking=true;try{assert.equal(f.engine.savePlan({...f.plan,replyPolicy:'no target lease'}).replyPolicy,'no target lease');}finally{f.engine.ticking=false;}
+  f.engine.active.set(f.plan.profileId,new AbortController());try{assert.throws(()=>f.engine.savePlan({...f.plan,replyPolicy:'must not change'}),/执行中或已提交/);}finally{f.engine.active.clear();}
+  const lease=f.engine.leases.acquire(f.plan.profileId,'poll:fixture');try{assert.throws(()=>f.engine.savePlan({...f.plan,replyPolicy:'must not change'}),/执行中或已提交/);}finally{f.engine.leases.release(lease);}
+  assert.equal(f.plan.replyPolicy,'no target lease');assert.equal(f.engine.savePlan({...f.plan,replyPolicy:'ready to retry'}).replyPolicy,'ready to retry');
 });
 
 

@@ -1,5 +1,5 @@
 'use strict';
-const {accountNeedsLoginReview}=require('./commerce-accounts.cjs');
+const {accountNeedsLoginReview,ACCOUNT_MUTATION_MESSAGES,normalizeIdentity}=require('./commerce-accounts.cjs');
 
 // The renderer can ask to operate on an account ID, but never reads credentials.
 // Authentication is separate from the general AI page-control interface.
@@ -12,12 +12,13 @@ const MESSAGES={
  ACCOUNT_CONFLICT:'此 Vinted 账号已绑定其他环境，请使用原环境。',
  ACCOUNT_CONFIRMATION_REQUIRED:'请先在窗口核对当前账号，再使用“核对登录”确认绑定。',
  ACCOUNT_INVALID:'账号保存失败，请检查输入、环境和本机加密状态。',
- ACCOUNT_UNAVAILABLE:'账号操作未完成，页面已保留，请在窗口核对。'
+ ACCOUNT_UNAVAILABLE:'账号操作未完成，页面已保留，请在窗口核对。',
+ ...ACCOUNT_MUTATION_MESSAGES
 };
 function fail(code){const error=Error(MESSAGES[code]||MESSAGES.ACCOUNT_UNAVAILABLE);error.code=Object.hasOwn(MESSAGES,code)?code:'ACCOUNT_UNAVAILABLE';return error;}
 const pendingReview=new Set(['LOGIN_STARTED','LOGIN_OUTCOME_UNKNOWN','CHALLENGE_REQUIRED','ACCOUNT_CONFIRMATION_REQUIRED','PAGE_CHANGED','IDENTITY_UNVERIFIED']);
-const safeCodes=new Set(['LOGIN_REQUIRED','LOGIN_VERIFIED','LOGIN_FAILED','CHALLENGE_REQUIRED','INVALID_CREDENTIALS','STOPPED','UNAVAILABLE','LOGIN_OUTCOME_UNKNOWN','ACCOUNT_CONFIRMATION_REQUIRED','ACCOUNT_CHANGED','ACCOUNT_CONFLICT','IDENTITY_UNVERIFIED','PAGE_UNSUPPORTED','PAGE_CHANGED','FORM_NOT_FOUND']);
-const resultCodes={LOGGED_IN:'LOGIN_VERIFIED',ACCOUNT_MISMATCH:'ACCOUNT_CHANGED',LOGIN_FORM_REQUIRED:'FORM_NOT_FOUND',LOGIN_FIELDS_NOT_EMPTY:'PAGE_UNSUPPORTED',LOGIN_CHALLENGE:'CHALLENGE_REQUIRED',LOGIN_RESULT_UNKNOWN:'LOGIN_OUTCOME_UNKNOWN',LOGIN_FORM_CHANGED:'PAGE_CHANGED',ACCOUNT_UNVERIFIED:'IDENTITY_UNVERIFIED',PROFILE_REVIEW_REQUIRED:'IDENTITY_UNVERIFIED',INPUT_SURFACE_UNAVAILABLE:'UNAVAILABLE',WRONG_SITE:'PAGE_UNSUPPORTED',PAGE_BUSY:'UNAVAILABLE',WINDOW_CLOSED:'UNAVAILABLE',TAB_CHANGED:'PAGE_CHANGED',LOGIN_UNAVAILABLE:'UNAVAILABLE'};
+const safeCodes=new Set(['LOGIN_REQUIRED','LOGIN_VERIFIED','LOGIN_FAILED','CHALLENGE_REQUIRED','INVALID_CREDENTIALS','STOPPED','UNAVAILABLE','LOGIN_OUTCOME_UNKNOWN','ACCOUNT_CONFIRMATION_REQUIRED','ACCOUNT_CHANGED','ACCOUNT_CONFLICT','IDENTITY_UNVERIFIED','PAGE_UNSUPPORTED','PAGE_CHANGED','FORM_NOT_FOUND','PAGE_NOT_READY','INPUT_SURFACE_UNAVAILABLE','PAGE_BUSY','WINDOW_CLOSED']);
+const resultCodes={LOGGED_IN:'LOGIN_VERIFIED',ACCOUNT_MISMATCH:'ACCOUNT_CHANGED',LOGIN_FORM_REQUIRED:'FORM_NOT_FOUND',LOGIN_FIELDS_NOT_EMPTY:'PAGE_UNSUPPORTED',LOGIN_CHALLENGE:'CHALLENGE_REQUIRED',LOGIN_RESULT_UNKNOWN:'LOGIN_OUTCOME_UNKNOWN',LOGIN_FORM_CHANGED:'PAGE_CHANGED',ACCOUNT_UNVERIFIED:'IDENTITY_UNVERIFIED',PROFILE_REVIEW_REQUIRED:'IDENTITY_UNVERIFIED',INPUT_SURFACE_UNAVAILABLE:'INPUT_SURFACE_UNAVAILABLE',WRONG_SITE:'PAGE_UNSUPPORTED',PAGE_BUSY:'PAGE_BUSY',WINDOW_CLOSED:'WINDOW_CLOSED',TAB_CHANGED:'PAGE_CHANGED',LOGIN_UNAVAILABLE:'UNAVAILABLE'};
 const hasVerifiedResult=result=>result?.verified===true&&result.status==='logged_in'&&result.account?.verified===true;
 
 class CommerceAccountService{
@@ -26,8 +27,30 @@ class CommerceAccountService{
  async configured(work,fallback='ACCOUNT_UNAVAILABLE'){
   try{return await this.engine.configure(work);}catch(error){throw fail(Object.hasOwn(MESSAGES,error?.code)?error.code:fallback);}
  }
- save(input){return this.configured(()=>({account:this.store.save(input),message:'账号已加密保存在本机。'}),'ACCOUNT_INVALID');}
- remove(id){return this.configured(()=>{if(this.isBusy(id))throw fail('ACCOUNT_BUSY');this.store.remove(id);return {message:'账号记录已删除。'};});}
+ async mutate(id,work,fallback='ACCOUNT_UNAVAILABLE'){
+  try{
+   if(this.engine.closing)throw fail('ACCOUNT_CLOSED');
+   if(this.store.faulted||this.engine.faulted||this.engine.storageFaulted?.())throw fail('ACCOUNT_STORAGE_UNAVAILABLE');
+   if(id&&(this.isBusy(id)||this.store.isBusy?.(id)))throw fail('ACCOUNT_BUSY');
+   // The vault commits synchronously and atomically. It does not need to stop
+   // other profiles' scheduler or await the global configuration queue.
+   return work();
+  }catch(error){throw fail(Object.hasOwn(MESSAGES,error?.code)?error.code:fallback);}
+ }
+ save(input){return this.mutate(input?.id,()=>({account:this.store.save(input),message:'账号已加密保存在本机；原账号身份和待核对记录保持。'}),'ACCOUNT_INVALID');}
+ removalBinding(account){
+  const db=this.engine.db,bindings=(db.marketAccounts||[]).filter(row=>row.profileId===account.profileId),binding=bindings[0];
+  if(bindings.length>1)throw fail('ACCOUNT_CHANGED');
+  if(binding){
+   let identity;try{identity=normalizeIdentity({...binding,verified:true},binding.verifiedAt);}catch{throw fail('ACCOUNT_CHANGED');}
+   if(binding.platform!=='vinted-fr'||binding.profileURL!==identity.profileURL||account.identity&&(account.identity.memberId!==identity.memberId||account.identity.profileURL!==identity.profileURL))throw fail('ACCOUNT_CHANGED');
+  }
+  const planIds=new Set((db.plans||[]).filter(row=>row.profileId===account.profileId).map(row=>row.id)),jobIds=new Set((db.jobs||[]).filter(row=>row.profileId===account.profileId||planIds.has(row.planId)).map(row=>row.id));
+  const related=row=>row&&(row.profileId===account.profileId||planIds.has(row.planId)||jobIds.has(row.jobId));
+  const history=planIds.size>0||['jobs','claims','photoPreparations','localPhotoPreparations','sales','reservations','publicationSupplierSync'].some(key=>(db[key]||[]).some(row=>related(row)||Array.isArray(row.listings)&&row.listings.some(link=>planIds.has(link.planId))))||(db.publications?.submissions||[]).some(row=>related(row.proof?.facts));
+  if(history&&account.identity&&!binding)throw fail('ACCOUNT_BINDING_REQUIRED');
+ }
+ remove(id){return this.mutate(id,()=>{let account;try{account=this.store.get(id);}catch{throw fail('ACCOUNT_MISSING');}this.removalBinding(account);this.store.remove(id);return {message:'本机登录资料已删除；原运营账号绑定、任务历史和窗口登录保持。'};});}
  async operate(id,work){
   if(typeof id!=='string'||!id)throw fail('ACCOUNT_MISSING');
   if(this.pending.has(id))throw fail('ACCOUNT_BUSY');
@@ -59,7 +82,7 @@ class CommerceAccountService{
  verify(id,options={}){return this.operate(id,async(account,signal,guard)=>{
   let result;
   try{
-   await this.openPage(account.profileId,{signal,guard});guard();
+   await this.openPage(account.profileId,{signal,guard,reviewCurrent:true});guard();
    const expected=this.expectations(account),confirmed=options?.confirmCurrent===true;
    result=await this.loginService.verify(account.profileId,{...expected,signal,confirmCurrent:confirmed,closeAccountMenu:true,requireOwnProfileClick:true});guard();
    if(!hasVerifiedResult(result)&&(result?.code==='PROFILE_REVIEW_REQUIRED'||!expected.expectedMemberId&&result?.code==='ACCOUNT_UNVERIFIED')&&confirmed&&typeof this.loginService.inspectOwnProfileLink==='function'&&typeof this.loginService.clickOwnProfileLink==='function'){
@@ -86,14 +109,14 @@ class CommerceAccountService{
   const status=result?.status==='error'&&!result?.submitted?'error':'awaiting_user';
   this.store.markResult(account.id,{status,code,loginReviewPending:accountNeedsLoginReview(account)||result?.submitted===true});this.engine.accountObservations.delete(account.profileId);this.engine.emit();
   const saved=this.store.get(account.id);
-  return {account:saved,result:{status,code,submitted:result?.submitted===true,verified:false,loginReviewPending:accountNeedsLoginReview(saved)},message:saved.lastResult?.message||MESSAGES.ACCOUNT_UNAVAILABLE};
+  return {account:saved,result:{status,code,submitted:result?.submitted===true,verified:false,loginReviewPending:accountNeedsLoginReview(saved)},message:code==='UNAVAILABLE'?'本次账号核对未完成，请显示当前 Vinted 环境并在页面就绪后重试；尚未确认登录身份。':saved.lastResult?.message||MESSAGES.ACCOUNT_UNAVAILABLE};
  }
  login(id){return this.operate(id,async(account,signal,guard)=>{
   const expected=this.expectations(account);
   const page=await this.openPage(account.profileId,{signal,guard});guard();
   // A previous submission or interrupted attempt must be read back first.
-  // Updating the saved credentials is an explicit fresh attempt; background
-  // scheduling never repeats an authentication submission.
+  // Credential edits preserve the read-before-login latch. A fresh verified
+  // identity is required before an interrupted authentication may be cleared.
   if(accountNeedsLoginReview(account)){
    let result;try{result=await this.loginService.verify(account.profileId,{...expected,signal});guard();}catch(error){result={status:'awaiting_user',code:error?.code||'LOGIN_OUTCOME_UNKNOWN'};}
    if(hasVerifiedResult(result))return this.commitIdentity(account,result.account,guard);

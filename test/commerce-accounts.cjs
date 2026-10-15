@@ -94,14 +94,14 @@ test('only trusted verification can set identity and malformed member receipts f
   assert.equal(normalizeIdentity(identity('1')).profileURL, 'https://www.vinted.fr/member/1');
 });
 
-test('binding and removal require closed profiles while ordinary label/password changes remain possible', t => {
+test('creating and rebinding require closed profiles while ordinary edits and local credential deletion do not close a session', t => {
   const { store, profiles } = fixture(t); const a = store.save(input()); profiles[0].status = 'running'; profiles[0].running = true;
   assert.doesNotThrow(() => store.save({ id: a.id, label: 'Running account', password: 'replacement password' }));
-  assert.throws(() => store.remove(a.id), { code: 'PROFILE_OPEN' }); assert.throws(() => store.save({ id: a.id, profileId: 'profile-2' }), { code: 'PROFILE_OPEN' });
+  assert.throws(() => store.save({ id: a.id, profileId: 'profile-2' }), { code: 'PROFILE_OPEN' });
   profiles[0].status = 'closed'; profiles[0].running = false; profiles[1].status = 'starting';
   assert.throws(() => store.save({ id: a.id, profileId: 'profile-2' }), { code: 'PROFILE_OPEN' }); profiles[1].status = 'closed';
   store.verify(a.id, identity()); store.save({ id: a.id, profileId: 'profile-2' }); assert.equal(store.get(a.id).identity, null); assert.equal(store.findByProfile('profile-1'), null);
-  assert.equal(store.remove(a.id).removed, true); assert.equal(store.list().length, 0); assert.throws(() => store.get(a.id), { code: 'ACCOUNT_NOT_FOUND' });
+  profiles[1].status='running';profiles[1].running=true;assert.equal(store.remove(a.id).removed, true); assert.equal(store.list().length, 0); assert.throws(() => store.get(a.id), { code: 'ACCOUNT_NOT_FOUND' });assert.equal(profiles[1].status,'running');
 });
 
 test('business-history and busy guards receive safe DTOs, block changes and never leak their exception', t => {
@@ -122,12 +122,23 @@ test('login results contain fixed safe messages, preserve identity and recover a
   assert.equal(recovered.status, 'awaiting_user'); assert.equal(recovered.lastResult.code, 'LOGIN_OUTCOME_UNKNOWN'); assert.equal(recovered.lastLoginAt, previousLoginAt); assert.equal(recovered.identity.memberId, '12345');
   assert.equal(new AccountsStore(f.options).get(a.id).status, 'awaiting_user');
 });
-test('the login review latch survives current check failures and label edits, and only fresh identity or explicit credential edits clears it', t => {
+test('the login review latch survives check failures, label edits and replacement credentials until fresh identity verification', t => {
   const f=fixture(t),saved=f.store.save(input());f.store.verify(saved.id,identity());f.store.markResult(saved.id,{status:'logging_in'});
   f.store.markResult(saved.id,{status:'awaiting_user',code:'UNAVAILABLE',loginReviewPending:false});assert.equal(f.store.get(saved.id).lastResult.code,'UNAVAILABLE');assert.equal(f.store.get(saved.id).loginReviewPending,true);assert.equal(f.store.get(saved.id).identity.memberId,'12345');
   f.store.save({id:saved.id,label:'Only a label edit'});assert.equal(f.store.get(saved.id).loginReviewPending,true);const restored=new AccountsStore(f.options);assert.equal(restored.get(saved.id).lastResult.code,'UNAVAILABLE');assert.equal(restored.get(saved.id).loginReviewPending,true);
   restored.verify(saved.id,identity());const verified=new AccountsStore(f.options).get(saved.id);assert.equal(verified.loginReviewPending,false);assert.equal(verified.lastResult.code,'LOGIN_VERIFIED');assert.equal(verified.lastResult.message,ACCOUNT_RESULT_CODES.LOGIN_VERIFIED);
-  restored.markResult(saved.id,{status:'awaiting_user',code:'LOGIN_OUTCOME_UNKNOWN'});restored.save({id:saved.id,password:'explicit replacement password'});assert.equal(restored.get(saved.id).loginReviewPending,false);assert.equal(restored.get(saved.id).lastResult.code,'SAVED');
+  restored.markResult(saved.id,{status:'awaiting_user',code:'LOGIN_OUTCOME_UNKNOWN'});const before=restored.get(saved.id);restored.save({id:saved.id,password:'explicit replacement password'});assert.equal(restored.get(saved.id).loginReviewPending,true);assert.deepEqual(restored.get(saved.id).lastResult,before.lastResult);assert.deepEqual(restored.get(saved.id).identity,before.identity);
+});
+
+test('same-environment email and password edits preserve verified identity and the exact pending login receipt across restart',async t=>{
+ const f=fixture(t),saved=f.store.save(input());f.store.verify(saved.id,identity());f.store.markResult(saved.id,{status:'awaiting_user',code:'LOGIN_OUTCOME_UNKNOWN'});f.profiles[0].status='running';const original=f.store.get(saved.id);
+ const changed=f.store.save({id:saved.id,login:'updated-email@example.test',label:'Updated display name',password:'replacement local password'});assert.equal(changed.login,'updated-email@example.test');assert.deepEqual(changed.identity,original.identity);assert.deepEqual(changed.lastResult,original.lastResult);assert.equal(changed.status,original.status);assert.equal(changed.lastLoginAt,original.lastLoginAt);assert.equal(changed.loginReviewPending,true);assert.equal(await f.store.withCredentials(saved.id,value=>value.password==='replacement local password'),true);
+ f.store.save({id:saved.id,clearPassword:true});const reopened=new AccountsStore(f.options).get(saved.id);assert.equal(reopened.hasPassword,false);assert.deepEqual(reopened.identity,original.identity);assert.deepEqual(reopened.lastResult,original.lastResult);assert.equal(reopened.loginReviewPending,true);assert.equal(f.profiles[0].status,'running');
+});
+
+test('trusted mutation failures retain specific fixed reasons without exposing guard exception text',t=>{
+ const {ACCOUNT_MUTATION_MESSAGES}=require('../src/commerce-accounts.cjs');let code;const f=fixture(t,{assertMutable:()=>{if(code)throw Object.assign(Error(input().password),{code});}}),saved=f.store.save(input());
+ for(const value of ['ACCOUNT_BUSY','ACCOUNT_HISTORY','ACCOUNT_BINDING_REQUIRED','ACCOUNT_CHANGED','PROFILE_OPEN','ACCOUNT_STORAGE_UNAVAILABLE','ACCOUNT_CLOSED']){code=value;assert.throws(()=>f.store.save({id:saved.id,label:'Cannot commit'}),error=>error.code===value&&error.message===ACCOUNT_MUTATION_MESSAGES[value]&&!error.message.includes(input().password));}code='RAW_PRIVATE_REASON';assert.throws(()=>f.store.remove(saved.id),{code:'ACCOUNT_CHANGE_BLOCKED'});assert.equal(f.store.get(saved.id).label,saved.label);
 });
 test('legacy account rows infer their review latch without rewriting current errors or treating a false field as fresh verification', t => {
   const f=fixture(t),saved=f.store.save(input());f.store.markResult(saved.id,{status:'awaiting_user',code:'LOGIN_OUTCOME_UNKNOWN'});const data=decodedStore(f);delete data.accounts[0].loginReviewPending;fs.writeFileSync(f.store.file,rawStore(f.options,data));
@@ -142,7 +153,7 @@ test('real encrypted account state records a failed check after interruption, pr
   const original=vault.withCredentials.bind(vault);vault.withCredentials=async(...args)=>{passwordReads++;return original(...args);};
   const service=new CommerceAccountService({engine,store:vault,openPage:async()=>{if(mode==='open-failure')throw Object.assign(Error('private window error'),{code:'ACCOUNT_UNAVAILABLE'});},login:{login:async()=>{loginSubmits++;throw Error('Credentials must not be submitted');},verify:async()=>{verifyReads++;return mode==='success'?{status:'logged_in',verified:true,account:identity('12345',{documentKey:'fresh-recovered-document'})}:{status:'awaiting_user',code:'STOPPED',verified:false,submitted:false};}}});
   try{
-    const unavailable=await service.verify(saved.id,{confirmCurrent:true});assert.equal(unavailable.result.code,'UNAVAILABLE');assert.equal(unavailable.result.submitted,false);assert.equal(unavailable.result.loginReviewPending,true);assert.equal(unavailable.message,ACCOUNT_RESULT_CODES.UNAVAILABLE);assert.equal(new AccountsStore(f.options).get(saved.id).lastResult.code,'UNAVAILABLE');
+    const unavailable=await service.verify(saved.id,{confirmCurrent:true});assert.equal(unavailable.result.code,'UNAVAILABLE');assert.equal(unavailable.result.submitted,false);assert.equal(unavailable.result.loginReviewPending,true);assert.match(unavailable.message,/本次账号核对未完成/);assert.equal(new AccountsStore(f.options).get(saved.id).lastResult.code,'UNAVAILABLE');
     mode='stopped';const stopped=await service.verify(saved.id,{confirmCurrent:true});assert.equal(stopped.result.code,'STOPPED');assert.equal(stopped.result.submitted,false);assert.equal(new AccountsStore(f.options).get(saved.id).loginReviewPending,true);
     await service.login(saved.id);assert.equal(passwordReads,0);assert.equal(loginSubmits,0);assert.equal(verifyReads,2);assert.equal(vault.get(saved.id).identity.memberId,'12345');
     mode='success';const recovered=await service.verify(saved.id,{confirmCurrent:true});assert.equal(recovered.result.verified,true);assert.equal(recovered.account.loginReviewPending,false);assert.equal(recovered.account.lastResult.code,'LOGIN_VERIFIED');assert.equal(recovered.message,'已核对当前 Vinted 登录身份。');
@@ -238,6 +249,25 @@ function queuedMessage(engine) {
   plan.activeListingId = '123456'; engine.persist();
   return engine.enqueue('message', plan, { id: 'message-1', listingId: '123456', buyerUsername: 'fixture-buyer' }, 'message:message-1');
 }
+
+test('real local credential edits and deletion leave operational binding and unknown jobs intact across restart',async t=>{
+ const {CommerceEngine}=require('../src/commerce-engine.cjs'),{CommerceAccountService}=require('../src/commerce-account-service.cjs'),f=fixture(t),saved=f.store.save(input()),engine=new CommerceEngine(commerceOptions(f,f.store));
+ try{
+  const job=queuedMessage(engine);engine.bindMarketAccount('profile-1',identity('12345',{documentKey:'original-observed-document'}));Object.assign(job,{state:'uncertain',mutationPending:true,operation:{kind:'reply',idempotencyKey:'original-request',fingerprint:'original-body'}});engine.persist();f.store.markResult(saved.id,{status:'awaiting_user',code:'LOGIN_OUTCOME_UNKNOWN'});f.profiles[0].status='running';
+  let configured=0;engine.configure=async()=>{configured++;throw Error('Global configuration is unavailable while other tasks run');};const service=new CommerceAccountService({engine,store:f.store,openPage:async()=>{throw Error('No browser operation authorized');},login:{}}),originalAccount=f.store.get(saved.id),originalDB=structuredClone(engine.db),originalFile=fs.readFileSync(engine.file,'utf8');engine.running=true;engine.ticking=true;engine.active.set('profile-2',new AbortController());service.pending.add('unrelated-account');
+  const changed=await service.save({id:saved.id,label:'Updated during scheduling',login:'changed-email@example.test',password:'new local credential'});assert.deepEqual(changed.account.identity,originalAccount.identity);assert.deepEqual(changed.account.lastResult,originalAccount.lastResult);assert.equal(changed.account.loginReviewPending,true);assert.equal(await f.store.withCredentials(saved.id,value=>value.password==='new local credential'),true);
+  const removed=await service.remove(saved.id);assert.match(removed.message,/本机登录资料已删除/);assert.deepEqual(f.store.list(),[]);assert.deepEqual(engine.db,originalDB);assert.equal(fs.readFileSync(engine.file,'utf8'),originalFile);assert.equal(engine.marketAccountRecords()[0].memberId,'12345');assert.equal(f.profiles[0].status,'running');assert.equal(configured,0);assert.equal(engine.db.jobs[0].id,job.id);assert.equal(engine.db.jobs[0].operation.idempotencyKey,'original-request');
+  engine.running=false;engine.ticking=false;engine.active.clear();await engine.close();const vault=new AccountsStore(f.options),reopened=new CommerceEngine(commerceOptions(f,vault));try{assert.deepEqual(vault.list(),[]);assert.deepEqual(reopened.db.marketAccounts,originalDB.marketAccounts);assert.equal(reopened.db.jobs[0].id,job.id);assert.equal(reopened.db.jobs[0].state,'uncertain');assert.equal(reopened.db.jobs[0].operation.idempotencyKey,'original-request');assert.equal(reopened.running,false);assert.equal(reopened.timer,null);}finally{await reopened.close();}
+ }finally{engine.running=false;engine.ticking=false;engine.active.clear();await engine.close();}
+});
+
+test('failed credential deletion preserves the only persisted vault row and operational history without partial removal',async t=>{
+ const {CommerceEngine}=require('../src/commerce-engine.cjs'),{CommerceAccountService}=require('../src/commerce-account-service.cjs');let fail=false;const io={...fs,renameSync:(...args)=>{if(fail)throw Error('private account-storage exception');return fs.renameSync(...args);}},f=fixture(t,{fsImpl:io}),saved=f.store.save(input()),engine=new CommerceEngine(commerceOptions(f,f.store));
+ try{
+  queuedMessage(engine);engine.bindMarketAccount('profile-1',identity());const service=new CommerceAccountService({engine,store:f.store,login:{},openPage:async()=>{throw Error('No browser work');}}),account=f.store.get(saved.id),originalDB=structuredClone(engine.db),vaultFile=fs.readFileSync(f.store.file,'utf8'),engineFile=fs.readFileSync(engine.file,'utf8');fail=true;
+  await assert.rejects(service.remove(saved.id),error=>error.code==='ACCOUNT_UNAVAILABLE'&&!error.message.includes('private'));assert.deepEqual(f.store.get(saved.id),account);assert.deepEqual(engine.db,originalDB);assert.equal(fs.readFileSync(f.store.file,'utf8'),vaultFile);assert.equal(fs.readFileSync(engine.file,'utf8'),engineFile);assert.equal(f.store.faulted,true);assert.equal(engine.storageFaulted(),true);assert.deepEqual(new AccountsStore(f.options).get(saved.id),account);
+ }finally{await engine.close();}
+});
 
 test('a vault-only committed identity survives a failed second-file write and blocks another legacy profile after restart', async t => {
   const { CommerceEngine } = require('../src/commerce-engine.cjs');

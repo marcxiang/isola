@@ -103,7 +103,7 @@
     if(!material)return null;
     if(material.verified===true&&material.cleared===true&&material.unchanged!==true)return {className:'field-hint',message:'已清空可选材质；发布前仍会核对。'};
     if(material.verified===true&&material.unchanged===true&&material.cleared!==true)return {className:'field-hint',message:'本次观察暂未发现已填材质；发布前仍会核对。'};
-    const reasons={picker_scope:'材质选择器范围未能唯一确认。',picker_choices:'材质选项与本次核对记录不一致。',picker_groups:'材质选项分组未能确认。',picker_done:'材质完成按钮尚未就绪或已改变。',original_fields:'原商品字段或选择状态已改变。'},reason=typeof material.reason==='string'&&Object.hasOwn(reasons,material.reason)?reasons[material.reason]:'';
+    const reasons={picker_scope:'材质选择器范围未能唯一确认。',picker_choices:'材质选项与本次核对记录不一致。',picker_groups:'材质选项分组未能确认。',picker_done:'材质完成按钮尚未就绪或已改变。',original_fields:'原商品字段或选择状态已改变。',material_input:'原材质控件已被替换或属性已改变。',material_input_disabled:'原材质控件在操作期间被禁用。',material_input_changed:'材质值在操作期间已改变。',watched_disconnected:'原商品字段节点在操作期间被替换。',watched_value:'原商品字段值在操作期间已改变。',original_choice_disconnected:'原商品选择控件在操作期间被替换。',original_choice_checked:'原商品选择状态在操作期间已改变。'},reason=typeof material.reason==='string'&&Object.hasOwn(reasons,material.reason)?reasons[material.reason]:'';
     return {className:'photo-result-warning',message:material.verified===false?'可选材质尚未确认清空，请检查当前页面；'+reason+'照片回执已核对不代表材质核对完成。发布前仍会核对。':'可选材质状态待核对；发布前仍会核对。'};
   }
   function canUploadPhotos(id) { const report=photoReports.get(String(id));return photoSummary(id)?.ready===true&&(canCheckPhotos(id)||!report?.uploadError&&report?.page?.canUpload===true); }

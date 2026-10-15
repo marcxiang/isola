@@ -104,7 +104,8 @@ function optionalMaterialFixture(options={}){
   const node=(tag,label,extra={})=>Object.defineProperties({tagName:tag.toUpperCase(),label,isConnected:true,children:[],getAttribute(name){return this[name]??null;},contains(other){return this===other;},querySelectorAll:()=>[]},Object.getOwnPropertyDescriptors(extra));
   const fields=Object.entries({title:'Titre',description:'Description',categoryPath:'Catégorie',priceCents:'Prix',condition:'État'}).map(([key,label])=>node(key==='description'?'textarea':'input',label,{key,type:'text',readOnly:!['title','description','priceCents'].includes(key),get value(){return values[key];}}));
   const input=node('input','Matériau (recommandé)',{type:'text',readOnly:true,required:options.required===true||options.required==='true',invalid:options.invalid===true||options.invalid==='true',get value(){return material;},placeholder:'Sélectionne un matériau'});
-  const form=node('form','',{contains:other=>fields.includes(other)||other===input,querySelectorAll:()=>[]});for(const field of [...fields,input])field.form=form;
+  const auxiliary=node('input','Fixture empty unknown input',{type:'text',value:'',semanticHeader:options.semanticHeader===true}),originalChoice=node('input','Fixture business choice',{type:'radio',checked:true,hidden:options.hiddenOriginalChoice===true});
+  const form=node('form','',{contains:other=>fields.includes(other)||other===input||options.auxiliary&&!options.semanticHeader&&other===auxiliary||options.originalChoice&&other===originalChoice,querySelectorAll:()=>options.originalChoice?[originalChoice]:[]});for(const field of [...fields,input,...(options.auxiliary&&!options.semanticHeader?[auxiliary]:[])])field.form=form;
   const heading=node('span','',{_text:'Matériau (recommandé)'}),allHeading=node('p','',{_text:'Toutes'}),suggestionHeading=node('p','',{_text:'Suggestions'});
   const all=node('div','',{children:[allHeading],contains:other=>other.group==='all'}),suggestions=node('div','',{children:[suggestionHeading],contains:other=>other.group==='suggestions'});
   const canonical=node('input','Plastique',{type:'checkbox',role:'checkbox',group:'all',checked:true}),mirror=node('input','Plastique',{type:'checkbox',role:'checkbox',group:'suggestions',checked:true}),other=node('input','Acier',{type:'checkbox',role:'checkbox',group:'suggestions',checked:false});
@@ -114,18 +115,19 @@ function optionalMaterialFixture(options={}){
   const duplicateHeading=node('span','',{_text:'Matériau (recommandé)'}),duplicateDone=node('button','Fait',{type:'button'}),customRole=node('div','Acier',{role:'checkbox',group:'all',checked:true});
   const chooserNodes=[heading,canonical,mirror,other,done,...(options.duplicate||options.unknownGroup?[duplicate]:[]),...(options.duplicateHeading?[duplicateHeading]:[]),...(options.duplicateDone?[duplicateDone]:[]),...(options.unregisteredRole?[customRole]:[])];
   const scope=node('div','',{get isConnected(){return open;},get hidden(){return !open;},contains:other=>chooserNodes.includes(other)||[all,suggestions].includes(other)||options.scopeOwnsForm&&(other===input||fields.includes(other)),querySelectorAll:selector=>selector.startsWith('input,textarea,select')?chooserNodes.filter(n=>n.tagName==='INPUT'||n.role==='checkbox'||n.role==='radio'):chooserNodes.filter(n=>n.tagName!=='SPAN')});
-  const api={calls,dispatched:[],values,tab,w,setMaterial(value){material=value;},reload(){documentKey++;},canonical,mirror,other,input,fields,chooserNodes,heading,duplicateHeading,duplicateDone,customRole,get done(){return done;}};
+  const api={calls,dispatched:[],values,tab,w,setMaterial(value){material=value;},reload(){documentKey++;},canonical,mirror,other,input,fields,auxiliary,originalChoice,chooserNodes,heading,duplicateHeading,duplicateDone,customRole,get done(){return done;}};
   async function snapshot(){
     version++;ids=new Map();
     if(pending>0&&!options.desync&&--pending===0)mirror.checked=false;
-    const nodes=[...fields,...(options.absent?[]:[input,...(options.duplicateMaterial?[input]:[])]),...(open?chooserNodes.filter(n=>n!==heading&&n!==duplicateHeading&&!(n===customRole&&options.unregisteredRole)&&!(n===done&&(options.omitDone||options.omitDisabledDone&&done.disabled))):[])];
+    const nodes=[...fields,...(options.auxiliary?[auxiliary]:[]),...(options.absent?[]:[input,...(options.duplicateMaterial?[input]:[])]),...(open?chooserNodes.filter(n=>n!==heading&&n!==duplicateHeading&&!(n===customRole&&options.unregisteredRole)&&!(n===done&&(options.omitDone||options.omitDisabledDone&&done.disabled))):[])];
     const elements=nodes.map(n=>{const id='e'+version+'-'+ids.size;ids.set(id,n);return {id,tag:n.tagName.toLowerCase(),type:n.type,role:n.role,label:n.label,readOnly:n.readOnly,required:n===input?options.required??false:n.required,invalid:n===input?options.invalid??false:n.invalid,disabled:n.disabled,checked:n.checked};});
     return {url:FORM,title:'Vendre un article',elements};
   }
   const control={
     checkedSnapshot:async()=>{await options.beforeSnapshot?.(api);return snapshot();},
     isolated:async(_tab,expression)=>{
-      Object.assign(world,{__isolaElements:ids,__isolaDOM:{visible:n=>!n.hidden,disabled:n=>!!n.disabled,label:n=>n.label||'',safeText:n=>n._text||n.label||'',closest:(n,selector)=>selector==='form'?n.form||null:(options.pickerHeader&&selector.includes('header')||options.pickerNav&&selector.includes('nav'))&&[heading,done].includes(n)?header:null,parents:n=>[n,...(options.pickerHeader&&[heading,done].includes(n)?[header]:[]),...(n.group==='all'?[all]:n.group==='suggestions'?[suggestions]:[]),...(chooserNodes.includes(n)||[all,suggestions].includes(n)?[scope]:[form])]}});
+      await options.beforeIsolated?.(api,expression);
+      Object.assign(world,{__isolaElements:ids,__isolaDOM:{visible:n=>!n.hidden,disabled:n=>!!n.disabled,label:n=>n.label||'',safeText:n=>n._text||n.label||'',closest:(n,selector)=>selector==='form'?n.form||null:n.semanticHeader&&selector.includes('header')||(options.pickerHeader&&selector.includes('header')||options.pickerNav&&selector.includes('nav'))&&[heading,done].includes(n)?header:null,parents:n=>[n,...(options.pickerHeader&&[heading,done].includes(n)?[header]:[]),...(n.group==='all'?[all]:n.group==='suggestions'?[suggestions]:[]),...(chooserNodes.includes(n)||[all,suggestions].includes(n)?[scope]:[form])]}});
       return vm.runInNewContext(expression,{globalThis:world,performance:{timeOrigin:documentKey},document:{querySelectorAll:selector=>!open?[]:selector==='button'?chooserNodes.filter(n=>n.tagName==='BUTTON'):[...chooserNodes.filter(n=>n._text==='Matériau (recommandé)'),allHeading,suggestionHeading]}});
     },
     performAction:async(_tab,args,opts)=>{
@@ -133,7 +135,7 @@ function optionalMaterialFixture(options={}){
       const target=ids.get(args.elementId);assert.ok(target,'material operation uses a fresh semantic id');
       api.dispatched.push(target);
       if(args.action==='type')values[target.key]=args.text;
-      else if(target===input)open=true;
+      else if(target===input){open=true;await options.afterOpen?.(api);}
       else if(target===canonical){canonical.checked=false;pending=options.pendingSnapshots||1;if(options.extraSelected)other.checked=true;if(options.replaceDone){const old=done;old.isConnected=false;done=node('button','Fait',doneProperties);chooserNodes[chooserNodes.indexOf(old)]=done;}}
       else if(target===done){if(!options.stuckDone){open=false;material='';}}
       else throw Error('Unexpected optional-material action');
@@ -149,6 +151,41 @@ test('optional material clearing uses the owned canonical checkbox, waits for it
   const f=optionalMaterialFixture({pendingSnapshots:3});await f.prepare();f.setMaterial('Plastique');
   const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.verified,true);assert.equal(result.cleared,true);assert.equal(result.published,false);assert.equal(f.values.title,'Owned test');assert.equal(f.calls.length,3);assert.ok(f.calls.every(call=>call.action==='click'));
   const count=f.calls.length;const repeated=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(repeated.unchanged,true);assert.equal(repeated.cleared,false);assert.equal(f.calls.length,count);assert.equal(f.w.vintedDraftController,null);
+});
+
+test('original material guards distinguish fixed failure reasons without returning any page data',async()=>{
+  const variants=[
+    {reason:'material_input',change(api){api.input.readOnly=false;}},
+    {reason:'material_input_disabled',change(api){api.input.disabled=true;}},
+    {reason:'material_input_changed',change(api){api.setMaterial('private-fixture changed material');}},
+    {reason:'watched_disconnected',change(api){api.fields[0].isConnected=false;}},
+    {reason:'watched_value',change(api){api.values.title='private-fixture changed title';}},
+    {reason:'original_choice_disconnected',change(api){api.originalChoice.isConnected=false;}},
+    {reason:'original_choice_checked',change(api){api.originalChoice.checked=false;}}
+  ];
+  for(const variant of variants){
+    const f=optionalMaterialFixture({originalChoice:true,afterOpen:variant.change});await f.prepare();f.setMaterial('Plastique');
+    await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason===variant.reason&&!error.message.includes('private-fixture'));
+    assert.equal(f.calls.length,1);assert.equal(f.dispatched.length,1);assert.equal(f.canonical.checked,true);assert.equal(f.mirror.checked,true);assert.equal(f.dispatched.filter(node=>node.label==='Fait').length,0);assert.equal(f.w.vintedDraftController,null);
+  }
+});
+
+test('guard installation diagnoses a last-moment disabled material before opening its picker',async()=>{
+  let armed=false;const f=optionalMaterialFixture({beforeIsolated(api,expression){if(armed&&expression.includes('const originalChoices=')){armed=false;api.input.disabled=true;}}});await f.prepare();f.setMaterial('Plastique');armed=true;
+  await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='material_input_disabled');assert.equal(f.calls.length,0);assert.equal(f.dispatched.length,0);assert.equal(f.input.value,'Plastique');assert.equal(f.w.vintedDraftController,null);
+});
+
+test('a rebuilt ordinary header search is excluded while a rebuilt empty unknown business input remains guarded',async()=>{
+  const header=optionalMaterialFixture({auxiliary:true,semanticHeader:true,afterOpen(api){api.auxiliary.isConnected=false;}});await header.prepare();header.setMaterial('Plastique');const result=await header.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,true);assert.equal(header.dispatched.length,3);
+  const unknown=optionalMaterialFixture({auxiliary:true,afterOpen(api){api.auxiliary.isConnected=false;}});await unknown.prepare();unknown.setMaterial('Plastique');await assert.rejects(unknown.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='watched_disconnected');assert.equal(unknown.dispatched.length,1);assert.equal(unknown.canonical.checked,true);assert.equal(unknown.mirror.checked,true);
+});
+
+test('hidden original business choices remain guarded and report a disconnect instead of silently ignoring it',async()=>{
+  const f=optionalMaterialFixture({originalChoice:true,hiddenOriginalChoice:true,afterOpen(api){api.originalChoice.isConnected=false;}});await f.prepare();f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='original_choice_disconnected');assert.equal(f.dispatched.length,1);assert.equal(f.canonical.checked,true);assert.equal(f.mirror.checked,true);
+});
+
+test('a changed original field after open verification is diagnosed before any material is unchecked',async()=>{
+  let armed=false,changed=false;const f=optionalMaterialFixture({beforeSnapshot(api){if(armed&&!changed&&api.dispatched.length===1){changed=true;api.values.priceCents='private-fixture changed price';}}});await f.prepare();f.setMaterial('Plastique');armed=true;await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='watched_value'&&!error.message.includes('private-fixture'));assert.equal(f.dispatched.length,1);assert.equal(f.canonical.checked,true);assert.equal(f.mirror.checked,true);
 });
 
 test('optional material discovers an omitted disabled Fait and its own mobile header without granting an action id',async()=>{

@@ -8,8 +8,21 @@ const isInvalid=value=>value!==false&&value!=='false'&&value!==null&&value!==und
 const isMaterial=element=>element?.tag==='input'&&(LABELS.includes(normalize(element.label))||normalize(element.placeholder)==='Sélectionne un matériau');
 const FORM_FIELDS={title:['Titre','Dis aux acheteurs ce que tu vends'],description:['Description','Ajoute des informations utiles'],categoryPath:['Catégorie','Sélectionne une catégorie'],priceCents:['Prix','0,00 €'],condition:['État','Sélectionne un état'],brand:['Marque','Sélectionne une marque'],size:['Taille','Sélectionne une taille'],color:['Couleur','Sélectionne une couleur','Sélectionne 2 couleurs maximum']};
 const fieldKey=element=>Object.keys(FORM_FIELDS).find(key=>FORM_FIELDS[key].includes(normalize(element?.label))||FORM_FIELDS[key].includes(normalize(element?.placeholder)));
-const MATERIAL_REASONS=new Set(['picker_scope','picker_choices','picker_groups','picker_done','original_fields']);
+const MATERIAL_REASONS=new Set(['picker_scope','picker_choices','picker_groups','picker_done','original_fields','material_input','material_input_disabled','material_input_changed','watched_disconnected','watched_value','original_choice_disconnected','original_choice_checked']);
 const fail=(message,reason)=>{const error=problem('OPTIONAL_MATERIAL_UNVERIFIED',message||'可选材质无法安全清空，已停止后续操作');if(MATERIAL_REASONS.has(reason))error.materialReason=reason;return error;};
+// Return only fixed diagnostic codes. Keep the same original-node, attribute,
+// value and selection checks in every phase; never return page data or labels.
+function originalFieldsReason(guard,d,allowedValues){
+  const input=guard.input,checked=node=>node.checked===true||node.getAttribute?.('aria-checked')==='true';
+  if(!input?.isConnected||input.tagName!=='INPUT'||!input.readOnly||input.required||input.getAttribute('aria-required')==='true'||input.getAttribute('aria-invalid')!==null&&input.getAttribute('aria-invalid')!=='false')return 'material_input';
+  if(d.disabled(input))return 'material_input_disabled';
+  if(guard.watched.some(item=>!item.node?.isConnected))return 'watched_disconnected';
+  if(guard.watched.some(item=>String(item.node.value||'')!==item.value))return 'watched_value';
+  if(guard.originalChoices.some(item=>!item.node?.isConnected))return 'original_choice_disconnected';
+  if(guard.originalChoices.some(item=>checked(item.node)!==item.checked))return 'original_choice_checked';
+  if(!allowedValues.includes(String(input.value||'')))return 'material_input_changed';
+  return null;
+}
 const euroCents=value=>{
   if(typeof value!=='string'||/[\x00-\x1f\x7f]/.test(value))return null;
   const match=/^(\d{1,7})(?:[,.](\d{1,2}))?(?: ?€)?$/.exec(value.replace(/[\u00a0\u202f]/g,' ').trim());
@@ -84,23 +97,26 @@ async function clearOptionalMaterial(adapter,profileId,{signal,settleEmptyMs=0}=
     const watched=state.values.filter(entry=>entry.id!==material.id);
     const created=await adapter.control.isolated(tab,`(() => {
       const d=globalThis.__isolaDOM,get=id=>globalThis.__isolaElements?.get(id),input=get(${JSON.stringify(material.id)}),watched=${JSON.stringify(watched)}.map(item=>({...item,node:get(item.id)}));
-      if(!input?.isConnected||!d.visible(input)||input.tagName!=='INPUT'||!input.readOnly||d.disabled(input)||input.required||input.getAttribute('aria-required')==='true'||input.getAttribute('aria-invalid')!==null&&input.getAttribute('aria-invalid')!=='false'||String(input.value||'')!==${JSON.stringify(materialValue)}||d.closest(input,'header,nav,[role=navigation],[role=tablist]')||watched.some(item=>!item.node?.isConnected||String(item.node.value||'')!==item.value))return {error:true};
+      const reason=(${originalFieldsReason.toString()})({input,watched,originalChoices:[]},d,[${JSON.stringify(materialValue)}]);
+      if(reason)return {error:true,reason};
+      if(!d.visible(input)||d.closest(input,'header,nav,[role=navigation],[role=tablist]'))return {error:true,reason:'material_input'};
       const form=input.form||d.closest(input,'form'),scope=form&&watched.every(item=>form.contains(item.node))?form:d.parents(input).find(node=>!['BODY','HTML'].includes(node.tagName)&&watched.every(item=>node.contains(item.node)));
       if(!scope)return {error:true};
       const originalChoices=[...scope.querySelectorAll('input[type=checkbox],input[type=radio],[role=checkbox],[role=radio]')].map(node=>({node,checked:node.checked===true||node.getAttribute?.('aria-checked')==='true'}));
       globalThis.__isolaOptionalMaterial={token:${JSON.stringify(token)},documentKey:String(performance.timeOrigin),input,value:String(input.value||''),watched,originalChoices,scope:null,choice:null};
       return {documentKey:String(performance.timeOrigin)};
     })()`);current();
-    if(created?.error||created?.documentKey!==ownership.documentKey)throw fail(undefined,'original_fields');
+    if(created?.error||created?.documentKey!==ownership.documentKey)throw fail(undefined,created?.reason||'original_fields');
     installed=true;
     const perform=async(args,phase)=>{
       const actionOptions={...options,onProgress:async({stage}={})=>{
         current();
         const stable=await adapter.control.isolated(tab,`(() => {
           const guard=globalThis.__isolaOptionalMaterial,d=globalThis.__isolaDOM,checked=node=>node.checked===true||node.getAttribute?.('aria-checked')==='true';
-          if(!guard||guard.token!==${JSON.stringify(token)}||String(performance.timeOrigin)!==guard.documentKey||!guard.input?.isConnected||guard.input.tagName!=='INPUT'||!guard.input.readOnly||d.disabled(guard.input)||guard.input.required||guard.input.getAttribute('aria-required')==='true'||guard.input.getAttribute('aria-invalid')!==null&&guard.input.getAttribute('aria-invalid')!=='false'||guard.watched.some(item=>!item.node?.isConnected||String(item.node.value||'')!==item.value)||guard.originalChoices.some(item=>!item.node?.isConnected||checked(item.node)!==item.checked)||![guard.value,''].includes(String(guard.input.value||'')))return false;
+          if(!guard||guard.token!==${JSON.stringify(token)}||String(performance.timeOrigin)!==guard.documentKey)return 'original_fields';
+          const reason=(${originalFieldsReason.toString()})(guard,d,[guard.value,'']);if(reason)return reason;
           if(${JSON.stringify(stage)}==='verifying')return true;
-          if(String(guard.input.value||'')!==guard.value)return false;
+          if(String(guard.input.value||'')!==guard.value)return 'material_input_changed';
           if(['uncheck','commit'].includes(${JSON.stringify(phase)})){
             const scope=guard.scope,normalize=value=>String(value||'').replace(/\\s+/g,' ').trim(),allowed=node=>!!node?.isConnected&&d.visible(node)&&!d.closest(node,'nav,[role=navigation],[role=tablist]');
             if(!scope?.isConnected||!d.visible(scope)||scope.contains(guard.input)||guard.watched.some(item=>scope.contains(item.node)))return 'picker_scope';
@@ -131,8 +147,7 @@ async function clearOptionalMaterial(adapter,profileId,{signal,settleEmptyMs=0}=
         const result={documentKey:String(performance.timeOrigin)};
         if(!guard||guard.token!==${JSON.stringify(token)}||guard.documentKey!==result.documentKey)return {...result,error:true,reason:'original_fields'};
         const input=guard.input,allowed=node=>!!node?.isConnected&&d.visible(node)&&!d.closest(node,'nav,[role=navigation],[role=tablist]'),checked=node=>node.checked===true||node.getAttribute?.('aria-checked')==='true';
-        if(!input?.isConnected||input.tagName!=='INPUT'||!input.readOnly||d.disabled(input)||input.required||input.getAttribute('aria-required')==='true'||input.getAttribute('aria-invalid')!==null&&input.getAttribute('aria-invalid')!=='false'||guard.watched.some(item=>!item.node?.isConnected||String(item.node.value||'')!==item.value)||guard.originalChoices.some(item=>!item.node?.isConnected||checked(item.node)!==item.checked))return {...result,error:true,reason:'original_fields'};
-        if(!(phase==='closed'?[guard.value,'']:[guard.value]).includes(String(input.value||'')))return {...result,error:true,reason:'original_fields'};
+        const reason=(${originalFieldsReason.toString()})(guard,d,phase==='closed'?[guard.value,'']:[guard.value]);if(reason)return {...result,error:true,reason};
         const boxes=${JSON.stringify(checkboxes.map(element=>element.id))}.map(id=>({id,node:get(id)})).filter(item=>allowed(item.node)),registeredButtons=${JSON.stringify(buttons.map(element=>element.id))}.map(id=>({id,node:get(id)})).filter(item=>allowed(item.node));
         // A disabled Fait can be omitted by the general snapshot's bounded,
         // action-ranked list. Native BUTTON discovery may identify its picker;

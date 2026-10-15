@@ -11,7 +11,7 @@ function createPhotoService({nativeImage,focusProfile=()=>{}}){
  function materialReceipt(value){
   if(!value||typeof value!=='object'||Array.isArray(value)||!Object.hasOwn(value,'verified')||typeof value.verified!=='boolean')return undefined;
   const receipt=Object.fromEntries(['verified','cleared','unchanged'].filter(key=>Object.hasOwn(value,key)&&typeof value[key]==='boolean').map(key=>[key,value[key]]));
-  if(receipt.verified===false&&Object.hasOwn(value,'reason')&&['picker_scope','picker_choices','picker_groups','picker_done','original_fields'].includes(value.reason))receipt.reason=value.reason;
+  if(receipt.verified===false&&Object.hasOwn(value,'reason')&&['picker_scope','picker_choices','picker_groups','picker_done','original_fields','material_input','material_input_disabled','material_input_changed','watched_disconnected','watched_value','original_choice_disconnected','original_choice_checked'].includes(value.reason))receipt.reason=value.reason;
   return receipt;
  }
  async function prepared(engine,id){const result=await photos.readPreparedPhotos(engine,planId(id));if(!result.manifest||!result.summary?.ready)throw Error(result.summary?.error||'请先领取并下载本计划照片');return result;}

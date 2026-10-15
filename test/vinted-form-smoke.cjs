@@ -23,11 +23,11 @@ const html=String.raw`<!doctype html><meta charset="utf-8"><title>Vinted form co
 <footer><button type="button" id="upload">Ajoute des photos</button><button type="button" id="save">Sauvegarder le brouillon</button><button type="submit" id="publish">Ajouter</button></footer>
 </form></main>
 <script>
-window.fixture={events:[],saves:0,publishes:0,uploads:0,categorySearch:'',semanticButtons:false,escapes:0,stuckMenu:false,brandMenuDelay:0,brandResultsDelay:0,brandReadyDelay:0,brandReadyAt:0,ignoredBrandClicks:0,recommendationClicks:0,normalizePrice:false,wrongPrice:false,colorSuggestions:false,mobilePickers:false,confirmedMenus:[]};
+window.fixture={events:[],saves:0,publishes:0,uploads:0,categorySearch:'',semanticButtons:false,escapes:0,stuckMenu:false,brandMenuDelay:0,brandResultsDelay:0,brandReadyDelay:0,brandReadyAt:0,ignoredBrandClicks:0,recommendationClicks:0,normalizePrice:false,wrongPrice:false,colorSuggestions:false,mobilePickers:false,partialMobileDone:false,replaceMobileChooser:false,confirmedMenus:[]};
 for(const kind of ['click','input','keydown'])document.addEventListener(kind,event=>{if(event.target.closest('main'))fixture.events.push({kind,trusted:event.isTrusted,id:event.target.id,label:event.target.textContent.slice(0,100),key:event.key||''});},true);
-const menu=document.querySelector('#menu'),cat=document.querySelector('#category'),condition=document.querySelector('#condition');
+let menu=document.querySelector('#menu');const cat=document.querySelector('#category'),condition=document.querySelector('#condition');
 function modalHeader(label){return '<div class="modal-header"><div><h2><span>'+label+'</span></h2></div><button type="button" aria-label="Fermer">×</button></div>';}
-function commitChoice(name,apply){if(!fixture.mobilePickers){apply();return;}let done=menu.querySelector('[data-done]');if(!done){done=document.createElement('button');done.type='button';done.dataset.done=name;done.id=name+'-done';done.textContent='Fait';menu.append(done);}done.onclick=()=>{fixture.confirmedMenus.push(name);apply();};}
+function commitChoice(name,apply){if(!fixture.mobilePickers){apply();return;}let done=menu.querySelector('[data-done]');if(!done){done=document.createElement('button');done.type='button';done.dataset.done=name;done.id=name+'-done';done.textContent='Fait';menu.append(done);}done.onclick=()=>{fixture.confirmedMenus.push(name);apply();if(fixture.partialMobileDone&&name==='color'){if(fixture.replaceMobileChooser){const old=menu;menu=old.cloneNode(false);old.replaceWith(menu);}menu.innerHTML=modalHeader('Couleur')+'<label><input type="checkbox" data-label="Blanc">Blanc</label><button type="button">Fait</button>';menu.classList.add('color-open');}};}
 function category(level){
  menu.setAttribute('aria-label','Catégorie');
  menu.innerHTML='<input id="category-search" placeholder="Trouver une catégorie"><div id="choices"></div>';
@@ -98,6 +98,33 @@ module.exports=async function vintedFormSmoke(api,check){
       assert.deepEqual(state.confirmedMenus,['category','brand','condition','color']);assert.equal(state.category,'Autres accessoires');assert.equal(state.brand,'Sans marque');assert.equal(state.condition,'Neuf sans étiquette');assert.equal(state.color,'Noir');assert.equal(state.price,'5,00');assert.equal(state.menuChildren,0);assert.equal(state.escapes,0);assert.equal(state.saves,0);assert.equal(state.publishes,0);assert.equal(state.uploads,0);assert.ok(state.events.every(event=>event.trusted));
       for(const name of state.confirmedMenus)assert.ok(state.events.some(event=>event.kind==='click'&&event.id===name+'-done'&&event.trusted));
       assert.equal(state.events.some(event=>event.id==='unrelated-done'),false);return {confirmedMenus:state.confirmedMenus,trustedConfirmations:true,unrelatedFaitClicked:false,publicationCount:state.publishes};
+    });
+    await check('Vinted mobile color commits the all-colors option with one synchronized Suggestions mirror',async()=>{
+      await c.loadURL(FORM);await c.executeJavaScript('fixture.mobilePickers=true;fixture.colorSuggestions=true');
+      const result=await adapter.prepareFields(profile.id,{color:'Noir',priceCents:500});assert.deepEqual(result.filled.map(field=>field.field),['color','priceCents']);
+      const state=await c.executeJavaScript(`({color:color.value,price:document.querySelector('#price').value,menuChildren:menu.children.length,...fixture})`);
+      assert.deepEqual(state.confirmedMenus,['color']);assert.equal(state.color,'Noir');assert.equal(state.price,'5,00');assert.equal(state.menuChildren,0);assert.ok(state.events.some(event=>event.kind==='click'&&event.id==='color-black'&&event.trusted));assert.ok(state.events.some(event=>event.kind==='click'&&event.id==='color-done'&&event.trusted));assert.equal(state.events.some(event=>event.kind==='click'&&event.id==='suggested-black'),false);assert.equal(state.saves,0);assert.equal(state.publishes,0);assert.equal(state.uploads,0);return {canonicalColorClicked:true,suggestedColorClicked:false,trustedFait:true,menuClosed:true,priceAfterClose:state.price};
+    });
+    await check('Vinted mobile color leaves other checked colors and duplicate or unknown target controls untouched',async()=>{
+      for(const change of [
+        `menu.querySelector('input[data-label="Blanc"]').checked=true`,
+        `document.querySelector('#color-black').parentElement.after(document.querySelector('#color-black').parentElement.cloneNode(true))`,
+        `document.querySelector('#suggested-black').parentElement.after(document.querySelector('#suggested-black').parentElement.cloneNode(true))`,
+        `menu.append(document.querySelector('#color-black').parentElement.cloneNode(true))`
+      ]){
+        await c.loadURL(FORM);await c.executeJavaScript(`fixture.mobilePickers=true;fixture.colorSuggestions=true;color.addEventListener('click',()=>{${change}})`);
+        const result=await adapter.prepareFields(profile.id,{color:'Noir',priceCents:500});assert.deepEqual(result.filled,[]);assert.equal(result.unresolved.find(field=>field.field==='color').halted,true);
+        const state=await c.executeJavaScript(`({color:color.value,price:document.querySelector('#price').value,...fixture})`);assert.equal(state.color,'');assert.equal(state.price,'');assert.deepEqual(state.confirmedMenus,[]);assert.equal(state.events.some(event=>event.kind==='click'&&['color-black','suggested-black','color-done'].includes(event.id)),false);assert.equal(state.saves,0);assert.equal(state.publishes,0);
+      }
+      return {blockedScenarios:4,leafOrFaitClicks:0,laterFieldInput:false};
+    });
+    await check('Vinted mobile Fait cannot continue into price while its chooser still shows other controls',async()=>{
+      for(const replaced of [false,true]){
+        await c.loadURL(FORM);await c.executeJavaScript(`fixture.mobilePickers=true;fixture.partialMobileDone=true;fixture.replaceMobileChooser=${replaced}`);
+        const result=await adapter.prepareFields(profile.id,{color:'Noir',priceCents:500});assert.deepEqual(result.filled,[]);assert.match(result.unresolved.find(field=>field.field==='color').reason,/仍未关闭/);
+        const state=await c.executeJavaScript(`({color:color.value,price:document.querySelector('#price').value,remainingColors:[...menu.querySelectorAll('input')].map(input=>input.dataset.label),...fixture})`);assert.equal(state.color,'Noir');assert.equal(state.price,'');assert.deepEqual(state.remainingColors,['Blanc']);assert.deepEqual(state.confirmedMenus,['color']);assert.equal(state.events.some(event=>event.id==='price'),false);assert.equal(state.saves,0);assert.equal(state.publishes,0);
+      }
+      return {chosenOptionGone:true,otherOptionVisible:true,alsoRejectsReplacementPicker:true,priceUntouched:true};
     });
     await check('Vinted local runtime selects the explicit brand and closes a color overlay with trusted Escape',async()=>{
       await c.loadURL(FORM);const result=await adapter.prepareFields(profile.id,{...input,brand:'Sans marque',color:'Noir',condition:'Neuf sans étiquette'});assert.deepEqual(result.filled.map(f=>f.field),['title','description','categoryPath','brand','condition','color','priceCents']);

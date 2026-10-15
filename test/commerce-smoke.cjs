@@ -157,16 +157,16 @@ module.exports = async function commerceSmoke(api, check) {
       return {wrongAccountRejected:true,sourceChangeRejected:true,sameAccountRotationPreservedPlan:true};
     });
 
-    await check('sales runtime keeps a closed account queued with zero supplier or marketplace writes',async()=>{
+    await check('sales runtime keeps an unverified account queued before opening its profile with zero writes',async()=>{
       await invoke('setPlanEnabled',plan.id,true);
       const before=requests.length;
       await view.webContents.executeJavaScript(`document.querySelector('#run-once').click()`);
-      await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='queued'&&job.blockedReason==='PROFILE_NOT_OPEN'),'closed environment waiting state');await frames();
-      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'queued');assert.equal(job.blockedReason,'PROFILE_NOT_OPEN');assert.match(job.error,/打开.*环境/);assert.equal(job.mutationPending,false);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
+      await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='queued'&&job.blockedReason==='ACCOUNT_RECHECK_REQUIRED'),'unverified account waiting state');await frames();
+      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'queued');assert.equal(job.blockedReason,'ACCOUNT_RECHECK_REQUIRED');assert.match(job.error,/账号中心.*核对/);assert.equal(api.windows.has(profile.id),false);assert.equal(job.mutationPending,false);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
       assert.equal(requests.length,before);assert.equal(requests.filter(request=>request.method!=='GET').length,0);
       await view.webContents.executeJavaScript(`document.querySelector('[data-page="jobs"]').click();document.querySelector('#jobs button').click()`);await frames();
       const receipt=await view.webContents.executeJavaScript(`({text:document.querySelector('#job-detail').innerText,reconcileHidden:document.querySelector('#reconcile-form').hidden})`);
-      assert.match(receipt.text,/待执行|等待|排队/);assert.match(receipt.text,/打开.*环境/);assert.equal(receipt.reconcileHidden,true);
+      assert.match(receipt.text,/待执行|等待|排队/);assert.match(receipt.text,/账号中心.*核对/);assert.equal(receipt.reconcileHidden,true);
       await view.webContents.executeJavaScript(`document.querySelector('#job-dialog').close()`);
       await invoke('runOnce');assert.equal(engine.db.jobs.length,1);assert.equal(requests.length,before);
       return {jobState:job.state,writeRequests:0,duplicateJobs:0};

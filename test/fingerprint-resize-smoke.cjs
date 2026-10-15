@@ -225,7 +225,7 @@ module.exports = async function fingerprintResize(api, check) {
         const element=await find(first,'near');await reset(first);
         c.debugger.sendCommand=async function(method,args,...rest){if(method.startsWith('Input.'))commands.push({method,args});if(method==='Emulation.setDeviceMetricsOverride'&&!entered){entered=true;await gate;}return originalSend.call(this,method,args,...rest);};
         try{
-          window.setSize(940,720,false);await waitFor(()=>entered&&!getDisplayState(c).ready,'Blocked display update');
+          window.setSize(940,720,false);await waitFor(()=>entered&&!getDisplayState(c).ready,'Blocked display update').catch(error=>{error.message+=' '+JSON.stringify({presetId,entered,windowSize:window.getSize(),active:window.activeTab===first.id,display:getDisplayState(c)});throw error;});
           await assert.rejects(performAction(first,{action:'click',elementId:element.id},options()),error=>error.code==='INPUT_SURFACE_UNAVAILABLE');
           assert.deepEqual(commands,[]);release();await settle();assert.equal((await c.executeJavaScript('fixtureClicks')).length,0);
           let changed=false;await assert.rejects(aiClick(first,'far',{onProgress:async event=>{if(event.stage==='acting'&&!changed){changed=true;window.setSize(1020,800,false);await settle();}}}),error=>error.code==='INPUT_SURFACE_UNAVAILABLE');

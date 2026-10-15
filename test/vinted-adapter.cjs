@@ -10,6 +10,7 @@ const listing={title:'Test garment',description:'Test listing description.',cate
 function fixture(options={}){
   const values={title:'',description:'',categoryPath:'',priceCents:'',condition:'',brand:'',color:'',brandSearch:'',parcel:'Moyen',categorySearch:options.stickySearch||'',...(options.values||{})},calls=[];
   let url=options.url||FORM,version=0,documentKey=1,menu=options.openCategory?'categoryPath':null,level=0,currentIds=new Map(),pendingChoice=null;
+  const isolatedState={},choosers=new Map();
   const definitions=[
     {key:'title',tag:'input',type:'text',label:'Titre'},
     {key:'description',tag:'textarea',type:'textarea',label:'Description'},
@@ -38,8 +39,9 @@ function fixture(options={}){
     if(menu==='brand'){rows.push({key:'brandSearch',tag:'input',type:'text',label:'Rechercher une marque'});if(values.brandSearch==='Sans marque')rows.push({tag:'input',type:'radio',role:'radio',label:'Sans marque',option:true,selectedValue:'Sans marque'});rows.push({tag:'input',type:'radio',role:'radio',label:'The Unbranded Brand',option:true,selectedValue:'The Unbranded Brand'});}
     if(menu==='color'){if(options.colorSuggestions)rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Noir',option:true,selectedValue:'Noir',colorGroup:'suggestions',checked:values.color==='Noir'});rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Noir',option:true,selectedValue:'Noir',colorGroup:options.colorSuggestions?'all':undefined,checked:values.color==='Noir'});rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Blanc',option:true,selectedValue:'Blanc',colorGroup:options.colorSuggestions?'all':undefined,checked:options.otherColorChecked===true});}
     if(menu==='condition')rows.push({tag:'input',type:'radio',role:'radio',label:'Neuf avec étiquette Article neuf et jamais porté',option:true,selectedValue:'Neuf avec étiquette'});
+    if(options.partialMobileDone&&api.confirmedMenus.includes(menu))rows=rows.filter(row=>!row.option||row.selectedValue!==values[menu]);
     if(menu==='categoryPath'&&options.mobileCategory||menu==='brand'&&options.mobileBrand||menu==='condition'&&options.mobileCondition||menu==='color'&&options.mobileColor){
-      rows=rows.map(row=>row.option||['categorySearch','brandSearch'].includes(row.key)?{...row,chooser:true,checked:row.selectedValue===pendingChoice&&!options.uncheckedMobileChoice}:row);
+      rows=rows.map(row=>row.option||['categorySearch','brandSearch'].includes(row.key)?{...row,chooser:true,checked:(row.selectedValue===pendingChoice||row.checked===true)&&!options.uncheckedMobileChoice}:row);
       const done={tag:'button',type:options.mobileDoneType||'button',label:'Fait',confirm:true,chooser:!options.outsideMobileDone};
       rows.push(done);if(options.duplicateMobileDone)rows.push({...done});
     }
@@ -48,11 +50,13 @@ function fixture(options={}){
     const elements=[],colorGroups=new Map(),chooserNodes=[],chooserLabel=({categoryPath:'Catégorie',brand:'Marque',condition:'État',color:'Couleur'})[menu];
     const titleLeaf={tagName:'SPAN',_text:chooserLabel,querySelectorAll:()=>[],contains:other=>other===titleLeaf},heading={tagName:'H2',_text:chooserLabel,querySelectorAll:()=>[],contains:other=>other===heading||other===titleLeaf};
     const titleNodes=options.duplicateChooserTitle?[heading,titleLeaf,{...titleLeaf,contains:()=>false}]:[heading,titleLeaf];
-    const chooser={tagName:'DIV',label:options.nestedChooserTitle?'':chooserLabel,getAttribute:name=>name==='aria-label'&&!options.nestedChooserTitle?chooserLabel:null,contains:e=>e.chooser===true,querySelectorAll:selector=>selector.startsWith('h1,')?options.nestedChooserTitle?titleNodes:[]:chooserNodes.filter(e=>['radio','checkbox'].includes(e.role)||['radio','checkbox'].includes(e.type))};
+    let chooser=choosers.get(menu);
+    if(!chooser){const chooserMenu=menu;chooser={tagName:'DIV',get isConnected(){return menu===chooserMenu&&choosers.get(chooserMenu)===chooser;},contains:e=>chooser.nodes.includes(e),querySelectorAll:selector=>selector.startsWith('h1,')?options.nestedChooserTitle?chooser.titleNodes:[]:selector.includes('textarea,select,button')?chooser.nodes:chooser.nodes.filter(e=>['radio','checkbox'].includes(e.role)||['radio','checkbox'].includes(e.type))};choosers.set(menu,chooser);}
+    Object.assign(chooser,{label:options.nestedChooserTitle?'':chooserLabel,getAttribute:name=>name==='aria-label'&&!options.nestedChooserTitle?chooserLabel:null,nodes:chooserNodes,titleNodes});
     for(const row of rows){
       const id='e'+version+'-'+elements.length,node={...row,tagName:row.tag.toUpperCase(),isConnected:true,get value(){return String(values[row.key]||'');},autocomplete:'',nav:row.nav,form:row.nav?null:form,getAttribute:name=>row[name]||null,contains(other){return this===other;},querySelectorAll:()=>[]};
       if(row.chooser){node._chooser=chooser;chooserNodes.push(node);}
-      if(row.colorGroup){if(!colorGroups.has(row.colorGroup)){const title=row.colorGroup==='suggestions'?'Suggestions':'Toutes les couleurs',heading={tagName:'DIV',_text:title,querySelectorAll:()=>[]};colorGroups.set(row.colorGroup,{tagName:'DIV',label:options.plainColorHeading?'':title,children:options.plainColorHeading?[heading]:[],contains:other=>other.colorGroup===row.colorGroup});}node._colorGroup=colorGroups.get(row.colorGroup);}
+      if(row.colorGroup){if(!colorGroups.has(row.colorGroup)){const title=row.colorGroup==='suggestions'?'Suggestions':'Toutes les couleurs',heading={tagName:'DIV',_text:title,querySelectorAll:()=>[]};colorGroups.set(row.colorGroup,{tagName:'DIV',label:options.plainColorHeading?'':title,children:options.plainColorHeading?[heading]:[],contains:other=>other.colorGroup===row.colorGroup,querySelectorAll:selector=>selector.startsWith('h1,')?[heading]:[]});}node._colorGroup=colorGroups.get(row.colorGroup);}
       if(row.parcelOption){
         const wrapper={tag:'button',role:'button',tagName:'BUTTON',type:'button',isConnected:true,parcelOption:true,selectedValue:row.selectedValue,_text:parcelDescriptions[row.selectedValue],contains:e=>e===wrapper||e===node,querySelectorAll:selector=>selector==='input[type=radio]'?[node]:[],getAttribute:()=>null};
         node._wrapper=wrapper;parcelNodes.push(node);
@@ -67,7 +71,8 @@ function fixture(options={}){
     checkedSnapshot:async(_tab,{signal})=>{assert.equal(_tab,tab);if(signal?.aborted)throw Error('stopped');if(options.beforeSnapshot)await options.beforeSnapshot(api);return snapshot();},
     isolated:async(_tab,expression)=>{
       assert.equal(_tab,tab);
-      return vm.runInNewContext(expression,{globalThis:{__isolaElements:currentIds,__isolaDOM:{closest:node=>node.nav?{}:null,parents:node=>node.parcelOption?[node,...(node._wrapper?[node._wrapper]:[]),parcelGroup,form]:[node,...(node._colorGroup?[node._colorGroup]:[]),...(node._chooser?[node._chooser]:[]),form],label:node=>node.label||node._text||'',safeText:node=>node.tagName==='INPUT'?'':node._text||node.label||'',visible:node=>!node.hidden,disabled:node=>!!node.disabled}},performance:{timeOrigin:documentKey}});
+      Object.assign(isolatedState,{__isolaElements:currentIds,__isolaDOM:{closest:node=>node.nav?{}:null,parents:node=>node.parcelOption?[node,...(node._wrapper?[node._wrapper]:[]),parcelGroup,form]:[node,...(node._colorGroup?[node._colorGroup]:[]),...(node._chooser?[node._chooser]:[]),form],label:node=>node.label||node._text||'',safeText:node=>node.tagName==='INPUT'?'':node._text||node.label||'',visible:node=>!node.hidden,disabled:node=>!!node.disabled}});
+      return vm.runInNewContext(expression,{globalThis:isolatedState,performance:{timeOrigin:documentKey},document:{querySelectorAll:()=>[...currentIds.values()]}});
     },
     performAction:async(_tab,args,opts)=>{
       assert.equal(_tab,tab);calls.push(args);
@@ -80,7 +85,7 @@ function fixture(options={}){
       const node=currentIds.get(args.elementId);assert.ok(node,'Every action uses a fresh snapshot ID');
       if(args.action==='type')values[node.key]=options.coerceValue?options.coerceValue(node.key,args.text):args.text;
       else if(['categoryPath','condition','brand','color'].includes(node.key)){menu=node.key;level=0;}
-      else if(node.confirm){api.confirmedMenus.push(menu);if(!options.stuckMobileDone){values[menu]=options.selectedValue||pendingChoice;menu=null;pendingChoice=null;}}
+      else if(node.confirm){api.confirmedMenus.push(menu);if(!options.stuckMobileDone){values[menu]=options.selectedValue||pendingChoice;if(!options.partialMobileDone)menu=null;else if(options.replaceMobileChooser)choosers.delete(menu);pendingChoice=null;}}
       else if(node.parcelOption)values.parcel=node.selectedValue;
       else if(node.option){if(node.advance)level=node.advance;else if(menu==='categoryPath'&&options.mobileCategory||menu==='brand'&&options.mobileBrand||menu==='condition'&&options.mobileCondition||menu==='color'&&options.mobileColor)pendingChoice=node.selectedValue;else{values[menu]=options.selectedValue||node.selectedValue;if(menu!=='color')menu=null;}}
       else throw Error('Unexpected click target '+node.label);
@@ -182,6 +187,34 @@ test('condition and color Fait accept one nested independent title while duplica
     const duplicate=fixture({...options,nestedChooserTitle:true,duplicateChooserTitle:true});
     const stopped=await duplicate.adapter.prepareFields('profile-1',{[key]:key==='color'?'Noir':listing.condition,priceCents:500});
     assert.equal(stopped.filled.length,0);assert.deepEqual(duplicate.confirmedMenus,[]);assert.equal(duplicate.values.priceCents,'');
+  }
+});
+
+test('mobile color Fait confirms only the all-colors target while accepting its one known Suggestions mirror',async()=>{
+  const f=fixture({includeBrandColor:true,mobileColor:true,colorSuggestions:true,nestedChooserTitle:true,plainColorHeading:true});
+  const result=await f.adapter.prepareFields('profile-1',{color:'Noir',priceCents:500});
+  assert.deepEqual(result.filled.map(field=>field.field),['color','priceCents']);assert.deepEqual(f.confirmedMenus,['color']);assert.equal(f.values.color,'Noir');assert.equal(f.values.priceCents,'5,00');
+});
+
+test('mobile color Fait rejects another selected color and duplicate or unknown same-label controls',async()=>{
+  const scenarios=[
+    {otherColorChecked:true},
+    {rows:rows=>{const all=rows.find(row=>row.colorGroup==='all'&&row.label==='Noir');return all?[...rows,{...all}]:rows;}},
+    {rows:rows=>{const suggested=rows.find(row=>row.colorGroup==='suggestions');return suggested?[...rows,{...suggested}]:rows;}},
+    {rows:rows=>{const all=rows.find(row=>row.colorGroup==='all'&&row.label==='Noir');return all?[...rows,{...all,colorGroup:undefined}]:rows;}}
+  ];
+  for(const scenario of scenarios){
+    const f=fixture({includeBrandColor:true,mobileColor:true,colorSuggestions:true,...scenario});
+    const result=await f.adapter.prepareFields('profile-1',{color:'Noir',priceCents:500});
+    assert.deepEqual(result.filled,[]);assert.equal(result.unresolved.find(field=>field.field==='color').halted,true);assert.deepEqual(f.confirmedMenus,[]);assert.equal(f.values.color,'');assert.equal(f.values.priceCents,'');
+  }
+});
+
+test('Fait must close the observed chooser even if its selected option disappears before the remaining controls',async()=>{
+  for(const replaceMobileChooser of [false,true]){
+    const f=fixture({includeBrandColor:true,mobileColor:true,partialMobileDone:true,replaceMobileChooser,menuWaitMs:0});
+    const result=await f.adapter.prepareFields('profile-1',{color:'Noir',priceCents:500});
+    assert.deepEqual(result.filled,[]);assert.match(result.unresolved.find(field=>field.field==='color').reason,/仍未关闭/);assert.deepEqual(f.confirmedMenus,['color']);assert.equal(f.values.color,'Noir');assert.equal(f.values.priceCents,'');
   }
 });
 

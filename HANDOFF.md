@@ -1,6 +1,6 @@
 # 办公室开发接续
 
-当前接续分支是 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053)；本机 `codex/mac-build-v053dev6` 只是对应源码的本地分支名。**请按本节接续，不要使用下方历史记录中的 main 指引。**
+当前接续分支是 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053)；家里 Mac 的 `codex/mac-build-v053dev6` 只是对应源码的本地分支名。**请按本节接续，不要使用下方历史记录中的 main 指引。**
 
 办公室首次获取源码需 Node.js 24：
 
@@ -15,6 +15,23 @@ npm start
 已有克隆先用 `git status --short` 检查并保存未提交更改，再执行 `git fetch origin`、`git switch codex/windows-association-v053`、`git pull --ff-only origin codex/windows-association-v053`，随后运行 `npm ci`、`npm test`、`npm start`。
 
 公开仓库仅保存源码和进度。运行会话、密钥及真实账号/任务数据库未上传；新电脑需要重新配置和登录，不能凭空重建原 TEST 任务再次发布。继续真实任务需保留并核对原电脑的原记录。旧应用等待系统钥匙串是 2026-10-15 的最后现场观察，下次先重新检查现场状态。
+
+## Windows 接续与手机选择器修复 — 0.5.3-dev.11，2026-10-15
+
+本轮在办公室 Windows 从 GitHub `ab8b6d5`（dev.10）接续。用户确认昨晚的登录环境、原照片和 revision 1 原任务仅在家里 Mac；办公室没有恢复或重建该任务。本轮仅使用独立临时目录与本地页面，不进行真实登录、发布、消息、报价或采购。
+
+本地已复现：手机颜色选择器同时展示 Suggestions 与 Toutes les couleurs 的同名颜色时，Fait 收尾丢失已核对的分组，误判重复选项。现已沿用核对过的全色组与原叶子归属，只接受同一选择器中唯一的同色建议镜像。Fait 收尾绑定原面板节点与本次 token，并阻止残留或重建面板的新 Fait；原字段回读通过后才继续填价。未知同名重复、其他颜色仍已选及未关闭选择器继续停止。该场景与昨晚 Mac 的账号菜单关闭故障分别验证，不能互相替代。
+
+账号菜单关闭后的真实失败仍待取得 dev.10 之后的本机脱敏“关闭诊断”；本轮不放宽账号、原节点或短期回执校验。家里 Mac 下一步：
+
+1. 先重新检查旧应用是否仍等待钥匙串提示；如仍存在，由用户在系统提示中恢复，随后暂停调度、关闭旧应用并备份原数据目录。不要同时运行两版。
+2. 在原仓库保存未提交修改后，从 `codex/windows-association-v053` 拉取新源码；运行 `npm ci` 与 `npm test`，再以 `npm run package -- --platform=darwin --arch=arm64` 构建新包。办公室仅验证 Windows 包，不替代 Mac 实测。
+3. 在同一原环境、同一账号先核对菜单。若仍报“账号菜单关闭后状态无法核对”，从任务记录或运营警告复制“关闭诊断：”开始的结构信息；无需复制账号名、商品地址、Cookie 或密钥。
+4. 保留原 revision 1 的 needs_review / check_catalog、5 欧元、零销量和原照片；修复实测问题后再核对原任务，勿新建重复 TEST 或清历史。真实调度及可能对外发布的启动仍由用户亲点。
+
+本轮最终 Windows 验证：Node 731 通过、0 失败、1 项不适用的 POSIX 权限检查跳过；完整 Electron 回归 374/374，通过时使用默认 Chromium 沙箱。手机表单与运营专项 33/33、窗口缩放专项 25/25 另行通过，与全量存在重叠。打包 dev.11 EXE 在独立临时目录实际启动，环境分类、全页编辑器、同窗运营、Pixel 7 页面参数、账号加密存储及保存未核验状态通过；窄版编辑器采用 CDP 视口模拟，真实窗口缩放由上述专项覆盖。npm audit 为 0；本机未验证新版 Mac 包或原真实任务。
+
+测试校准：未绑定账号的任务先等待账号复核，再决定是否自动开窗；专项据此更新旧版“窗口未打开”预期，同时断言窗口未开及零外部写入。导航时序检查用微任务确认 loadURL 已完成，避免 Windows 定时器合批造成误报。完整回归中曾有一次显示更新等待超时，保留额外诊断后专项与最终全量通过，未据此改变产品等待规则，也未认定已定位该偶发原因。
 
 ## 已删除商品恢复与移动页面联调 — 0.5.3-dev.10，2026-10-14–15
 

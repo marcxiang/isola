@@ -29,7 +29,9 @@ test('ERR_ABORTED followed by the exact session refresh converges to the origina
  assert.deepEqual(await result,{url:target,sessionRefreshed:true});assert.deepEqual(f.loads,[target]);
 });
 test('a refresh beginning after loadURL resolved resets completion until the return page loads',async()=>{
- const f=fixture();let completed=false;const result=f.start().then(value=>{completed=true;return value;});f.commit(target);f.finish();f.resolve();await wait(3);f.begin(refresh);f.commit(refresh);f.finish();await wait(15);assert.equal(completed,false);f.begin(target);f.commit(target);f.finish();assert.equal((await result).sessionRefreshed,true);
+ // Flush loadURL's resolution before starting the refresh. A short wall-clock
+ // delay can overshoot the entire settle window under Windows timer batching.
+ const f=fixture();let completed=false;const result=f.start().then(value=>{completed=true;return value;});f.commit(target);f.finish();f.resolve();await Promise.resolve();f.begin(refresh);f.commit(refresh);f.finish();await wait(15);assert.equal(completed,false);f.begin(target);f.commit(target);f.finish();assert.equal((await result).sessionRefreshed,true);
 });
 test('a bare ERR_ABORTED cannot authorize the original or an old completed page',async()=>{
  const f=fixture(),result=f.start();f.commit(target);f.finish();f.abort();await assert.rejects(result,{code:'PAGE_CHANGED'});assert.equal(f.contents.eventNames().length,0);

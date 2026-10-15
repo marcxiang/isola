@@ -105,7 +105,7 @@
     return Object.fromEntries(Object.entries(value).filter(([key])=>allowed.has(key)).map(([key,item])=>[key,photoDiagnostic(item,depth+1)]));
   }
   function isConnected() { return ['connected','ok','ready','authenticated','success'].includes(state.connection.status); }
-  function productEditorBusy() { return pending.has('product-listing')||pending.has('manual-photos'); }
+  function productEditorBusy() { return pending.has('product-listing')||pending.has('manual-photos')||pending.has('supplier-photo-reuse'); }
   function supplierRequired() { return state.plans.some(plan=>plan.enabled&&plan.source!=='local'&&find(state.products,plan.productId)?.source!=='local')||!state.products.length&&!!state.settings.hasToken; }
   function listingMissing(value) { return value?.missingFields || ['title','description','condition','brand','color','parcel','categoryPath'].filter(key=>key==='categoryPath'?!Array.isArray(value?.listing?.[key])||!value.listing[key].length:!value?.listing?.[key]?.trim()); }
   function productListing(product) { return product&&state.productListings.find(row=>same(row.productId,product.id)&&row.sku===product.sku); }
@@ -147,7 +147,18 @@
     if(productEditorBusy()||typeof api.saveManualProduct!=='function')return;
     productListingForm.reset();productListingForm.dataset.mode='local';productListingForm.dataset.sku=product?.sku||'';setManualProductMode(true);manualPhotoToken='';manualPhotoCount=product?.localPhotoCount||0;
     const fields=productListingForm.elements,saved=productListing(product);fields.productId.value=product?.id||'';fields.manualName.value=product?.name||'';fields.manualStock.value=product?.stock??1;fillListing(productListingForm,saved?.listing);fields.listingPrice.value=moneyInput(saved?.listingPriceCents);fields.minOffer.value=moneyInput(saved?.minOfferCents);
-    $('#product-listing-title').textContent=product?'编辑手动商品':'自己添加商品';$('#product-listing-source').textContent=product?`手动商品 · ${product.sku}`:'手动商品无需货盘；编号由系统生成。';$('#manual-photo-count').textContent=manualPhotoCount?`已保存 ${manualPhotoCount} 张本地照片`:'尚未选择照片，可先保存草稿';$('#product-listing-error').hidden=true;renderListingHint(productListingForm,$('#product-listing-readiness'));renderControls();productListingDialog.showModal();
+    $('#product-listing-title').textContent=product?'编辑手动商品':'自己添加商品';$('#product-listing-source').textContent=product?`手动商品 · ${product.sku}${product.origin?.kind==='supplier-reuse'?` · 复用货盘套组 ${product.origin.setId}`:''}`:'手动商品无需货盘；编号由系统生成。';$('#manual-photo-count').textContent=manualPhotoCount?`已保存 ${manualPhotoCount} 张本地照片`:'尚未选择照片，可先保存草稿';$('#product-listing-error').hidden=true;renderListingHint(productListingForm,$('#product-listing-readiness'));renderControls();productListingDialog.showModal();
+  }
+  async function reuseSupplierPhotos(set){
+    if(productEditorBusy()||productListingDialog.open||typeof api.importSupplierPhotos!=='function')return;
+    try{
+      const result=await request('supplier-photo-reuse',()=>api.importSupplierPhotos({productId:String(set.productId),setId:String(set.id)}));
+      if(!result||typeof result.photoToken!=='string'||!result.photoToken||!Number.isInteger(result.count)||result.count<1||result.count>20||!result.product||!same(result.source?.setId,set.id)||!same(result.source?.productId,set.productId))throw Error('未收到这套照片的有效原图，请重新选择。');
+      editManualProduct();if(!productListingDialog.open)return;
+      const fields=productListingForm.elements;fields.manualName.value=result.product.name||'';fields.manualStock.value=Number.isSafeInteger(result.product.stock)&&result.product.stock>=0?result.product.stock:'';fillListing(productListingForm,result.product.listing);fields.listingPrice.value=moneyInput(result.product.listingPriceCents);fields.minOffer.value=moneyInput(result.product.minOfferCents);manualPhotoToken=result.photoToken;manualPhotoCount=result.count;
+      $('#product-listing-title').textContent='复用货盘照片创建商品';$('#product-listing-source').textContent=`原商品 SKU ${result.source.sku||result.product.sku||'—'} · 套组 ${result.source.setId} · 保存为独立手动商品，库存和资料由你维护。`;
+      $('#manual-photo-count').textContent=`已读取 ${result.count} 张原图，保存商品后可用于新计划；原套组的使用记录保留。`;renderListingHint(productListingForm,$('#product-listing-readiness'));
+    }catch(error){toast(cleanError(error));}
   }
   function salesOnly() { return state.readiness.salesOnly===true; }
   function automaticListing() { const caps=state.readiness.capabilities||{};return Object.hasOwn(caps,'listingPublish')?caps.listingPublish===true:caps.publish===true; }
@@ -199,6 +210,7 @@
     $('#product-listing-save').disabled=productEditorBusy()||!!state.faulted||!!state.configBusy;
     $('#new-manual-product').disabled=productEditorBusy()||typeof api.saveManualProduct!=='function'||!!state.faulted||!!state.configBusy;
     $('#manual-photo-import').disabled=productEditorBusy()||typeof api.importProductPhotos!=='function'||!!state.faulted||!!state.configBusy;
+    document.querySelectorAll('[data-reuse-photo-set-id]').forEach(button=>{button.disabled=productEditorBusy()||typeof api.importSupplierPhotos!=='function'||typeof api.saveManualProduct!=='function'||!!state.running||!!state.faulted||!!state.configBusy;});
     document.querySelectorAll('[data-product-listing-id]').forEach(button=>{const product=find(state.products,button.dataset.productListingId);button.disabled=productEditorBusy()||typeof api[product?.source==='local'?'saveManualProduct':'saveProductListing']!=='function'||!!state.faulted||!!state.configBusy;});
     $('#new-plan').disabled=$('#overview-new-plan').disabled=photoActionPending();
     $('#reconcile-form [type=submit]').disabled = pending.has('resolve');
@@ -289,7 +301,7 @@
   async function inspectPlanAccount(id){
     const plan=find(state.plans,id);if(!plan||pageActionPending()||accountMutationPending())return;
     const saved=state.accounts.find(account=>same(account.profileId,plan.profileId));
-    if(!hasBoundAccount(plan.profileId)&&saved&&typeof api.verifyAccount==='function'){confirmAccount(saved,'verify',id);return;}
+    if(saved&&typeof api.verifyAccount==='function'){confirmAccount(saved,'verify',id);return;}
     setPlanAccountReport(id,'checking','正在读取当前环境的登录账号…');
     try{const result=await request(`plan-preflight-account-${id}`,()=>api.inspectAccount(id));if(!result?.account?.memberId||!result.account.username)throw Error('没有读取到可核验的账号身份，请在账号中心核对登录。');setPlanAccountReport(id,'verified',`已核对账号：${result.account.username} · ID ${result.account.memberId}${result.usernameSource==='saved-binding'?'（用户名沿用已验证绑定）':''}`);}
     catch(error){setPlanAccountReport(id,'failed',cleanError(error));}
@@ -725,8 +737,10 @@
     if (!rows.length) { list.append(empty('手动商品的本地照片在商品资料中管理；货盘套装同步后在这里查看。',true));return; }
     for (const set of rows.slice(0,180)) {
       const card=el('article','photo-set');let label='使用状态未知',tone='neutral';
-      if(set.claimedByMe){label='已被你领取';tone='good';}else if(['available','unclaimed','free'].includes(set.claimStatus)){label='可领取';tone='good';}else if(['claimed','used','claimed_by_other','occupied'].includes(set.claimStatus)){label='已被他人使用';tone='warn';}
-      card.append(el('div','photo-icon','▧'),el('b','',set.name || `图片套装 ${set.id}`),el('p','',`${productName(set.productId)} · ${number(set.imageCount)} 张图片`),badge(label,tone));list.append(card);
+      if(set.claimedByMe){label='已被你领取';tone='good';}else if(['available','unclaimed','free'].includes(set.claimStatus)){label='可领取';tone='good';}else if(['claimed','used','claimed_by_other','occupied'].includes(set.claimStatus)){label='已使用';tone='warn';}
+      card.append(el('div','photo-icon','▧'),el('b','',set.name || `图片套装 ${set.id}`),el('p','',`${productName(set.productId)} · ${number(set.imageCount)} 张图片`),badge(label,tone));
+      if(typeof api.importSupplierPhotos==='function'){const reuse=makeButton(pending.has('supplier-photo-reuse')?'正在读取原图…':'手动复用',()=>reuseSupplierPhotos(set));reuse.dataset.reusePhotoSetId=String(set.id);reuse.disabled=productEditorBusy()||typeof api.saveManualProduct!=='function'||!!state.running||!!state.faulted||!!state.configBusy;card.append(reuse);}
+      list.append(card);
     }
     if(rows.length>180)list.append(empty(`当前展示前 180 套，共 ${rows.length} 套。选择商品可缩小范围。`,true));
   }
@@ -846,7 +860,7 @@
   });
   $('#account-verify-confirm').addEventListener('click',()=>{
     if($('#account-verify-confirm').disabled||!accountVerifyId)return;
-    const id=accountVerifyId,planId=accountVerifyPlanId,feedback=$('#account-verify-feedback');feedback.hidden=false;feedback.textContent='正在核对当前环境；首次绑定可能打开独立的本人主页核验标签。';setPlanAccountReport(planId,'checking',feedback.textContent);
+    const id=accountVerifyId,planId=accountVerifyPlanId,feedback=$('#account-verify-feedback');feedback.hidden=false;feedback.textContent='正在核对当前环境；手机版会打开独立核验标签，点击 Profil 后读取本人身份。';setPlanAccountReport(planId,'checking',feedback.textContent);
     void accountRequest('account-verify-'+id,()=>api.verifyAccount(id,{confirmCurrent:true}),'账号核对已返回。','未能核对当前账号，请打开固定环境确认登录与账号归属后重试。').then(response=>{
       const result=response.result,verified=response.ok&&result?.result?.verified===true,message=verified?'已核对当前 Vinted 登录身份。':result?.message||response.message||'账号核对未完成，请检查固定环境的登录、验证提示与本人主页。';
       setPlanAccountReport(planId,verified?'verified':'failed',message);toast(message);

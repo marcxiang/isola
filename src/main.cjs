@@ -1,5 +1,6 @@
 const { app, BrowserWindow, WebContentsView, ipcMain, session, safeStorage, Menu, net, dialog, nativeImage, powerSaveBlocker, powerMonitor } = require('electron');
 const fs = require('node:fs'); const path = require('node:path'); const { randomUUID } = require('node:crypto');
+const {AsyncLocalStorage}=require('node:async_hooks');
 const { validate, validateProfileIdentities, normalizeURL, publicProfile, exportProfiles, importProfiles } = require('./model.cjs');
 const { createProxyRoute } = require('./proxy.cjs');
 const {ProxyAuthGuard}=require('./proxy-auth.cjs');
@@ -33,6 +34,7 @@ let commerce, commerceAccounts, awakeId=null, commerceLoadError=false, managerSt
 const COMMERCE_PAGES=new Set(['overview','accounts','inventory','plans','jobs','settings']);
 const accountTabs=new Map();
 const accountReviewTabs=new Map();
+const accountReviewClickScope=new AsyncLocalStorage(),accountReviewClickLeases=new Map();
 const salesTabs=new Map();
 const skuGate=new RequestGate({maxConcurrent:3,maxPerMinute:100});
 const windows = new Map(), locks = new Set(), routes = new Map();
@@ -84,7 +86,7 @@ function ensureCommerce(){
   const seal=value=>{if(!safeStorage.isEncryptionAvailable()||process.platform==='linux'&&safeStorage.getSelectedStorageBackend?.()==='basic_text')throw Error('系统加密不可用，无法保存密钥');return safeStorage.encryptString(value).toString('base64');};
   const unseal=value=>safeStorage.decryptString(Buffer.from(value,'base64'));
   const accounts=new AccountsStore({dir,profiles:list,seal,unseal,assertMutable:assertAccountMutable,onChange:()=>commerce?.emit()});
-  commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedSalesRuntime({windows,isBusy:id=>commerce?.active.has(id)||!!windows.get(id)?.closingPromise||!!windows.get(id)?.navigationPending,ensureProfile:ensureSalesProfile,openPage:openSalesPage,validateImage:bytes=>{const image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('照片无法完整解码');return image.getSize();}}),accounts,seal,unseal,onChange:commerceChanged});
+  commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedSalesRuntime({windows,isBusy:id=>{const w=windows.get(id);return commerce?.active.has(id)||!!w?.closingPromise||!!w?.navigationPending&&!ownsAccountReviewClick(id,w);},ensureProfile:ensureSalesProfile,openPage:openSalesPage,validateImage:bytes=>{const image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('照片无法完整解码');return image.getSize();}}),accounts,seal,unseal,onChange:commerceChanged});
   commerceAccounts=new CommerceAccountService({engine:commerce,store:accounts,openPage:openAccountPage,login:new VintedLogin(commerce.adapter)});
   commerceLoadError=false;
  }
@@ -287,6 +289,64 @@ async function openListingPage(engine,planId,{active=false}={}) {
     }finally{w.navigationPending=false;}
   });
 }
+function ownsAccountReviewClick(profileId,w){
+ const lease=accountReviewClickScope.getStore();
+ if(!lease||lease.profileId!==profileId||lease.w!==w||accountReviewClickLeases.get(profileId)!==lease)return false;
+ try{lease.guard();return true;}catch{return false;}
+}
+function validOwnProfileHref(href,canonical){
+ try{const url=new URL(href),member=/^\/member\/([1-9]\d*)(?:-[^/]+)?\/?$/.exec(url.pathname);return typeof href==='string'&&url.href===href&&url.origin==='https://www.vinted.fr'&&!url.username&&!url.password&&!url.search&&!url.hash&&!!member&&canonical==='https://www.vinted.fr/member/'+member[1];}catch{return false;}
+}
+async function clickAccountReviewProfile(w,tab,{signal,guard,profileURL,profileHref,click}){
+ const c=tab.view.webContents,profileId=w.profile.id,navigationId=tab.navigationId,controller=new AbortController();
+ let timer,rejectFailure,started=false,canonicalStarted=false,redirected=false,clicking=false,done=false;
+ const listeners=[],windowListeners=[],failure=()=>accountError('ACCOUNT_UNAVAILABLE');
+ const valid=()=>{guard();if(controller.signal.aborted||signal?.aborted||w.isDestroyed()||windows.get(profileId)!==w||w.closingPromise||w.aiAgent?.state?.running||!w.navigationPending||!w.tabs.includes(tab)||w.activeTab!==tab.id||!w.isVisible()||w.isMinimized()||tab.navigationId!==navigationId||c.isDestroyed()||tab.error||!['https://www.vinted.fr/',profileHref,profileURL].includes(c.getURL()))throw failure();};
+ const lease={profileId,w,tab,guard:valid},failed=new Promise((_,reject)=>{rejectFailure=reject;});
+ const fail=()=>{if(done)return;controller.abort();rejectFailure(failure());};
+ const listen=(name,fn)=>{c.on(name,fn);listeners.push([name,fn]);};
+ const navigation=(event,url,inPlace,isMain)=>{
+  if((event?.isMainFrame??isMain)===false)return;
+  try{
+   valid();const destination=event?.url??url;
+   if(!clicking)throw failure();
+   if(!started){if(destination!==profileHref)throw failure();started=true;}
+   else if(destination===profileURL&&profileHref!==profileURL&&!canonicalStarted){canonicalStarted=true;}
+   else throw failure();
+  }catch{event?.preventDefault?.();fail();}
+ };
+ const redirect=(event,url,_inPlace,isMain)=>{
+  if((event?.isMainFrame??isMain)===false)return;
+  try{valid();if(!clicking||!started||profileHref===profileURL||(event?.url??url)!==profileURL)throw failure();redirected=true;}catch{event?.preventDefault?.();fail();}
+ };
+ const committed=(event,url,isMain=true)=>{
+  if((event?.isMainFrame??isMain)===false)return;
+  try{
+   valid();const destination=event?.url??url;
+   // Routers may emit only the same-document commit for the native link.
+   if(!started){if(!clicking||destination!==profileHref)throw failure();started=true;}
+   if(destination!==profileHref&&!(destination===profileURL&&(redirected||canonicalStarted)))throw failure();
+  }catch{fail();}
+ };
+ try{
+  valid();if(accountReviewClickLeases.has(profileId)||typeof click!=='function'||!validOwnProfileHref(profileHref,profileURL)||c.getURL()!=='https://www.vinted.fr/')throw failure();
+  accountReviewClickLeases.set(profileId,lease);signal?.addEventListener('abort',fail,{once:true});
+  listen('did-start-navigation',navigation);listen('will-redirect',redirect);listen('did-redirect-navigation',redirect);
+  listen('did-navigate',(event,url)=>committed(event,url,true));listen('did-navigate-in-page',committed);
+  listen('destroyed',fail);listen('render-process-gone',fail);listen('did-fail-load',(_event,code,_description,_url,isMain)=>{if(isMain!==false&&code!==-3)fail();});
+  for(const name of ['hide','minimize','closed']){w.on(name,fail);windowListeners.push([name,fail]);}
+  timer=setTimeout(fail,15000);clicking=true;
+  const result=await Promise.race([accountReviewClickScope.run(lease,()=>click({signal:controller.signal})),failed]);valid();
+  const actualURL=c.getURL();
+  if(!started||result?.profileId!==profileId||result.tabId!==tab.id||![profileHref,profileURL].includes(result.url)||![profileHref,profileURL].includes(actualURL))throw failure();
+  await Promise.race([waitOwnedPageReady(w,tab,actualURL,{signal:controller.signal,guard:valid,settleMs:120}),failed]);valid();
+  return {profileId,tabId:tab.id,url:profileURL,actualURL:c.getURL()};
+ }finally{
+  done=true;clearTimeout(timer);controller.abort();signal?.removeEventListener('abort',fail);
+  for(const [name,fn] of listeners)c.removeListener(name,fn);for(const [name,fn] of windowListeners)w.removeListener(name,fn);
+  if(accountReviewClickLeases.get(profileId)===lease)accountReviewClickLeases.delete(profileId);
+ }
+}
 function waitOwnedPageReady(w,tab,url,{signal,guard,timeoutMs=10000,settleMs=0,failure=()=>accountError('ACCOUNT_UNAVAILABLE')}){
  const c=tab.view.webContents,navigationId=tab.navigationId;
  // loadURL can resolve before Chromium clears its main-frame loading flag.
@@ -322,9 +382,9 @@ function waitOwnedPageReady(w,tab,url,{signal,guard,timeoutMs=10000,settleMs=0,f
   }catch(error){finish(error);}
  });
 }
-async function openAccountPage(profileId,{signal,guard,freshLogin=false,freshAccountReview=false,ownProfileURL}){
+async function openAccountPage(profileId,{signal,guard,freshLogin=false,freshAccountReview=false,ownProfileURL,ownProfileHref,clickOwnProfile}){
  const ownReview=ownProfileURL!==undefined,reviewHome='https://www.vinted.fr/';
- if(freshAccountReview&&freshLogin||ownReview&&(freshLogin||freshAccountReview)||ownReview&&(typeof ownProfileURL!=='string'||!/^https:\/\/www\.vinted\.fr\/member\/[1-9]\d*$/.test(ownProfileURL)))throw accountError('ACCOUNT_UNAVAILABLE');
+ if(freshAccountReview&&freshLogin||ownReview&&(freshLogin||freshAccountReview)||!ownReview&&(ownProfileHref!==undefined||clickOwnProfile!==undefined)||ownReview&&(typeof ownProfileURL!=='string'||!/^https:\/\/www\.vinted\.fr\/member\/[1-9]\d*$/.test(ownProfileURL)||!validOwnProfileHref(ownProfileHref,ownProfileURL)||typeof clickOwnProfile!=='function'))throw accountError('ACCOUNT_UNAVAILABLE');
  const valid=()=>{guard();if(signal.aborted)throw accountError('ACCOUNT_UNAVAILABLE');};
  valid();
  if(ownReview&&!windows.has(profileId))throw accountError('ACCOUNT_UNAVAILABLE');
@@ -348,8 +408,8 @@ async function openAccountPage(profileId,{signal,guard,freshLogin=false,freshAcc
     const review=accountReviewTabs.get(profileId);tab=w.tabs.find(row=>row.id===review?.tabId);
     if(!review||review.invalid||!tab||w.activeTab!==tab.id||tab.navigationId!==review.navigationId||tab.view.webContents.isDestroyed()||tab.view.webContents.getURL()!==reviewHome)throw accountError('ACCOUNT_UNAVAILABLE');
     valid();review.dispose();accountReviewTabs.delete(profileId);
-    await navigateTab(w,tab,ownProfileURL);valid();await waitOwnedPageReady(w,tab,ownProfileURL,{signal,guard:valid});
-    if(tab.view.webContents.isDestroyed()||tab.error||tab.view.webContents.getURL()!==ownProfileURL)throw accountError('ACCOUNT_UNAVAILABLE');
+    const clicked=await clickAccountReviewProfile(w,tab,{signal,guard:valid,profileURL:ownProfileURL,profileHref:ownProfileHref,click:clickOwnProfile});valid();
+    accountTabs.set(profileId,tab.id);return clicked;
    }
    valid();if(w.isDestroyed()||w.activeTab!==tab.id)throw accountError('ACCOUNT_UNAVAILABLE');
    accountTabs.set(profileId,tab.id);if(w.isMinimized())w.restore();w.show();w.focus();tab.view.webContents.focus();
@@ -502,6 +562,7 @@ function register() {
   desk('commerce-home',()=>showEnvironmentManager());
   desk('commerce-product-listing-save',(c,input)=>c.saveProductListing(input));
   desk('commerce-local-photos-import',(c,input)=>localProductService.importPhotos(c,input));
+  desk('commerce-supplier-photos-import',(c,input)=>localProductService.importSupplierPhotos(c,input));
   desk('commerce-local-product-save',(c,input)=>localProductService.saveManualProduct(c,input));
   desk('commerce-plan-start',(c,id)=>c.startPlan(id));
   desk('commerce-plan-save-start',(c,input)=>c.saveAndStartPlan(input));

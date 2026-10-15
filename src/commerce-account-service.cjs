@@ -16,7 +16,7 @@ const MESSAGES={
 function fail(code){const error=Error(MESSAGES[code]||MESSAGES.ACCOUNT_UNAVAILABLE);error.code=Object.hasOwn(MESSAGES,code)?code:'ACCOUNT_UNAVAILABLE';return error;}
 const pendingReview=new Set(['LOGIN_STARTED','LOGIN_OUTCOME_UNKNOWN','CHALLENGE_REQUIRED','ACCOUNT_CONFIRMATION_REQUIRED','PAGE_CHANGED','IDENTITY_UNVERIFIED']);
 const safeCodes=new Set(['LOGIN_REQUIRED','LOGIN_VERIFIED','LOGIN_FAILED','CHALLENGE_REQUIRED','INVALID_CREDENTIALS','STOPPED','UNAVAILABLE','LOGIN_OUTCOME_UNKNOWN','ACCOUNT_CONFIRMATION_REQUIRED','ACCOUNT_CHANGED','ACCOUNT_CONFLICT','IDENTITY_UNVERIFIED','PAGE_UNSUPPORTED','PAGE_CHANGED','FORM_NOT_FOUND']);
-const resultCodes={LOGGED_IN:'LOGIN_VERIFIED',ACCOUNT_MISMATCH:'ACCOUNT_CHANGED',LOGIN_FORM_REQUIRED:'FORM_NOT_FOUND',LOGIN_FIELDS_NOT_EMPTY:'PAGE_UNSUPPORTED',LOGIN_CHALLENGE:'CHALLENGE_REQUIRED',LOGIN_RESULT_UNKNOWN:'LOGIN_OUTCOME_UNKNOWN',LOGIN_FORM_CHANGED:'PAGE_CHANGED',ACCOUNT_UNVERIFIED:'IDENTITY_UNVERIFIED',INPUT_SURFACE_UNAVAILABLE:'UNAVAILABLE',WRONG_SITE:'PAGE_UNSUPPORTED',PAGE_BUSY:'UNAVAILABLE',WINDOW_CLOSED:'UNAVAILABLE',TAB_CHANGED:'PAGE_CHANGED',LOGIN_UNAVAILABLE:'UNAVAILABLE'};
+const resultCodes={LOGGED_IN:'LOGIN_VERIFIED',ACCOUNT_MISMATCH:'ACCOUNT_CHANGED',LOGIN_FORM_REQUIRED:'FORM_NOT_FOUND',LOGIN_FIELDS_NOT_EMPTY:'PAGE_UNSUPPORTED',LOGIN_CHALLENGE:'CHALLENGE_REQUIRED',LOGIN_RESULT_UNKNOWN:'LOGIN_OUTCOME_UNKNOWN',LOGIN_FORM_CHANGED:'PAGE_CHANGED',ACCOUNT_UNVERIFIED:'IDENTITY_UNVERIFIED',PROFILE_REVIEW_REQUIRED:'IDENTITY_UNVERIFIED',INPUT_SURFACE_UNAVAILABLE:'UNAVAILABLE',WRONG_SITE:'PAGE_UNSUPPORTED',PAGE_BUSY:'UNAVAILABLE',WINDOW_CLOSED:'UNAVAILABLE',TAB_CHANGED:'PAGE_CHANGED',LOGIN_UNAVAILABLE:'UNAVAILABLE'};
 const hasVerifiedResult=result=>result?.verified===true&&result.status==='logged_in'&&result.account?.verified===true;
 
 class CommerceAccountService{
@@ -61,18 +61,18 @@ class CommerceAccountService{
   let result;
   try{
    const expected=this.expectations(account),confirmed=options?.confirmCurrent===true;
-   result=await this.loginService.verify(account.profileId,{...expected,signal,confirmCurrent:confirmed,closeAccountMenu:true});guard();
-   if(!expected.expectedMemberId&&!hasVerifiedResult(result)&&result?.code==='ACCOUNT_UNVERIFIED'&&confirmed&&typeof this.loginService.inspectOwnProfileLink==='function'&&typeof this.loginService.validateOwnProfileLink==='function'){
+   result=await this.loginService.verify(account.profileId,{...expected,signal,confirmCurrent:confirmed,closeAccountMenu:true,requireOwnProfileClick:true});guard();
+   if(!hasVerifiedResult(result)&&(result?.code==='PROFILE_REVIEW_REQUIRED'||!expected.expectedMemberId&&result?.code==='ACCOUNT_UNVERIFIED')&&confirmed&&typeof this.loginService.inspectOwnProfileLink==='function'&&typeof this.loginService.clickOwnProfileLink==='function'){
     const review=await this.openPage(account.profileId,{signal,guard,freshAccountReview:true});guard();
     if(review?.profileId!==account.profileId||review.url!=='https://www.vinted.fr/')throw fail('ACCOUNT_UNAVAILABLE');
     const candidate=await this.loginService.inspectOwnProfileLink(account.profileId,{signal});guard();
-    if(candidate?.kind!=='own-profile-candidate'||candidate.verified!==false||candidate.profileId!==account.profileId||candidate.tabId!==review.tabId||candidate.consistentReads!==2||typeof candidate.memberId!=='string'||!/^[1-9]\d{0,29}$/.test(candidate.memberId)||candidate.profileURL!=='https://www.vinted.fr/member/'+candidate.memberId||candidate.expiresAt<=Date.now())throw fail('ACCOUNT_UNAVAILABLE');
-    await this.loginService.validateOwnProfileLink(account.profileId,candidate,{signal});guard();
-    const opened=await this.openPage(account.profileId,{signal,guard,ownProfileURL:candidate.profileURL});guard();
+    if(candidate?.kind!=='own-profile-candidate'||candidate.verified!==false||candidate.profileId!==account.profileId||candidate.tabId!==review.tabId||candidate.consistentReads!==2||typeof candidate.memberId!=='string'||!/^[1-9]\d{0,29}$/.test(candidate.memberId)||candidate.profileURL!=='https://www.vinted.fr/member/'+candidate.memberId||typeof candidate.profileHref!=='string'||candidate.expiresAt<=Date.now())throw fail('ACCOUNT_UNAVAILABLE');
+    if(expected.expectedMemberId&&candidate.memberId!==expected.expectedMemberId)throw fail('ACCOUNT_CHANGED');
+    const opened=await this.openPage(account.profileId,{signal,guard,ownProfileURL:candidate.profileURL,ownProfileHref:candidate.profileHref,clickOwnProfile:({signal:clickSignal}={})=>this.loginService.clickOwnProfileLink(account.profileId,candidate,{signal:clickSignal||signal})});guard();
     if(opened?.profileId!==account.profileId||opened.url!==candidate.profileURL||opened.tabId!==candidate.tabId)throw fail('ACCOUNT_UNAVAILABLE');
     // A candidate is not a prior account mapping. Do not promote its member ID
     // to expectedMemberId or synthesize a username before the normal reader.
-    result=await this.loginService.verify(account.profileId,{...expected,signal,confirmCurrent:confirmed,closeAccountMenu:true});guard();
+    result=await this.loginService.verify(account.profileId,{...expected,signal,confirmCurrent:confirmed,closeAccountMenu:true,requireOwnProfileHeading:true});guard();
     if(hasVerifiedResult(result)&&(candidate.expiresAt<=Date.now()||result.account.memberId!==candidate.memberId||result.account.profileURL!==candidate.profileURL))throw fail('ACCOUNT_CHANGED');
    }
   }

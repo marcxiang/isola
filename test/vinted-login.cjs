@@ -30,7 +30,7 @@ function fixture(options={}){
   const adapter={current,control:{isolated:async()=>{
     reads++;options.beforeRead?.(api,reads);
     if(options.hang)return new Promise(()=>{});
-    return {documentKey:'doc-1',url,kind,empty:!loginLength&&!passwordLength,focused,challenge:kind==='challenge',accountHint:kind==='account',submitPoint:{x:200,y:300},submitRect:{x:150,y:280,width:100,height:40},touch:!!options.touch};
+    return {documentKey:'doc-1',url,kind,empty:!loginLength&&!passwordLength,focused,challenge:kind==='challenge',accountHint:kind==='account',mobileAccountHint:options.mobileAccountHint===true,submitPoint:{x:200,y:300},submitRect:{x:150,y:280,width:100,height:40},touch:!!options.touch};
   }}};
   const account={inspectAccount:async(_profileId,input)=>{api.accountRequests.push(input);options.beforeAccount?.(api,input);if(options.accountError)throw Object.assign(Error('Untrusted provider detail'),{code:options.accountError});return {verified:true,memberId:options.memberId||'123456',username:options.username||'fixture_seller',profileURL:'https://www.vinted.fr/member/'+(options.memberId||'123456'),evidence:{kind:'current-account-menu',consistentReads:2}};}};
   api.service=new VintedLogin(adapter,{account,timeoutMs:options.timeoutMs||100,resultWaitMs:0,pollIntervalMs:10});return api;
@@ -54,6 +54,12 @@ test('mobile SVG labels only select the account-reader route, while challenges k
     const state=vm.runInNewContext('('+probeLoginDOM.toString()+')(null)',context);assert.equal(state.kind,label==='Unrelated menu'?'unknown':'account');assert.equal(state.accountHint,label!=='Unrelated menu');
     context.document.querySelector=()=>({});assert.equal(vm.runInNewContext('('+probeLoginDOM.toString()+')(null)',context).kind,'challenge');
   }
+});
+test('explicit phone profile review routes before any account menu input while normal login and challenges retain their behavior',async()=>{
+ const f=fixture({kind:'account',mobileAccountHint:true}),out=await f.service.verify('p',{requireOwnProfileClick:true,expectedMemberId:'123456'});assert.equal(out.code,'PROFILE_REVIEW_REQUIRED');assert.equal(out.verified,false);assert.equal(out.account,undefined);assert.equal(f.accountRequests.length,0);assert.equal(f.commands.some(command=>command.method.startsWith('Input.')||command.method==='DOM.focus'),false);
+ const challenged=fixture({kind:'challenge',mobileAccountHint:true});assert.equal((await challenged.service.verify('p',{requireOwnProfileClick:true})).code,'LOGIN_CHALLENGE');assert.equal(challenged.accountRequests.length,0);
+ const normal=fixture({kind:'account',mobileAccountHint:true});assert.equal((await normal.service.login('p',credentials)).verified,true);assert.equal(normal.accountRequests.length,1);
+ const heading=fixture({kind:'account'});await heading.service.verify('p',{expectedMemberId:'123456',requireOwnProfileHeading:true});assert.equal(heading.accountRequests[0].requireOwnProfileHeading,true);
 });
 test('saved mobile identity reaches the existing account reader without entering credentials or authorizing a different member',async()=>{
   const binding={profileId:'p',memberId:'123456',profileURL:'https://www.vinted.fr/member/123456',username:'fixture_seller'};

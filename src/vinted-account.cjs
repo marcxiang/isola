@@ -1,7 +1,7 @@
 const {problem}=require('./commerce-engine.cjs');
 const {randomUUID}=require('node:crypto');
 const ORIGIN='https://www.vinted.fr';
-const MENU_LABELS=['Mon profil','Paramètres','Mes commandes','Se déconnecter'];
+const MENU_LABELS=['Mon profil','Profil','Paramètres','Mes commandes','Se déconnecter'];
 const closedReceipts=new WeakMap(),CLOSED_RECEIPT_MS=30000;
 const profileCandidates=new WeakMap(),PROFILE_CANDIDATE_MS=30000;
 const receiptKey=(profileId,tab)=>profileId+'\0'+tab.id;
@@ -51,15 +51,15 @@ function probeOwnProfileSurface(){
 // ancestors. A random profile link elsewhere in the document proves no account.
 function probeAccountDOM(buttonIds,menuIds,nativeDrawerToken=''){
   const d=globalThis.__isolaDOM,map=globalThis.__isolaElements,clean=v=>String(v||'').replace(/\s+/g,' ').trim();
-  const visible=e=>!!e?.isConnected&&d.visible(e);
+  const visible=e=>!!e?.isConnected&&d.visible(e),menuLabel=e=>{const label=clean(d.label(e));return label==='Profil'?'Mon profil':label;};
   const broad=e=>!e||['HTML','BODY','HEADER','NAV','MAIN','FORM'].includes(e.tagName)||['navigation','main'].includes(e.getAttribute?.('role'));
-  const nodes=menuIds.map(item=>({...item,node:map?.get(item.id)})).filter(item=>visible(item.node)&&clean(d.label(item.node))===item.label&&(['A','BUTTON'].includes(item.node.tagName)||item.label==='Se déconnecter'&&item.node.getAttribute('role')==='button'));
+  const nodes=menuIds.map(item=>({...item,node:map?.get(item.id)})).filter(item=>visible(item.node)&&clean(d.label(item.node))===item.label&&(['A','BUTTON'].includes(item.node.tagName)||item.label==='Se déconnecter'&&item.node.getAttribute('role')==='button')).map(item=>({...item,label:item.label==='Profil'?'Mon profil':item.label}));
   const fixedLabels=['Mon profil','Paramètres','Mes commandes','Se déconnecter'];
   const snapshotNodes=[...(map||new Map()).values()].filter(e=>(['A','BUTTON'].includes(e?.tagName)||e?.getAttribute?.('role')==='button')&&visible(e));
-  const documentNodes=typeof document==='object'?[...document.querySelectorAll('a,button,[role=button]')].filter(visible):[],snapshotProfiles=snapshotNodes.filter(e=>clean(d.label(e)).includes('Mon profil'));
+  const documentNodes=typeof document==='object'?[...document.querySelectorAll('a,button,[role=button]')].filter(visible):[],snapshotProfiles=snapshotNodes.filter(e=>menuLabel(e).includes('Mon profil'));
   // Broader DOM candidates are diagnostic-only; verification below continues
   // to use exactly the original trusted snapshot nodes and ownership rules.
-  const profileCandidates=snapshotProfiles.length?snapshotProfiles:documentNodes.filter(e=>clean(d.label(e)).includes('Mon profil'));
+  const profileCandidates=snapshotProfiles.length?snapshotProfiles:documentNodes.filter(e=>menuLabel(e).includes('Mon profil'));
   const structuralTags=new Set(['A','BUTTON','DIV','LI','UL','HEADER','NAV','MAIN','FORM','SECTION','ASIDE','BODY','HTML']),roles=new Set(['navigation','menu','dialog','group','region','list','listitem']);
   const diagnostic={snapshotCounts:fixedLabels.map(label=>menuIds.filter(row=>row.label===label).length),visibleCounts:fixedLabels.map(label=>nodes.filter(row=>row.label===label).length),containsCounts:fixedLabels.map(label=>snapshotNodes.filter(e=>clean(d.label(e)).includes(label)).length),domCounts:fixedLabels.map(label=>documentNodes.filter(e=>clean(d.label(e))===label).length),profileCandidates:profileCandidates.length,candidateSource:snapshotProfiles.length?'snapshot':'document',ancestors:profileCandidates[0]?d.parents(profileCandidates[0]).slice(1,7).map(parent=>({tag:structuralTags.has(parent.tagName)?parent.tagName:'OTHER',role:roles.has(parent.getAttribute?.('role'))?parent.getAttribute('role'):'-',testId:!!parent.getAttribute?.('data-testid'),rows:fixedLabels.map(label=>nodes.filter(row=>row.label===label&&parent.contains(row.node)).length),accountHeading:/\bMon Compte\b/.test(clean(d.safeText(parent,4000)))})):[]};
   diagnostic.logoutCandidates=(typeof document==='object'?[...document.querySelectorAll('a,button,[role]')]:[]).filter(e=>visible(e)&&clean(d.label(e))==='Se déconnecter').slice(0,3).map(e=>({tag:['A','BUTTON','DIV','SPAN','LI'].includes(e.tagName)?e.tagName:'OTHER',role:['button','link','menuitem'].includes(e.getAttribute('role'))?e.getAttribute('role'):'-'}));
@@ -106,8 +106,8 @@ function probeAccountDOM(buttonIds,menuIds,nativeDrawerToken=''){
     if(button.kind==='mobile-menu'&&button.expanded==='true'&&mobileStructure&&nativeDrawerToken&&native?.token===nativeDrawerToken&&(native.root||!explicitlyOwned&&!locallyOwned&&!mobileNavigation)){
       native.inspect(native.observer.takeRecords());
       const exactRows=fixedLabels.map(label=>rows.find(item=>item.label===label)?.node);
-      const unique=fixedLabels.every(label=>nodes.filter(item=>item.label===label).length===1&&documentNodes.filter(e=>clean(d.label(e))===label).length===1);
-      const unchanged=exactRows.every(node=>!native.baseline.has(node)||native.baseline.get(node).href===String(node.href||'')&&native.baseline.get(node).label===clean(d.label(node)));
+      const unique=fixedLabels.every(label=>nodes.filter(item=>item.label===label).length===1&&documentNodes.filter(e=>menuLabel(e)===label).length===1);
+      const unchanged=exactRows.every(node=>!native.baseline.has(node)||native.baseline.get(node).href===String(node.href||'')&&native.baseline.get(node).label===menuLabel(node));
       const same=native.root?native.root===root&&exactRows.every((node,index)=>native.rows[index]===node&&native.hrefs[index]===String(node.href||'')):true;
       nativeDrawer=native.valid&&native.documentKey===String(performance.timeOrigin)&&native.pageURL===pageURL&&native.button===button.node&&native.header.isConnected&&d.closest(button.node,'header,nav,[role=navigation]')===native.header&&unique&&unchanged&&same&&!d.closest(root,'main,form,article');
       if(nativeDrawer&&!native.root){native.root=root;native.rows=exactRows;native.hrefs=exactRows.map(node=>String(node.href||''));}
@@ -115,7 +115,7 @@ function probeAccountDOM(buttonIds,menuIds,nativeDrawerToken=''){
     }
     const nativeBound=!!nativeDrawerToken&&native?.token===nativeDrawerToken&&!!native.root;
     const owned=(nativeBound?nativeDrawer:explicitlyOwned||locallyOwned||mobileNavigation||nativeDrawer)&&button.expanded!=='false'&&mobileStructure;
-    menus.push({valid:owned,reason:owned?'':'unrelated-menu',href:String(profile.node.href),association:nativeDrawer?'mobile-native-toggle-drawer':explicitlyOwned?'aria':mobileNavigation?'mobile-header-navigation':'local-header-container'});
+    menus.push({valid:owned,reason:owned?'':'unrelated-menu',href:String(profile.node.href),profileNodeId:profile.id,association:nativeDrawer?'mobile-native-toggle-drawer':explicitlyOwned?'aria':mobileNavigation?'mobile-header-navigation':'local-header-container'});
     if(owned)globalThis.__isolaAccountMenuObservation={documentKey:String(performance.timeOrigin),button:button.node,root,profileNode:profile.node,href:String(profile.node.href),nativeDrawerToken:nativeDrawer?nativeDrawerToken:null};
   }
   return {documentKey:String(performance.timeOrigin),buttons:summaries,menus,visibleMenuParts:nodes.length,pageURL,diagnostic};
@@ -126,14 +126,15 @@ function probeAccountDOM(buttonIds,menuIds,nativeDrawerToken=''){
 // token remains in main/isolated memory and is never a page-provided marker.
 function beginNativeDrawerGuard(buttonId,documentKey,pageURL,token){
  const d=globalThis.__isolaDOM,map=globalThis.__isolaElements,button=map?.get(buttonId),clean=v=>String(v||'').replace(/\s+/g,' ').trim();
+ const menuLabel=e=>{const label=clean(d.label(e));return label==='Profil'?'Mon profil':label;};
  if(!d||!button||typeof MutationObserver!=='function'||String(performance.timeOrigin)!==documentKey||String(location.href)!==pageURL||!button.isConnected||button.tagName!=='BUTTON'||d.disabled(button)||!d.visible(button)||clean(d.label(button))!=='Menu ouvert'||button.getAttribute('aria-expanded')==='true'||d.closest(button,'a[href],form'))return {armed:false};
  const header=d.closest(button,'header,nav,[role=navigation]');if(!header)return {armed:false};
  const toggles=[...document.querySelectorAll('button')].filter(e=>e.isConnected&&d.visible(e)&&!d.disabled(e)&&d.closest(e,'header,nav,[role=navigation]')&&['Menu ouvert','Menu fermé'].includes(clean(d.label(e))));if(toggles.length!==1||toggles[0]!==button)return {armed:false};
  const labels=['Mon profil','Paramètres','Mes commandes','Se déconnecter'],semantic=e=>['A','BUTTON'].includes(e.tagName)||e.getAttribute?.('role')==='button';
- const candidates=[...document.querySelectorAll('a,button,[role=button]')].filter(e=>semantic(e)&&labels.includes(clean(d.label(e))));
+ const candidates=[...document.querySelectorAll('a,button,[role=button]')].filter(e=>semantic(e)&&labels.includes(menuLabel(e)));
  if(candidates.some(e=>e.isConnected&&d.visible(e)))return {armed:false};
  globalThis.__isolaNativeAccountDrawerGuard?.stop?.();
- const guard={token,documentKey,pageURL,button,header,valid:true,root:null,rows:[],hrefs:[],baseline:new Map(candidates.map(e=>[e,{label:clean(d.label(e)),href:String(e.href||'')}]))};
+ const guard={token,documentKey,pageURL,button,header,valid:true,root:null,rows:[],hrefs:[],baseline:new Map(candidates.map(e=>[e,{label:menuLabel(e),href:String(e.href||'')}]))};
  const contains=(a,b)=>a===b||!!a?.contains?.(b),element=node=>node?.nodeType===3?node.parentNode:node;
  guard.inspect=records=>{for(const record of records){
   const target=element(record.target);if(!target){guard.valid=false;continue;}
@@ -143,12 +144,31 @@ function beginNativeDrawerGuard(buttonId,documentKey,pageURL,token){
   if(identity.some(node=>contains(node,target))&&(record.type!=='attributes'||['href','role','aria-label'].includes(record.attributeName)))guard.valid=false;
   if(record.type==='childList'&&[...record.removedNodes].some(node=>identity.some(row=>contains(node,row))))guard.valid=false;
   if(guard.root&&record.type==='childList'&&[...record.addedNodes].some(node=>{
-   if(node?.nodeType!==1)return false;return [node,...node.querySelectorAll('a,button,[role=button]')].some(row=>semantic(row)&&labels.includes(clean(d.label(row)))&&!guard.rows.includes(row));
+   if(node?.nodeType!==1)return false;return [node,...node.querySelectorAll('a,button,[role=button]')].some(row=>semantic(row)&&labels.includes(menuLabel(row))&&!guard.rows.includes(row));
   }))guard.valid=false;
  }};
  guard.observer=new MutationObserver(records=>guard.inspect(records));guard.observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,characterData:true});
  let clicks=0;const interaction=event=>{if(event.type==='keydown'||!contains(button,event.target)||++clicks>1||event.isTrusted===false)guard.valid=false;};for(const type of ['click','keydown'])header.addEventListener?.(type,interaction,true);
  guard.stop=()=>{guard.observer.disconnect();for(const type of ['click','keydown'])header.removeEventListener?.(type,interaction,true);};globalThis.__isolaNativeAccountDrawerGuard=guard;return {armed:true};
+}
+
+// The final trusted anchor click must still belong to the original drawer.
+// Flush the mutation epoch again in the capture listener, after hover/paint
+// and before the browser is allowed to follow the anchor's default action.
+function armOwnProfileClick(candidate,token){
+ const d=globalThis.__isolaDOM,map=globalThis.__isolaElements,native=globalThis.__isolaNativeAccountDrawerGuard,observation=globalThis.__isolaAccountMenuObservation,clean=value=>String(value||'').replace(/\s+/g,' ').trim();
+ const label=e=>{const value=clean(d.label(e));return value==='Profil'?'Mon profil':value;};
+ const original=observation?.profileNode,valid=()=>{
+  native?.inspect(native.observer.takeRecords());
+  if(!d||!map||!native?.valid||native.token!==token||native.documentKey!==candidate.documentKey||String(performance.timeOrigin)!==candidate.documentKey||String(location.href)!=='https://www.vinted.fr/'||Date.now()>=candidate.expiresAt||observation?.nativeDrawerToken!==token||observation.root!==native.root||observation.button!==native.button||native.rows[0]!==original||!original?.isConnected||!d.visible(original)||String(original.href)!==candidate.profileHref||!['','_self'].includes(clean(original.getAttribute('target')).toLowerCase())||original.getAttribute('download')!==null)return false;
+  const labels=['Mon profil','Paramètres','Mes commandes','Se déconnecter'],nodes=[...document.querySelectorAll('a,button,[role=button]')].filter(e=>e.isConnected&&d.visible(e));
+  return native.header.isConnected&&native.button.isConnected&&native.root.isConnected&&d.visible(native.root)&&clean(d.label(native.button))==='Menu fermé'&&labels.every((value,index)=>native.rows[index]?.isConnected&&d.visible(native.rows[index])&&label(native.rows[index])===value&&String(native.rows[index].href||'')===native.hrefs[index]&&nodes.filter(e=>label(e)===value).length===1);
+ };
+ if(!valid())return {armed:false};const ids=[...map].filter(([,node])=>node===original).map(([id])=>id);if(ids.length!==1)return {armed:false};
+ globalThis.__isolaOwnProfileClickGuard?.stop?.();
+ const guard={token,clicked:false,valid:true},listener=event=>{if(event.isTrusted!==true||guard.clicked||!valid()){guard.valid=false;event.preventDefault();event.stopImmediatePropagation?.();return;}guard.clicked=true;};
+ if(typeof original.addEventListener!=='function')return {armed:false};original.addEventListener('click',listener,true);guard.stop=()=>original.removeEventListener('click',listener,true);globalThis.__isolaOwnProfileClickGuard=guard;
+ return {armed:true,elementId:ids[0],href:String(original.href)};
 }
 
 // This probe is self-contained for the final synchronous native publish check.
@@ -163,7 +183,7 @@ function probeClosedAccountDOM(receipt){
  const visible=e=>!!e?.isConnected&&d.visible(e);let menuParts=0;
  for(const [,e] of map){
   if(!visible(e))continue;const label=clean(d.label(e));
-  if((['A','BUTTON'].includes(e.tagName)||label==='Se déconnecter'&&e.getAttribute('role')==='button')&&['Mon profil','Paramètres','Mes commandes','Se déconnecter'].includes(label))menuParts++;
+  if((['A','BUTTON'].includes(e.tagName)||label==='Se déconnecter'&&e.getAttribute('role')==='button')&&['Mon profil','Profil','Paramètres','Mes commandes','Se déconnecter'].includes(label))menuParts++;
   if(e.tagName!=='BUTTON'||d.disabled(e)||d.closest(e,'a[href],form')||!d.closest(e,'header,nav,[role=navigation]'))continue;
   const r=e.getBoundingClientRect();if(r.top<0||r.top>Math.min(300,innerHeight*0.45)||r.bottom>innerHeight||r.right<=0||r.left>=innerWidth)continue;
   if(['Menu ouvert','Menu fermé'].includes(label)){buttons.push({node:e,kind:'mobile-menu',nativeId:e.id||null,closed:label==='Menu ouvert'&&e.getAttribute('aria-expanded')!=='true'});continue;}
@@ -182,7 +202,7 @@ function beginClosedAccountGuard(receipt){
  if(globalThis.__isolaClosedAccountGuard?.stop)globalThis.__isolaClosedAccountGuard.stop();else globalThis.__isolaClosedAccountGuard?.observer?.disconnect();
  const epoch={token:receipt.guardToken,documentKey:receipt.documentKey,button:observation.button,root:observation.root,header,profileNode:observation.profileNode,href:observation.href,valid:true,phase:'closing',pending:[],buttonNodes:new Set([observation.button,...observation.button.querySelectorAll('*')]),menuNodes:new Set([observation.root,...observation.root.querySelectorAll('*')])};
  const contains=(a,b)=>a===b||!!a?.contains?.(b),element=node=>node?.nodeType===3?node.parentNode:node;
- const menuAdded=node=>{if(node?.nodeType!==1)return false;const nodes=[node,...node.querySelectorAll('a,button')];return nodes.some(item=>String(d.label(item)).replace(/\s+/g,' ').trim()==='Mon profil')||!!epoch.root.id&&node.id===epoch.root.id;};
+ const menuAdded=node=>{if(node?.nodeType!==1)return false;const nodes=[node,...node.querySelectorAll('a,button')];return nodes.some(item=>['Mon profil','Profil'].includes(String(d.label(item)).replace(/\s+/g,' ').trim()))||!!epoch.root.id&&node.id===epoch.root.id;};
  epoch.relevant=record=>{
   const node=element(record.target);if(!node)return true;
   if(epoch.buttonNodes.has(node)||epoch.menuNodes.has(node)||contains(epoch.header,node)||contains(epoch.root,node)||contains(epoch.button,node))return true;
@@ -275,7 +295,7 @@ class VintedAccount {
       if(button.kind==='mobile-menu'){
         let own=false;try{own=memberURL(state.pageURL).memberId===identity.memberId;}catch{}
         if(!own)username=null;
-        if(!username&&bound&&bound.memberId===identity.memberId&&bound.profileURL===identity.profileURL&&typeof bound.username==='string'&&bound.username.trim()===bound.username&&bound.username.length>0&&bound.username.length<=100){username=bound.username;usernameSource='saved-binding';}
+        if(!username&&!context.requireOwnProfileHeading&&bound&&bound.memberId===identity.memberId&&bound.profileURL===identity.profileURL&&typeof bound.username==='string'&&bound.username.trim()===bound.username&&bound.username.length>0&&bound.username.length<=100){username=bound.username;usernameSource='saved-binding';}
         if(!username)throw problem('ACCOUNT_UNVERIFIED','已读到账号菜单，但当前页面缺少该账号自己的用户名证据；请先在该账号个人主页完成绑定');
       }
       if(bound&&(bound.memberId!==identity.memberId||bound.profileURL!==identity.profileURL))throw problem('ACCOUNT_CHANGED','当前账号菜单与保存的账号编号不一致');
@@ -314,31 +334,39 @@ class VintedAccount {
       do{first=await this.state(profileId,context,expected);if(first.profileCandidate)break;if(Date.now()>=until)throw accountFailure('打开手机菜单后没有取得可核对的本人主页候选',first);await this.bounded(()=>new Promise(resolve=>setTimeout(resolve,this.pollIntervalMs)),context);}while(true);
       const second=await this.state(profileId,context,expected);guard();
       if(!second.profileCandidate||JSON.stringify(first.profileCandidate)!==JSON.stringify(second.profileCandidate)||first.pageURL!==second.pageURL||second.pageURL!==ORIGIN+'/')throw problem('ACCOUNT_CHANGED','两次手机菜单读取的本人主页候选不一致');
-      const createdAt=Date.now(),candidate=Object.freeze({kind:'own-profile-candidate',verified:false,profileId,tabId:context.tab.id,documentKey:second.documentKey,...memberURL(second.profileCandidate.profileURL),observedAt:new Date(createdAt).toISOString(),expiresAt:createdAt+PROFILE_CANDIDATE_MS,consistentReads:2});
+      const createdAt=Date.now(),candidate=Object.freeze({kind:'own-profile-candidate',verified:false,profileId,tabId:context.tab.id,documentKey:second.documentKey,...memberURL(second.profileCandidate.profileURL),profileHref:second.menus[0].href,observedAt:new Date(createdAt).toISOString(),expiresAt:createdAt+PROFILE_CANDIDATE_MS,consistentReads:2});
       profileCandidates.set(candidate,{adapter:this.adapter,profileId,tab:context.tab,token,createdAt});return candidate;
     }catch(error){error.accountMenuOpenAttempted=menuOpenAttempted;throw error;}
     finally{signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('destroyed',cancel);contents?.removeListener?.('render-process-gone',cancel);if(w?.vintedDraftController===controller)w.vintedDraftController=null;}
   }
-  async validateOwnProfileLink(profileId,candidate,{signal,now=Date.now()}={}){
+  validateOwnProfileLink(profileId,candidate,options={}){return this.consumeOwnProfileLink(profileId,candidate,options,false);}
+  clickOwnProfileLink(profileId,candidate,options={}){return this.consumeOwnProfileLink(profileId,candidate,options,true);}
+  async consumeOwnProfileLink(profileId,candidate,{signal,now=Date.now()}={},click=false){
     const entry=profileCandidates.get(candidate);profileCandidates.delete(candidate);
     if(!entry||entry.adapter!==this.adapter||entry.profileId!==profileId||candidate.verified!==false||candidate.expiresAt<=now||entry.createdAt>now)throw problem('ACCOUNT_UNVERIFIED','个人主页候选已过期或不属于原环境，请重新核验');
-    const controller=new AbortController(),cancel=()=>controller.abort(),context={controller,signal:controller.signal,tab:entry.tab,profileCandidateOnly:true,nativeDrawerToken:entry.token};let w,contents;
-    const navigated=(_event,_url,_inPlace,mainFrame)=>{if(mainFrame!==false)cancel();};
+    const controller=new AbortController(),cancel=()=>controller.abort(),context={controller,signal:controller.signal,tab:entry.tab,profileCandidateOnly:true,nativeDrawerToken:entry.token};let w,contents,clickAllowed=false,navigationCount=0,lastNavigationURL;
+    const navigated=(event,url,_inPlace,mainFrame)=>{if((event?.isMainFrame??mainFrame)===false)return;if(!clickAllowed||navigationCount===0&&url!==candidate.profileHref||navigationCount>0&&(navigationCount!==1||candidate.profileHref===candidate.profileURL||url!==candidate.profileURL)){cancel();return;}navigationCount++;lastNavigationURL=url;};
+    const inPage=(event,url,isMain)=>{if((event?.isMainFrame??isMain)===false)return;if(url!==lastNavigationURL)navigated(event,url,true,true);};
     try{
       if(signal?.aborted)throw stopped();signal?.addEventListener('abort',cancel,{once:true});const selected=this.adapter.current(profileId,context);w=selected.w;contents=entry.tab.view.webContents;w.vintedDraftController=controller;
-      contents.on?.('did-start-navigation',navigated);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);
+      contents.on?.('did-start-navigation',navigated);contents.on?.('did-navigate-in-page',inPage);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);
       if(contents.getURL()!==ORIGIN+'/'||contents.isLoadingMainFrame?.())throw problem('ACCOUNT_CHANGED','原个人主页核验标签页已改变');
       const surface=await this.bounded(()=>this.adapter.control.isolated(context.tab,'('+probeOwnProfileSurface.toString()+')()'),context);
       if(surface?.challenge)throw problem('LOGIN_CHALLENGE','请先在核验标签页完成人工验证');if(surface?.ready!==true||surface.url!==ORIGIN+'/'||surface.documentKey!==candidate.documentKey)throw problem('ACCOUNT_CHANGED','原个人主页核验页已改变');
       const state=await this.state(profileId,context,{documentKey:candidate.documentKey});this.adapter.current(profileId,context);
-      if(state.profileCandidate?.memberId!==candidate.memberId||state.profileCandidate?.profileURL!==candidate.profileURL||state.pageURL!==ORIGIN+'/'||candidate.expiresAt<=Date.now())throw problem('ACCOUNT_CHANGED','导航前手机菜单或个人主页候选已改变');return true;
-    }finally{signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('destroyed',cancel);contents?.removeListener?.('render-process-gone',cancel);if(w?.vintedDraftController===controller)w.vintedDraftController=null;}
+      if(state.profileCandidate?.memberId!==candidate.memberId||state.profileCandidate?.profileURL!==candidate.profileURL||state.menus[0]?.href!==candidate.profileHref||state.pageURL!==ORIGIN+'/'||candidate.expiresAt<=Date.now())throw problem('ACCOUNT_CHANGED','导航前手机菜单或个人主页候选已改变');if(!click)return true;
+      const armed=await this.bounded(()=>this.adapter.control.isolated(context.tab,'('+armOwnProfileClick.toString()+')('+JSON.stringify(candidate)+','+JSON.stringify(entry.token)+')'),context);this.adapter.current(profileId,context);
+      if(armed?.armed!==true||armed.href!==candidate.profileHref||armed.elementId!==state.menus[0].profileNodeId)throw problem('ACCOUNT_CHANGED','点击前原本人主页控件或菜单已改变');
+      clickAllowed=true;await this.bounded(()=>this.adapter.control.performAction(context.tab,{action:'click',elementId:armed.elementId},this.adapter.options(context.signal,()=>this.adapter.current(profileId,context))),context);this.adapter.current(profileId,context);
+      const url=contents.getURL();if(navigationCount<1||![candidate.profileHref,candidate.profileURL].includes(url)||memberURL(url).memberId!==candidate.memberId)throw problem('ACCOUNT_CHANGED','原生点击后未进入该账号本人的个人主页');
+      return {profileId,tabId:context.tab.id,url};
+    }finally{signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('did-navigate-in-page',inPage);contents?.removeListener?.('destroyed',cancel);contents?.removeListener?.('render-process-gone',cancel);if(contents&&!contents.isDestroyed()&&[ORIGIN+'/',candidate.profileHref,candidate.profileURL].includes(contents.getURL()))await this.adapter.control.isolated(context.tab,'(()=>{const guard=globalThis.__isolaOwnProfileClickGuard;if(guard?.token==='+JSON.stringify(entry.token)+'){guard.stop();delete globalThis.__isolaOwnProfileClickGuard;}})()').catch(()=>{});if(w?.vintedDraftController===controller)w.vintedDraftController=null;}
   }
-  async inspectAccount(profileId,{signal,controller:providedController,tab:providedTab,expectedAccount,closeMenu=false}={}){
+  async inspectAccount(profileId,{signal,controller:providedController,tab:providedTab,expectedAccount,closeMenu=false,requireOwnProfileHeading=false}={}){
     const controller=providedController||new AbortController();
     if(!controller?.signal||typeof controller.abort!=='function')throw new TypeError('AbortController is required');
     const cancel=()=>controller.abort();if(signal?.aborted)throw stopped();signal?.addEventListener('abort',cancel,{once:true});
-    const context={signal:controller.signal,controller,tab:providedTab,expectedAccount};
+    const context={signal:controller.signal,controller,tab:providedTab,expectedAccount,requireOwnProfileHeading:requireOwnProfileHeading===true};
     let w,contents,ownsLock=false,menuOpened=false,menuOpenAttempted=false;
     const changed=()=>controller.abort(),navigated=(_event,_url,_inPlace,mainFrame)=>{if(mainFrame!==false)changed();};
     try{

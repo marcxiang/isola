@@ -8,7 +8,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.13**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.14**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
 - Starting the scheduler automatically opens a closed listing profile in its original persistent session, then checks the current account before preparing photos or publishing. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
@@ -27,6 +27,16 @@ dev.10 源码接续检查点（2026-10-15）：最终完整 Node 729/729 通过�
 已定位并修复一处开窗卡住的原因：隐藏的 AI 面板也会读取模型设置并同步解密密钥，等待系统钥匙串时阻塞主线程。现在读取模型元信息和普通设置保存均保留密文，真正启动 AI 时才解密；新密钥加密、清除及更换接口地址的密钥规则保持。新包尚待真实开窗验证；代理和货盘等其他凭据访问仍可能需要钥匙串许可。
 
 本次先保存源码进度，未交付包含全部最新修复的最终 Mac 包。下次办公室先恢复仍等待系统钥匙串的旧应用，再打包最新源码、复测账号菜单关闭诊断和四类 Fait，重跑桌面回归后继续原任务；当前未完成全自动刊登。
+
+## 手机 Profil 核对与已用照片复用 — 0.5.3-dev.14
+
+手机版账号核对现在会在独立核验标签中实际点击「Profil / Mon profil」进入本人主页，再读取用户名与账号身份；已有绑定也走该手机流程。原操作标签和草稿保留，确认失败不会保存为已核验。
+
+在「商品与图片」选择货盘套组的「手动复用」，已使用套组也可选择。应用重新读取原图并生成本地副本，带入商品资料与已保存的建议售价；审阅后保存为独立手动商品，再创建计划。原货盘商品、占用与使用记录保留，副本库存和资料由用户维护。货盘不提供原图或拒绝下载时会说明原因，不能把缩略图或失败下载当作已导入。
+
+<!-- dev14-validation -->
+
+dev.14 Windows 专项验证：Node 865 项通过、零失败、1 项 Windows 不适用检查跳过；商品与自动上架 32/32、账号核对 42/42。包含已使用套组读取、拒绝原图权限、独立手动商品保存，以及首次和再次手机 Profil 原生点击核验。桌面各模块使用独立临时数据和新的 Electron 进程，默认沙箱开启，不自动重跑失败项；打包 EXE 启动、复用接口、商品来源、计划预检、设备参数和加密账号存储检查通过，依赖审计为 0。以上为本地测试，真实 Vinted 核对和发布仍待同版本现场验证；完整桌面回归未完成通过，新 Mac 包未构建。
 
 ## 手动商品与启用即执行 — 0.5.3-dev.13
 

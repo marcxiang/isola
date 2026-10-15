@@ -39,3 +39,5 @@ dialog{background:#242426;color:var(--ink);border:1px solid #51515b;border-radiu
 .manual-photo-picker{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0}.manual-photo-picker span{font-size:12px;color:var(--muted)}.account-check-feedback{padding:12px 14px;background:#2b2b32;border:1px solid var(--line);border-radius:7px;margin-bottom:12px}.account-check-feedback p{margin:8px 0 0;font-size:12px;overflow-wrap:anywhere}.account-check-feedback[data-account-check=failed]{border-color:#805d35}.account-check-feedback[data-account-check=verified]{border-color:#416d58}#account-verify-feedback{margin-top:16px}
 @media(max-width:1150px){.listing-workflow-steps{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){.listing-workflow-steps{grid-template-columns:1fr}}
+
+.photo-set>button{margin-top:12px;width:100%}.photo-set .pill{max-width:100%;white-space:normal}

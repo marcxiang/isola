@@ -1,6 +1,6 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),{spawn}=require('node:child_process');
-const groups={listing:['commerce-listing-setup-smoke','commerce-manual-start-ui-smoke','commerce-manual-main-smoke','vinted-sales-flow-smoke'],accounts:['commerce-accounts-ui-smoke','vinted-login-smoke','vinted-account-continuity-smoke','vinted-mobile-account-review-smoke','commerce-accounts-integration-smoke']};
+const groups={listing:['commerce-listing-setup-smoke','commerce-manual-start-ui-smoke','commerce-supplier-photo-reuse-ui-smoke','commerce-supplier-photo-reuse-main-smoke','commerce-manual-main-smoke','vinted-sales-flow-smoke'],accounts:['commerce-accounts-ui-smoke','vinted-login-smoke','vinted-account-continuity-smoke','vinted-mobile-account-review-smoke','commerce-accounts-integration-smoke']};
 const name=process.argv[2],modules=groups[name];if(!modules)throw Error('Choose listing or accounts');
 const root=path.resolve(__dirname,'..'),artifacts=path.join(root,'test-artifacts'),report=path.join(artifacts,name+'-group-report.json');fs.mkdirSync(artifacts,{recursive:true});
 (async()=>{const completed=[],checks=[];for(const module of modules){

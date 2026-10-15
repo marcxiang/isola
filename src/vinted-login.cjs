@@ -27,7 +27,8 @@ const MESSAGES={
   TAB_CHANGED:'当前标签页已切换，登录操作已停止。',
   STOPPED:'登录操作已停止；如已经提交，请在页面检查结果。',
   LOGIN_UNAVAILABLE:'登录页面控制未能完成，请在窗口人工接管。',
-  ACCOUNT_UNVERIFIED:'尚未取得可核对的当前账号回执，请在窗口人工检查。'
+  ACCOUNT_UNVERIFIED:'尚未取得可核对的当前账号回执，请在窗口人工检查。',
+  PROFILE_REVIEW_REQUIRED:'请确认后点击手机账号菜单中的 Profil，进入本人主页核对账号。'
 };
 const failure=code=>Object.assign(new Error(MESSAGES[code]||MESSAGES.LOGIN_UNAVAILABLE),{code:MESSAGES[code]?code:'LOGIN_UNAVAILABLE'});
 const output=(status,code,submitted=false,account)=>({status,code,verified:status==='logged_in',submitted:!!submitted,message:MESSAGES[code]||MESSAGES.LOGIN_UNAVAILABLE,...(account?{account}:{})});
@@ -44,8 +45,9 @@ function probeLoginDOM(expected){
   const challenge=!!document.querySelector('input[autocomplete="one-time-code"]')||[...document.querySelectorAll('iframe')].some(e=>visible(e)&&/captcha|challenge|verification/i.test(e.src||e.title||''))||headings.some(t=>/captcha|vérifi(?:e|er|cation)|verification|two.factor|code de sécurité|security code|compte (?:bloqué|suspendu)|account (?:blocked|suspended)/i.test(t));
   // A mobile SVG menu is only a route to the existing identity reader. Its
   // label alone never establishes a logged-in account or authorizes input.
-  const accountHint=[...document.querySelectorAll('header button,nav button,[role=navigation] button')].some(e=>visible(e)&&(['Menu ouvert','Menu fermé'].includes(clean(d.label(e)))||[...e.querySelectorAll('img[alt]')].some(img=>visible(img)&&clean(img.getAttribute('alt')))));
-  const base={documentKey,url,challenge,accountHint};
+  const accountButtons=[...document.querySelectorAll('header button,nav button,[role=navigation] button')].filter(visible),mobileAccountHint=accountButtons.some(e=>['Menu ouvert','Menu fermé'].includes(clean(d.label(e))));
+  const accountHint=mobileAccountHint||accountButtons.some(e=>[...e.querySelectorAll('img[alt]')].some(img=>visible(img)&&clean(img.getAttribute('alt'))));
+  const base={documentKey,url,challenge,accountHint,mobileAccountHint};
   if(challenge||accountHint)return {...base,kind:challenge?'challenge':'account'};
   if(location.origin!=='https://www.vinted.fr'||location.pathname!=='/member/login/email'||location.username||location.password)return {...base,kind:'unknown'};
   if([...document.querySelectorAll('iframe')].some(visible))return {...base,kind:'unknown'};
@@ -181,7 +183,7 @@ class VintedLogin {
   }
   async accountResult(context,options){
     this.guard(context);let observed;
-    try{observed=await this.account.inspectAccount(context.profileId,{signal:context.signal,controller:context.controller,tab:context.tab,...(options.expectedAccount?{expectedAccount:options.expectedAccount}:{}),...(options.closeAccountMenu===true?{closeMenu:true}:{})});}
+    try{observed=await this.account.inspectAccount(context.profileId,{signal:context.signal,controller:context.controller,tab:context.tab,...(options.expectedAccount?{expectedAccount:options.expectedAccount}:{}),...(options.closeAccountMenu===true?{closeMenu:true}:{}),...(options.requireOwnProfileHeading===true?{requireOwnProfileHeading:true}:{})});}
     catch(error){if(error?.code==='ACCOUNT_CHANGED'&&options.expectedAccount)throw failure('ACCOUNT_MISMATCH');throw error;}
     this.guard(context);
     const code=this.identity(observed,options);return output(code==='LOGGED_IN'?'logged_in':code==='ACCOUNT_MISMATCH'?'error':'awaiting_user',code,context.submitted,observed);
@@ -198,6 +200,7 @@ class VintedLogin {
       onNavigate=(_event,_url,_inPlace,mainFrame)=>{if(mainFrame!==false){context.epoch++;if(!context.submitted)controller.abort();}};
       onDestroyed=()=>controller.abort();contents.on?.('did-start-navigation',onNavigate);contents.on?.('destroyed',onDestroyed);contents.on?.('render-process-gone',onDestroyed);
       const initial=await this.read(context);
+      if(initial.kind==='account'&&options.requireOwnProfileClick===true&&initial.mobileAccountHint===true)return output('awaiting_user','PROFILE_REVIEW_REQUIRED');
       if(initial.kind==='account')return await this.accountResult(context,options);
       if(initial.kind==='challenge')return output('awaiting_user','LOGIN_CHALLENGE');
       if(!login)return output('awaiting_user','ACCOUNT_UNVERIFIED');
@@ -235,5 +238,6 @@ class VintedLogin {
   verify(profileId,options={}){return this.run(profileId,options,false);}
   inspectOwnProfileLink(profileId,options={}){return this.account.inspectOwnProfileLink(profileId,options);}
   validateOwnProfileLink(profileId,candidate,options={}){return this.account.validateOwnProfileLink(profileId,candidate,options);}
+  clickOwnProfileLink(profileId,candidate,options={}){return this.account.clickOwnProfileLink(profileId,candidate,options);}
 }
 module.exports={VintedLogin,LOGIN_URL,probeLoginDOM};

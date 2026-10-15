@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('commerce', {
   sync: () => ipcRenderer.invoke('commerce-sync'),
   saveProductListing: input => ipcRenderer.invoke('commerce-product-listing-save', input),
   importProductPhotos: options => ipcRenderer.invoke('commerce-local-photos-import', options),
+  importSupplierPhotos: options => ipcRenderer.invoke('commerce-supplier-photos-import', options),
   saveManualProduct: input => ipcRenderer.invoke('commerce-local-product-save', input),
   savePlan: input => ipcRenderer.invoke('commerce-plan-save', input),
   saveAndStartPlan: input => ipcRenderer.invoke('commerce-plan-save-start', input),

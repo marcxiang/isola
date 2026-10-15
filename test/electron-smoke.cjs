@@ -48,6 +48,8 @@ await require(path.join(root,'test/vinted-sales-navigation-smoke.cjs'))(api,chec
 await require(path.join(root,'test/commerce-dashboard-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-listing-setup-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-manual-start-ui-smoke.cjs'))(api,check);
+await require(path.join(root,'test/commerce-supplier-photo-reuse-ui-smoke.cjs'))(api,check);
+await require(path.join(root,'test/commerce-supplier-photo-reuse-main-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-manual-main-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-publication-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-withdrawal-ui-smoke.cjs'))(api,check);

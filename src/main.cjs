@@ -20,6 +20,7 @@ const {createPhotoService}=require('./commerce-photo-service.cjs');
 const {createLocalProductService}=require('./commerce-local-products.cjs');
 const commerceDeletion=require('./commerce-deletion.cjs');
 const {createProductDisplayService}=require('./commerce-product-display.cjs');
+const {createProductImageNormalizer}=require('./product-image-normalizer.cjs');
 const { SKUDeskClient } = require('./sku-desk.cjs');
 const { RequestGate } = require('./sku-transport.cjs');
 const {stopDraft,installUnloadGuard,closeContents}=require('./navigation-lifecycle.cjs');
@@ -45,7 +46,7 @@ const localProductService=createLocalProductService({
  selectFiles:async()=>{const result=await dialog.showOpenDialog(manager,{title:'选择自己的商品照片',properties:['openFile','multiSelections'],filters:[{name:'商品照片',extensions:['jpg','jpeg','png','webp']}]});return result.canceled?[]:result.filePaths;},
  normalizeImage:bytes=>{let image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('商品照片无法解码，请选择有效图片');const size=image.getSize();if(!size.width||!size.height)throw Error('商品照片尺寸无效');const scale=Math.min(1,1200/size.width,1200/size.height);if(scale<1)image=image.resize({width:Math.max(1,Math.round(size.width*scale)),height:Math.max(1,Math.round(size.height*scale)),quality:'best'});const normalized=image.getSize(),output=image.toJPEG(90);if(!output.length)throw Error('商品照片无法安全转换');return {bytes:output,width:normalized.width,height:normalized.height};}
 });
-const productDisplayService=createProductDisplayService({normalizeImage:bytes=>{let image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('商品展示图无法读取');const size=image.getSize();if(!size.width||!size.height||size.width>16000||size.height>16000||size.width*size.height>40000000)throw Error('商品展示图尺寸无效');const scale=Math.min(1,640/size.width,640/size.height);if(scale<1)image=image.resize({width:Math.max(1,Math.round(size.width*scale)),height:Math.max(1,Math.round(size.height*scale)),quality:'good'});const normalized=image.getSize();return {dataURL:'data:image/jpeg;base64,'+image.toJPEG(80).toString('base64'),width:normalized.width,height:normalized.height};}});
+const productDisplayService=createProductDisplayService({normalizeImage:createProductImageNormalizer({BrowserWindow,nativeImage})});
 const hasInstanceLock = app.requestSingleInstanceLock();
 if (!hasInstanceLock) app.quit();
 app.on('second-instance', () => { if (manager && !manager.isDestroyed()) showWorkspaceWindow(manager); else void createManager().then(showWorkspaceWindow).catch(error=>log('主窗口打开失败: '+error.message)); });
@@ -451,19 +452,27 @@ async function ensureSalesProfile(profileId,{signal,guard,jobId}){
  if(!w||w.isDestroyed()||w.closingPromise||w.navigationPending||w.aiAgent?.state?.running||w.vintedDraftController)throw Object.assign(Error('该环境尚未空闲，后台稍后继续'),{code:'PAGE_BUSY'});
  return {profileId};
 }
-async function openSalesPage(profileId,url,{signal,guard,jobId,role}){
+async function openSalesPage(profileId,url,{signal,guard,jobId,role,tab:expectedTab}){
  guard();const w=windows.get(profileId),engine=commerce;
  const valid=()=>{
   guard();if(signal.aborted||!engine||engine.active.get(profileId)?.signal!==signal||!engine.leases.snapshot().some(row=>row.profileId===profileId&&row.jobId===jobId))throw Object.assign(Error('后台任务已停止'),{code:'STOPPED'});
   if(!w||w.isDestroyed()||w.closingPromise||w.aiAgent?.state?.running||w.vintedDraftController)throw Object.assign(Error('浏览器窗口正在使用，请等待当前操作完成'),{code:'PAGE_BUSY'});
  };
  valid();
+ if(role==='identity-ready'){
+  let target;try{target=new URL(url);}catch{throw Error('后台账号页面无效');}
+  const tab=w.tabs.find(row=>row.id===salesTabs.get(JSON.stringify([profileId,jobId,'identity'])));
+  if(!tab||tab!==expectedTab||w.activeTab!==tab.id||target.origin!=='https://www.vinted.fr'||target.username||target.password||target.search||target.hash||!/^\/member\/[1-9]\d*(?:-[^/?#]+)?\/?$/.test(target.pathname)||tab.view.webContents.isDestroyed()||tab.view.webContents.getURL()!==url)throw Object.assign(Error('原账号页面已改变，请打开对应窗口继续登录'),{code:'PAGE_CHANGED'});
+  await waitOwnedPageReady(w,tab,url,{signal,guard:()=>{valid();if(w.activeTab!==tab.id||tab.view.webContents.isDestroyed()||tab.view.webContents.getURL()!==url)throw Object.assign(Error('原账号页面已改变'),{code:'PAGE_CHANGED'});},settleMs:200,failure:()=>Object.assign(Error('账号页面尚未加载完成，请稍后继续计划'),{code:'INPUT_SURFACE_UNAVAILABLE'})});
+  return {tab};
+ }
  const account=engine.db.marketAccounts.find(row=>row.profileId===profileId);
- if(!(role==='listing'&&url==='https://www.vinted.fr/items/new'||role==='catalog'&&url===account?.profileURL))throw Error('后台页面地址与任务不一致');
+ if(!(role==='identity'&&url==='https://www.vinted.fr/'||role==='listing'&&url==='https://www.vinted.fr/items/new'||role==='catalog'&&url===account?.profileURL))throw Error('后台页面地址与任务不一致');
  if(w.navigationPending)throw Object.assign(Error('窗口正在导航，请稍后继续'),{code:'PAGE_BUSY'});
  const key=JSON.stringify([profileId,jobId,role]);w.navigationPending=true;
  try{
   let tab=w.tabs.find(row=>row.id===salesTabs.get(key)&&!row.view.webContents.isDestroyed());
+  if(role==='identity'&&tab&&tab.view.webContents.getURL()!==url)tab=null;
   if(tab&&tab.view.webContents.getURL()!==url)throw Object.assign(Error('原后台标签已改变，请核对原页面'),{code:'PAGE_CHANGED'});
   if(tab){w.activeTab=tab.id;resizeViews(w);sendState(w);}else tab=await addTab(w,url,{salesNavigation:{signal,guard:valid},onCreated:created=>salesTabs.set(key,created.id)});
   valid();if(tab.error||tab.view.webContents.isDestroyed()||tab.view.webContents.isLoadingMainFrame()||tab.view.webContents.getURL()!==url)throw Object.assign(Error('后台页面未能完整打开，请检查账号和网络'),{code:'PAGE_CHANGED'});

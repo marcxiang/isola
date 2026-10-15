@@ -1,12 +1,15 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {productCoverSource,createProductDisplayService}=require('../src/commerce-product-display.cjs');
+const {SKUDeskClient}=require('../src/sku-desk.cjs');
 const BASE='https://supplier.example.test/api/v1',API_COVER=BASE+'/products/box/cover',PUBLIC_COVER='https://images.example.test/box.png?size=small';
 // Structural raster headers only: these tests exercise byte/type/size guards.
 // Main's native normalizer owns full image decoding and thumbnail conversion.
 function png(width=30,height=20){const bytes=Buffer.alloc(45);Buffer.from([137,80,78,71,13,10,26,10]).copy(bytes);bytes.writeUInt32BE(13,8);bytes.write('IHDR',12);bytes.writeUInt32BE(width,16);bytes.writeUInt32BE(height,20);bytes.write('IEND',37);return bytes;}
 function jpeg(){return Buffer.from([255,216,255,192,0,17,8,0,20,0,30,3,1,17,0,2,17,1,3,17,1,255,218,0,12,3,1,0,2,17,3,17,0,63,0,255,217]);}
 function webp(){const bytes=Buffer.alloc(30);bytes.write('RIFF');bytes.writeUInt32LE(22,4);bytes.write('WEBP',8);bytes.write('VP8X',12);bytes.writeUInt32LE(10,16);bytes.writeUIntLE(29,24,3);bytes.writeUIntLE(19,27,3);return bytes;}
+function lossyWebp(){const bytes=Buffer.alloc(30);bytes.write('RIFF');bytes.writeUInt32LE(22,4);bytes.write('WEBP',8);bytes.write('VP8 ',12);bytes.writeUInt32LE(10,16);Buffer.from([0x9d,1,0x2a]).copy(bytes,23);bytes.writeUInt16LE(30,26);bytes.writeUInt16LE(20,28);return bytes;}
+function losslessWebp(){const bytes=Buffer.alloc(26);bytes.write('RIFF');bytes.writeUInt32LE(18,4);bytes.write('WEBP',8);bytes.write('VP8L',12);bytes.writeUInt32LE(5,16);bytes[20]=0x2f;bytes.writeUInt32LE((19<<14)|29,21);return bytes;}
 const dataURL=(bytes,type='image/png')=>'data:'+type+';base64,'+bytes.toString('base64'),clone=value=>JSON.parse(JSON.stringify(value));
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 function fixture(options={}){
@@ -15,6 +18,7 @@ function fixture(options={}){
  return {engine,service,calls,normalized,preview:(id='box')=>service.preview(engine,id)};
 }
 const unavailable=error=>error.code==='PRODUCT_DISPLAY_UNAVAILABLE'&&!/https?:|fixture-secret|provider-token/.test(error.message);
+const decodeFailed=error=>error.code==='PRODUCT_DISPLAY_DECODE_FAILED'&&error.message==='商品展示图解码失败，请重试展示图。';
 
 test('cover extraction accepts the documented display aliases and only the first product image, without using photo sets',()=>{
  for(const field of ['displayImageUrl','thumbnailUrl','thumbnail_url','coverImageUrl','cover_image_url','coverUrl','cover_url','imageUrl','image_url'])assert.equal(productCoverSource({[field]:PUBLIC_COVER}),PUBLIC_COVER,field);
@@ -29,7 +33,12 @@ test('unsafe image schemes, credentials, controls and ambiguous path encodings a
 });
 
 test('same-provider API covers use only the bounded authenticated download and preserve used-photo ownership and every record',async()=>{
- const f=fixture(),before=clone(f.engine.db),out=await f.preview();assert.deepEqual(out,{productId:'box',dataURL:dataURL(png()),width:30,height:20});assert.deepEqual(f.engine.db,before);assert.deepEqual(f.calls.map(row=>row.type),['client','download']);assert.equal(f.calls[1].url,API_COVER);assert.equal(f.calls[1].input.maxBytes,2*1024*1024);assert.ok(f.calls[1].input.signal instanceof AbortSignal);assert.deepEqual(f.normalized[0].input,{maxDimension:640});assert.deepEqual(f.normalized[0].bytes,png());assert.deepEqual(Object.keys(out).sort(),['dataURL','height','productId','width']);assert.doesNotMatch(JSON.stringify(out),/supplier-account|used-set|original-claim|https:/);
+ const f=fixture(),before=clone(f.engine.db),out=await f.preview();assert.deepEqual(out,{productId:'box',dataURL:dataURL(png()),width:30,height:20});assert.deepEqual(f.engine.db,before);assert.deepEqual(f.calls.map(row=>row.type),['client','download']);assert.equal(f.calls[1].url,API_COVER);assert.equal(f.calls[1].input.maxBytes,2*1024*1024);assert.ok(f.calls[1].input.signal instanceof AbortSignal);assert.equal(f.normalized[0].input.maxDimension,640);assert.equal(f.normalized[0].input.signal,f.calls[1].input.signal);assert.equal(f.normalized[0].input.signal.aborted,false);assert.deepEqual(f.normalized[0].bytes,png());assert.deepEqual(Object.keys(out).sort(),['dataURL','height','productId','width']);assert.doesNotMatch(JSON.stringify(out),/supplier-account|used-set|original-claim|https:/);
+});
+
+test('the cached supplier product image route passes through the real SKU client as bounded binary image data',async()=>{
+ const f=fixture(),requests=[],base='http://127.0.0.1:18181/api/v1';f.engine.db.settings.baseURL=base;f.engine.db.products=[{id:'123',sku:'PRODUCT-123',revision:1,displayImageUrl:'/api/v1/products/123/image'}];f.engine.client=()=>new SKUDeskClient({baseURL:base,token:'fixture-display-only-token',fetchImpl:async(url,input)=>{requests.push({url,input});return new Response(png(),{headers:{'content-type':'image/png','content-length':String(png().length)}});}});
+ const before=clone(f.engine.db),result=await f.preview('123');assert.equal(result.productId,'123');assert.equal(result.dataURL,dataURL(png()));assert.equal(requests.length,1);assert.equal(requests[0].url,base+'/products/123/image');assert.equal(requests[0].input.method,'GET');assert.equal(requests[0].input.headers.Authorization,'Bearer fixture-display-only-token');assert.equal(requests[0].input.redirect,'error');assert.deepEqual(f.engine.db,before);assert.deepEqual(f.calls,[]);assert.equal(f.normalized.length,1);
 });
 
 test('only explicit image routes may use provider authentication, and product image routes must match the current product',async t=>{
@@ -89,6 +98,19 @@ test('a stalled public response body is cancelled at the same deadline and never
  let cancelled=0;const f=fixture({timeoutMs:15,fetch:()=>new Response(new ReadableStream({start(controller){controller.enqueue(png());},cancel(){cancelled++;}}),{headers:{'content-type':'image/png'}})});f.engine.db.products[0].displayImageUrl=PUBLIC_COVER;await assert.rejects(f.preview(),{code:'PRODUCT_DISPLAY_TIMEOUT'});await tick();assert.equal(cancelled,1);assert.equal(f.normalized.length,0);
 });
 
+test('WebP VP8, VP8L and VP8X headers pass unchanged to an asynchronous decoder and only its validated JPEG thumbnail is returned',async t=>{
+ for(const [name,bytes] of [['VP8',lossyWebp()],['VP8L',losslessWebp()],['VP8X',webp()]])await t.test(name,async()=>{let decoded=false;const f=fixture({download:()=>bytes,normalize:async(input,options)=>{assert.deepEqual(input,bytes);assert.equal(options.maxDimension,640);assert.ok(options.signal instanceof AbortSignal);assert.equal(options.signal.aborted,false);await tick();decoded=true;return {dataURL:dataURL(jpeg(),'image/jpeg'),width:30,height:20};}}),before=clone(f.engine.db),result=await f.preview();assert.equal(decoded,true);assert.deepEqual(result,{productId:'box',dataURL:dataURL(jpeg(),'image/jpeg'),width:30,height:20});assert.deepEqual(f.engine.db,before);assert.equal(f.normalized.length,1);});
+});
+
+test('decoder failure is a fixed retryable display error, exposes no native details and never poisons the preview cache',async()=>{
+ let reject=true;const f=fixture({download:()=>webp(),normalize:async()=>{await tick();if(reject)throw Error('nativeImage is empty: https://private.invalid/?fixture-secret=provider-token');return {dataURL:dataURL(jpeg(),'image/jpeg'),width:30,height:20};}}),before=clone(f.engine.db);await assert.rejects(f.preview(),decodeFailed);assert.deepEqual(f.engine.db,before);reject=false;const result=await f.preview();assert.equal(result.dataURL,dataURL(jpeg(),'image/jpeg'));assert.equal(f.calls.filter(row=>row.type==='download').length,2);assert.equal(f.normalized.length,2);
+});
+
+test('an asynchronous decoder deadline and a changed source retain their own failure codes instead of becoming decoder failures',async t=>{
+ await t.test('deadline',async()=>{let release,decoderSignal,aborts=0;const f=fixture({timeoutMs:15,download:()=>webp(),normalize:(_bytes,{signal})=>{decoderSignal=signal;return new Promise((resolve,reject)=>{release=resolve;signal.addEventListener('abort',()=>{aborts++;reject(Error('decoder cancelled'));},{once:true});});}});await assert.rejects(f.preview(),{code:'PRODUCT_DISPLAY_TIMEOUT'});assert.equal(decoderSignal,f.calls.find(call=>call.type==='download').input.signal);assert.equal(decoderSignal.aborted,true);assert.equal(aborts,1);release({dataURL:dataURL(jpeg(),'image/jpeg'),width:30,height:20});await tick();assert.equal(aborts,1);});
+ await t.test('source changed before decoder rejection',async()=>{let f;f=fixture({download:()=>webp(),normalize:async()=>{await tick();f.engine.db.supplierAccountId='other-account';throw Error('private native error');}});await assert.rejects(f.preview(),{code:'PRODUCT_DISPLAY_CHANGED'});});
+});
+
 test('public responses reject redirects, HTTP errors, non-image types, announced overflows and streamed overflows',async t=>{
  const options=[['redirect',()=>({ok:true,redirected:true,headers:new Headers({'content-type':'image/png'}),body:null})],['unexpected URL',()=>({ok:true,redirected:false,url:'https://other.example.test/private',headers:new Headers({'content-type':'image/png'}),body:null})],['HTTP error',()=>new Response('provider-token',{status:403})],['HTML',()=>new Response('<html>fixture-secret</html>',{headers:{'content-type':'text/html'}})],['announced overflow',()=>new Response(png(),{headers:{'content-type':'image/png','content-length':String(2*1024*1024+1)}})],['stream overflow',()=>new Response(new ReadableStream({start(controller){controller.enqueue(new Uint8Array(1024*1024));controller.enqueue(new Uint8Array(1024*1024));controller.enqueue(new Uint8Array(1));controller.close();}}),{headers:{'content-type':'image/png'}})]];
  for(const [name,response] of options)await t.test(name,async()=>{const f=fixture({fetch:response});f.engine.db.products[0].displayImageUrl=PUBLIC_COVER;await assert.rejects(f.preview(),unavailable);assert.equal(f.normalized.length,0);});
@@ -100,9 +122,9 @@ test('empty, excessive, unsupported and dimension-bomb bytes never reach the nat
 
 test('JPEG, PNG and WebP input headers are accepted for the main normalizer but no larger output or active content is returned',async t=>{
  for(const [type,bytes] of [['image/jpeg',jpeg()],['image/png',png()],['image/webp',webp()]])await t.test(type,async()=>{const f=fixture({download:()=>bytes,normalize:()=>({dataURL:dataURL(bytes,type),width:30,height:20})});const result=await f.preview();assert.equal(result.dataURL,dataURL(bytes,type));assert.equal(f.normalized.length,1);});
- const invalid=[{dataURL:'data:image/svg+xml;base64,PHN2Zy8+',width:30,height:20},{dataURL:dataURL(png(641,20)),width:641,height:20},{dataURL:dataURL(png()),width:29,height:20},{dataURL:dataURL(png(),'image/jpeg'),width:30,height:20},{dataURL:'data:image/png;base64,AAAA===',width:30,height:20}];for(const [index,value] of invalid.entries())await t.test('invalid normalized '+index,async()=>{const f=fixture({normalize:()=>value});await assert.rejects(f.preview(),unavailable);});
+ const invalid=[{dataURL:'data:image/svg+xml;base64,PHN2Zy8+',width:30,height:20},{dataURL:dataURL(png(641,20)),width:641,height:20},{dataURL:dataURL(png()),width:29,height:20},{dataURL:dataURL(png(),'image/jpeg'),width:30,height:20},{dataURL:'data:image/png;base64,AAAA===',width:30,height:20}];for(const [index,value] of invalid.entries())await t.test('invalid normalized '+index,async()=>{const f=fixture({normalize:()=>value});await assert.rejects(f.preview(),decodeFailed);});
 });
 
 test('transport and decoder errors never expose a source URL, token, response body or native error details',async t=>{
- for(const phase of ['download','fetch','normalize'])await t.test(phase,async()=>{const secret=Error('https://user:provider-token@private.example.test/image?fixture-secret=1'),f=fixture({[phase]:()=>{throw secret;}});if(phase==='fetch')f.engine.db.products[0].displayImageUrl=PUBLIC_COVER;await assert.rejects(f.preview(),error=>unavailable(error)&&error!==secret);});
+ for(const phase of ['download','fetch','normalize'])await t.test(phase,async()=>{const secret=Error('https://user:provider-token@private.example.test/image?fixture-secret=1'),f=fixture({[phase]:()=>{throw secret;}});if(phase==='fetch')f.engine.db.products[0].displayImageUrl=PUBLIC_COVER;await assert.rejects(f.preview(),error=>(phase==='normalize'?decodeFailed(error):unavailable(error))&&error!==secret);});
 });

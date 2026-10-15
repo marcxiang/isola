@@ -14,7 +14,7 @@ function node(tag,cls,value){const element=document.createElement(tag);if(cls)el
 function dateLabel(value){const date=new Date(value||'');return Number.isFinite(date.getTime())?date.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'尚未打开';}
 function hasProxyCheck(profile){const check=profile.proxyCheck;return typeof check?.ip==='string'&&/^[0-9a-f:.]{2,64}$/i.test(check.ip)&&Number.isFinite(new Date(check.checkedAt||'').getTime());}
 function activityCell(kind,status){
- const fallback=kind==='vinted'?{state:'unbound',label:'未验证',detail:'尚未关联账号或核验当前登录。'}:{state:'idle',label:'未运行',detail:'当前没有运行中的自动化任务。'},value=status&&typeof status==='object'?status:fallback;
+ const fallback=kind==='vinted'?{state:'unbound',label:'窗口会话',detail:'打开窗口登录，开启计划后自动识别账号。'}:{state:'idle',label:'未运行',detail:'当前没有运行中的自动化任务。'},value=status&&typeof status==='object'?status:fallback;
  const cell=node('td',kind==='vinted'?'vinted-status-cell':'automation-status-cell'),badge=node('span','status-badge',value.label||fallback.label);badge.dataset.status=value.state||fallback.state;cell.append(badge);
  if(value.detail)cell.append(node('div','status-detail',value.detail));
  if(kind==='vinted'&&value.checkedAt&&Number.isFinite(new Date(value.checkedAt).getTime()))cell.append(node('div','status-checked-at','核验 '+dateLabel(value.checkedAt)));

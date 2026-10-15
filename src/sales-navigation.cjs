@@ -4,7 +4,7 @@ const failure=(code,message)=>Object.assign(Error(message),{code});
 function salesNavigationURL(value,target){
  try{
   const goal=new URL(target),url=new URL(value);
-  if(goal.origin!=='https://www.vinted.fr'||goal.username||goal.password||goal.search||goal.hash||!/^\/(?:member\/[1-9]\d*|items\/new)$/.test(goal.pathname))return null;
+  if(goal.origin!=='https://www.vinted.fr'||goal.username||goal.password||goal.search||goal.hash||!/^\/(?:member\/[1-9]\d*|items\/new)?$/.test(goal.pathname))return null;
   if(url.origin!==goal.origin||url.username||url.password||url.hash)return null;
   if(value===target)return 'target';
   if(url.pathname!=='/session-refresh'||[...url.searchParams.keys()].length!==1||url.searchParams.getAll('ref_url').length!==1)return null;

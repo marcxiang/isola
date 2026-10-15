@@ -66,6 +66,7 @@ function inspectQueue(input,{now=Date.now()}={}){
     // This runtime freshly verifies the original account before preparing or
     // publishing, whether it opens the fixed profile or uses an existing window.
     const liveAccountCheck=job?.type==='listing'&&['closed','running'].includes(profile?.status)&&readiness?.capabilities?.publish===true&&readiness?.capabilities?.autoOpenProfile===true;
+    const autoBindAccount=job?.type==='listing'&&['closed','running'].includes(profile?.status)&&readiness?.capabilities?.publish===true&&readiness?.capabilities?.autoBindAccount===true&&(profile.status==='running'||readiness?.capabilities?.autoOpenProfile===true);
     const autoOpen=liveAccountCheck&&profile.status==='closed';
     if(!job?.id||jobIds.get(job.id)!==1||!job.dedupeKey||dedupes.get(job.dedupeKey)!==1)status=decision('blocked','DUPLICATE_JOB','任务编号或业务去重编号缺失或重复。','核对原任务，不能自动选择或重新创建。');
     else if(!STATES.has(job.state)||!CAPABILITIES[job.type])status=decision('blocked','INVALID_JOB_STATE','任务类型或状态无法识别。','保留原记录并检查数据。');
@@ -91,8 +92,9 @@ function inspectQueue(input,{now=Date.now()}={}){
     else {
       const missing=CAPABILITIES[job.type].filter(cap=>readiness?.capabilities?.[cap]!==true);
       status=readiness?.salesOnly===true&&job.type==='fulfillment'?decision('blocked','PROCUREMENT_DISABLED','当前为纯售卖模式，采购履约任务不会执行。','保留原业务记录；该模式只处理售卖和成交确认。'):missing.length?decision('blocked','CAPABILITY_UNVERIFIED','此任务所需网页步骤尚未验证：'+missing.join('、')+'。','先完成对应步骤的真实页面联调。',{missingCapabilities:missing}):accountProblem(job.profileId,job,input,current);
-      if(liveAccountCheck&&status?.reasonCode==='ACCOUNT_RECHECK_REQUIRED')status=null;
-      if(!status)status=autoOpen?decision('eligible','PROFILE_AUTO_OPEN','调度时将自动打开此账号的固定环境。','无需手动打开；重新核对登录身份和商品资料，通过后上架。'):decision('eligible','READY','任务前置检查通过，等待本轮调度。',liveAccountCheck?'执行时会重新核对当前页面的登录身份，确认一致后继续核对商品和发布回执。':'运行时继续逐步核对账号、页面及业务回执。');
+      const needsBinding=autoBindAccount&&status?.reasonCode==='ACCOUNT_NOT_BOUND';
+      if(needsBinding||liveAccountCheck&&status?.reasonCode==='ACCOUNT_RECHECK_REQUIRED')status=null;
+      if(!status)status=needsBinding?decision('eligible','ACCOUNT_AUTO_BIND','执行时将自动读取本人登录身份并保存固定环境绑定。','无需手动核对；先确认实际登录身份，再准备照片和上架。'):autoOpen?decision('eligible','PROFILE_AUTO_OPEN','调度时将自动打开此账号的固定环境。','无需手动打开；重新核对登录身份和商品资料，通过后上架。'):decision('eligible','READY','任务前置检查通过，等待本轮调度。',liveAccountCheck?'执行时会重新核对当前页面的登录身份，确认一致后继续核对商品和发布回执。':'运行时继续逐步核对账号、页面及业务回执。');
     }
     rows.push({jobId:job?.id||null,profileId:job?.profileId||null,planId:job?.planId||null,type:job?.type||null,...status});
   }

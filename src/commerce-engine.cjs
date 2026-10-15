@@ -8,6 +8,7 @@ const {restoreLocalProducts,localCatalog,summarizeLocalPreparation}=require('./c
 const {restorePlanArchives,isPlanArchived,archivedPlanError}=require('./commerce-deletion.cjs');
 const {recoverableJob,retryPatch,restoreRow}=require('./commerce-plan-recovery.cjs');
 const {productCoverSource}=require('./commerce-product-display.cjs');
+const {accountExpectation}=require('./commerce-account-binding.cjs');
 const fs=require('node:fs'),path=require('node:path'),{randomUUID,createHash}=require('node:crypto');
 const DEFAULTS={baseURL:'https://sku.meetist.fr/api/v1',backgroundEnabled:false,maxConcurrent:2,perOrderLimitCents:0,dailyLimitCents:0,market:'FR',accountType:'personal',fulfillmentMethod:'wms'};
 const terminal=new Set(['completed','cancelled','rejected']);
@@ -127,6 +128,21 @@ class CommerceEngine{
   if(observed.documentKey)this.accountObservations.set(profileId,{profileId,memberId:account.memberId,verified:true,documentKey:observed.documentKey,checkedAt:account.verifiedAt});
   this.persist();this.emit();return {...account};
  }
+ bindJobAccount(jobId,observed,{signal,guard=()=>{}}={}){
+  guard();const rows=this.db.jobs.filter(row=>row.id===jobId),job=rows[0];
+  if(this.closing||this.storageFaulted?.()||this.configPending||signal?.aborted||rows.length!==1||job.state!=='running'||job.operation!=null||job.result!=null||job.mutationPending!==false||this.active.get(job.profileId)?.signal!==signal||!this.leases.snapshot().some(row=>row.profileId===job.profileId&&row.jobId===job.id))throw problem('STOPPED','原任务的账号确认已停止');
+  const expected=accountExpectation(this,job.profileId);
+  if(observed?.verified!==true||expected.memberId&&expected.memberId!==observed.memberId)throw problem('ACCOUNT_CHANGED','当前登录账号与原环境或任务身份不一致');
+  const account=this.validateMarketAccount({profileId:job.profileId,platform:'vinted-fr',memberId:observed.memberId,username:observed.username,profileURL:observed.profileURL,verifiedAt:now()});
+  if(this.db.marketAccounts.some(row=>row.profileId!==job.profileId&&row.memberId===account.memberId)||(this.accounts?.list()||[]).some(row=>row.profileId!==job.profileId&&row.identity?.memberId===account.memberId))throw problem('ACCOUNT_CONFLICT','该 Vinted 账号已绑定其他环境，请使用原来的固定环境');
+  const saved=this.accounts?.findByProfile(job.profileId);if(saved)this.accounts.verify(saved.id,observed);guard();
+  const previous=clone(job),accountsBefore=clone(this.db.marketAccounts),observedBefore=this.accountObservations.get(job.profileId),old=this.db.marketAccounts.find(row=>row.profileId===job.profileId);
+  job.accountMemberId=account.memberId;if(old)Object.assign(old,account);else this.db.marketAccounts.push(account);
+  if(observed.documentKey)this.accountObservations.set(job.profileId,{profileId:job.profileId,memberId:account.memberId,verified:true,documentKey:observed.documentKey,checkedAt:account.verifiedAt});
+  try{this.persist();}
+  catch(error){restoreRow(job,previous);this.db.marketAccounts=accountsBefore;if(observedBefore)this.accountObservations.set(job.profileId,observedBefore);else this.accountObservations.delete(job.profileId);throw error;}
+  this.emit();return {...account};
+ }
  listingURL(plan){
   const id=String(plan.activeListingId||'');if(!/^[1-9]\d*$/.test(id))return null;
   const matches=this.db.claims.filter(claim=>claim.profileId===plan.profileId&&claim.productId===plan.productId).flatMap(claim=>Array.isArray(claim.listings)?claim.listings:[]).filter(row=>String(row.listingId)===id);
@@ -230,11 +246,10 @@ class CommerceEngine{
   if(missing.length)throw problem('LISTING_INCOMPLETE','请先补全商品资料：'+missing.map(key=>labels[key]||key).join('、'));
   if(!['Petit','Moyen','Grand'].includes(plan.listing.parcel))throw problem('LISTING_INCOMPLETE','请按实际包装选择包裹规格 Petit / Moyen / Grand');
   if(!Number.isSafeInteger(products[0].stock)||products[0].stock<1)throw problem('NO_STOCK','货盘库存未知或不足，请同步商品并核对库存后再启用计划');
-  const own=this.db.marketAccounts.filter(row=>row.profileId===plan.profileId),account=own[0],accounts=this.marketAccountRecords();
-  if(own.length!==1)throw problem('ACCOUNT_NOT_BOUND','请先在「账号中心」绑定并核对这个固定环境的 Vinted 账号');
-  this.validateMarketAccount(account);
-  if(accounts.some(row=>row.profileId===plan.profileId&&row.memberId!==account.memberId||row.profileId!==plan.profileId&&row.platform===account.platform&&row.memberId===account.memberId))throw problem('ACCOUNT_CONFLICT','Vinted 账号绑定冲突，请先核对原账号和环境');
   const readiness=this.adapter.readiness(plan.profileId),publish=readiness?.capabilities?.listingPublish??readiness?.capabilities?.publish;
+  const expected=accountExpectation(this,plan.profileId),own=this.db.marketAccounts.filter(row=>row.profileId===plan.profileId),account=own[0];
+  if(own.length!==1&&readiness?.capabilities?.autoBindAccount!==true)throw problem('ACCOUNT_NOT_BOUND','当前执行器不能自动确认登录身份，请先确认该环境的 Vinted 登录');
+  if(account){this.validateMarketAccount(account);if(expected.memberId!==account.memberId)throw problem('ACCOUNT_CONFLICT','Vinted 账号绑定冲突，请先核对原账号和环境');}
   if(publish!==true)throw problem('CAPABILITY_UNVERIFIED','当前版本尚未提供可运行的自动上架流程');
   if(this.db.jobs.some(row=>row.profileId===plan.profileId&&(row.state==='uncertain'||row.mutationPending===true||['queued','running'].includes(row.state)&&(row.operation!=null||row.result!=null)))||this.db.publications.submissions.some(row=>row.proof.facts.profileId===plan.profileId&&row.state==='uncertain'&&isPublicationOpen(row)))throw problem('RECONCILE_REQUIRED','这个账号有结果未知的原操作，请先核对原任务，不能再次上架');
   if(plan.activeListingId||this.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&isPublicationOpen(row)))throw problem('PUBLICATION_EXISTS','这个计划已有在售商品或原提交记录，请核对原刊登，不能重复上架');

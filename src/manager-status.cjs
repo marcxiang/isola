@@ -6,16 +6,16 @@ function profileManagerStatus({account=null,bound=null,observation=null,windowOp
  const login=(state,label,detail,extra={})=>({state,label,detail,checkedAt,stale:checkedAt!==null,...extra});
  let vintedStatus;
  if(unavailable)vintedStatus=login('unavailable','状态不可读取','运营记录暂不可读取，原文件已保留；请在账号与运营中检查。');
- else if(account?.identity&&bound&&account.identity.memberId!==bound.memberId)vintedStatus=login('error','账号需核对','账号身份记录不一致，请在账号中心核对原绑定。');
- else if(account?.status==='logging_in')vintedStatus=login('checking','正在登录核验','专用登录步骤正在执行，尚未确认当前登录身份。');
+ else if(account?.identity&&bound&&account.identity.memberId!==bound.memberId)vintedStatus=login('error','账号不一致','当前身份与原运营账号不同，请在原环境登录正确账号；自动执行不会使用不同账号。');
+ else if(account?.status==='logging_in')vintedStatus=login('checking','正在登录','专用登录步骤正在执行，请在当前固定环境继续。');
  else if(account?.lastResult?.code==='CHALLENGE_REQUIRED')vintedStatus=login('challenge','需要手动验证','网页要求验证码或其他验证，请在固定环境中手动接管。');
- else if(account?.status==='awaiting_user')vintedStatus=login('awaiting_user','需要核对登录','上次登录结果尚未确认，请在账号中心核对；不会自动重复提交。');
- else if(account?.status==='error')vintedStatus=login('error','登录未完成','上次登录核验未完成，请在固定环境中检查。');
- else if(account?.status==='saved')vintedStatus=login('saved','已保存 · 未核验','保存账号资料或密码不代表网页已登录，请打开账号中心核验。');
- else if(windowOpen&&vintedPage&&expected&&observation?.verified===true&&observation.memberId===expected&&typeof observation.documentKey==='string'&&observation.documentKey&&Number.isFinite(age)&&age>=0&&age<ACCOUNT_OBSERVATION_MAX_AGE_MS)vintedStatus=login('verified_recent','近期已核验','最近五分钟收到当前窗口的一致账号菜单证据；登录可能随后改变，执行任务前仍需核验。',{checkedAt:stamp(observation.checkedAt),stale:false});
- else if(checkedAt)vintedStatus=login('verified_history','曾核验 · 待复核','这是历史核验记录，不能据此认定当前网页仍已登录。');
- else if(account||bound)vintedStatus=login('saved','已保存 · 未核验','当前没有可用的网页身份核验记录，请在账号中心核对。');
- else vintedStatus=login('unbound','未绑定账号','此环境尚未保存或核验 Vinted 账号。');
+ else if(account?.status==='awaiting_user')vintedStatus=login('awaiting_user','可在窗口继续','请在固定环境中完成登录；执行计划时自动读取身份，不会重复提交结果未明的登录。');
+ else if(account?.status==='error')vintedStatus=login('error','可手动登录','请在固定环境中继续登录，计划执行前会自动读取实际会话。');
+ else if(account?.status==='saved')vintedStatus=login('saved','登录资料已保存','可直接设置并开启计划，执行前自动读取当前环境的登录身份。');
+ else if(windowOpen&&vintedPage&&expected&&observation?.verified===true&&observation.memberId===expected&&typeof observation.documentKey==='string'&&observation.documentKey&&Number.isFinite(age)&&age>=0&&age<ACCOUNT_OBSERVATION_MAX_AGE_MS)vintedStatus=login('verified_recent','近期已识别','近期收到当前窗口的一致账号身份；自动执行前仍会检查实际会话。',{checkedAt:stamp(observation.checkedAt),stale:false});
+ else if(checkedAt)vintedStatus=login('verified_history','已有账号记录','已保存原账号身份；自动执行前会读取当前环境的实际会话。');
+ else if(account||bound)vintedStatus=login('saved','登录资料已保存','可直接开启计划，当前环境的身份由执行流程自动读取。');
+ else vintedStatus=login('unbound','使用窗口会话','可在当前环境登录 Vinted，开启计划后自动识别登录账号。');
  const run=(state,label,detail,source=null)=>({state,label,detail,source});let automationStatus;
  if(ai?.running===true){
   if(ai.status==='approval')automationStatus=run('approval','等待确认','AI 正在等待操作确认。','ai');

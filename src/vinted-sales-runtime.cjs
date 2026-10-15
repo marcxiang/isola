@@ -11,6 +11,7 @@ const {VintedListingReceipt,listingURL}=require('./vinted-listing-receipt.cjs');
 const {createSupplierOutbox}=require('./commerce-supplier-outbox.cjs');
 const {FORM_URL,listingRevision,isPublicationOpen}=require('./vinted-publication.cjs');
 const {missingListingFields}=require('./listing-config.cjs');
+const {accountExpectation}=require('./commerce-account-binding.cjs');
 const clone=value=>JSON.parse(JSON.stringify(value));
 const fail=(code,message,ambiguous=false)=>Object.assign(Error(message),{code,ambiguous});
 const binding=plan=>JSON.stringify([plan.id,plan.profileId,plan.productId,plan.source||'supplier',plan.sku,plan.enabled,plan.completedCount,listingRevision(plan.listingRevision),plan.targetCount,plan.listingPriceCents,plan.minOfferCents,plan.reuseOwnPhotos,plan.listing]);
@@ -29,7 +30,7 @@ class VintedSalesRuntime extends VintedAdapter {
   this.scope=scope;this.openPage=openPage;this.ensureProfile=ensureProfile;this.validateImage=validateImage;this.uiOwner=null;this.outbox=createSupplierOutbox();this.maintenanceAfter=new Map();
  }
  readiness(){
-  const base=super.readiness(),publish=typeof this.openPage==='function'&&typeof this.validateImage==='function';return {...base,vinted:'partial',salesOnly:true,capabilities:{...base.capabilities,publish,autoOpenProfile:publish&&typeof this.ensureProfile==='function',messages:false,offers:false,saleConfirmation:false,shippingLabel:false,procurement:false},message:'启动后台后会自动打开计划对应环境，沿用原登录会话，核对账号并准备照片、填写商品和单次发布。登录失效或结果不明确会暂停。消息、报价和成交页面仍待真实联调；采购不在此模式中执行。'};
+  const base=super.readiness(),publish=typeof this.openPage==='function'&&typeof this.validateImage==='function';return {...base,vinted:'partial',salesOnly:true,capabilities:{...base.capabilities,publish,autoBindAccount:publish,autoOpenProfile:publish&&typeof this.ensureProfile==='function',messages:false,offers:false,saleConfirmation:false,shippingLabel:false,procurement:false},message:'启动后台后会自动打开计划对应环境，沿用原登录会话，读取本人身份并保留固定账号绑定，再准备照片、填写商品和单次发布。无需先手动核对账号；登录失效、身份变化或结果不明确会暂停。消息、报价和成交页面仍待真实联调；采购不在此模式中执行。'};
  }
  assertOwned({engine,job,signal},expected){
   const rows=engine.db.jobs.filter(row=>row.id===job.id),current=rows[0],plans=engine.db.plans.filter(row=>row.id===job.planId),plan=plans[0];
@@ -52,6 +53,21 @@ class VintedSalesRuntime extends VintedAdapter {
  step(context,name,expected){const {job}=this.assertOwned(context,expected);job.step=name;job.updatedAt=new Date().toISOString();context.engine.persist();context.engine.emit();}
  async inspectCatalog(profileId,options){return new VintedCatalog(this).inspect(profileId,options);}
  async inspectCurrentAccount(profileId,options){return new VintedAccount(this).inspectAccount(profileId,options);}
+ accountReader(){return new VintedAccount(this);}
+ async inspectInitialAccount(profileId,{signal,guard,tab,expectedAccount,expectedMemberId=expectedAccount?.memberId}){
+  const page=await this.read(profileId,{signal,tab});guard();
+  const mobile=page.elements.some(row=>row.tag==='button'&&['Menu ouvert','Menu fermé'].includes(String(row.label||'').trim()));
+  if(!mobile)return this.inspectCurrentAccount(profileId,{signal,expectedAccount,closeMenu:true});
+  const reader=this.accountReader(),candidate=await reader.inspectOwnProfileLink(profileId,{signal});guard();
+  if(candidate.profileId!==profileId||candidate.tabId!==tab.id||candidate.verified!==false||candidate.consistentReads!==2||candidate.expiresAt<=Date.now()||expectedMemberId&&candidate.memberId!==expectedMemberId)throw fail('ACCOUNT_CHANGED','本人主页候选与原环境或账号身份不一致');
+  const clicked=await reader.clickOwnProfileLink(profileId,candidate,{signal});guard();
+  if(clicked.profileId!==profileId||clicked.tabId!==tab.id||![candidate.profileHref,candidate.profileURL].includes(clicked.url))throw fail('ACCOUNT_CHANGED','原生点击后未进入该账号本人的个人主页');
+  const ready=await this.openPage(profileId,clicked.url,{signal,guard,jobId:this.scope.getStore()?.jobId,role:'identity-ready',tab});guard();
+  if(ready?.tab!==tab)throw fail('TAB_CHANGED','本人身份确认标签页已改变');
+  const observed=await this.inspectCurrentAccount(profileId,{signal,expectedAccount,requireOwnProfileHeading:true,closeMenu:true});guard();
+  if(candidate.expiresAt<=Date.now()||observed.memberId!==candidate.memberId||observed.profileURL!==candidate.profileURL)throw fail('ACCOUNT_CHANGED','本人主页与原手机菜单身份不一致');
+  return observed;
+ }
  async prepareJobPhotos(engine,job,signal){return preparePhotosForJob(engine,job,{signal,validateImage:this.validateImage});}
  async trustedManifest(manifest){return createTrustedPhotoManifest(manifest);}
  async readPublicationInput(engine,id,signal,guard){return publicationInput(engine,id,signal,guard);}
@@ -66,8 +82,10 @@ class VintedSalesRuntime extends VintedAdapter {
   return this.scope.run(owner,async()=>{
    let submitted=false,ownedTab=null;
    const guard=()=>this.assertOwned({...context,job},expected);
-   let account;const identityGuard=()=>{
-    guard();const latest=this.account(engine,profileId);if(latest.memberId!==account.memberId||latest.profileURL!==account.profileURL)throw fail('ACCOUNT_CHANGED','环境登录绑定已改变');
+   let account,initialIdentity;const identityGuard=()=>{
+    guard();const latest=accountExpectation(engine,profileId);
+    if(account){const current=this.account(engine,profileId);if(current.memberId!==account.memberId||current.profileURL!==account.profileURL||latest.memberId!==account.memberId||context.job.accountMemberId!==undefined&&context.job.accountMemberId!==account.memberId)throw fail('ACCOUNT_CHANGED','环境或原任务登录绑定已改变');}
+    else if(latest.memberId!==initialIdentity.memberId)throw fail('ACCOUNT_CHANGED','确认登录期间原账号绑定已改变');
    };
    const accountGuard=()=>{
     identityGuard();
@@ -76,7 +94,7 @@ class VintedSalesRuntime extends VintedAdapter {
    };
    const go=async(url,role)=>{accountGuard();ownedTab=null;const opened=await this.openPage(profileId,url,{signal,guard:accountGuard,jobId:job.id,role});ownedTab=opened?.tab;if(!ownedTab)throw fail('PAGE_CHANGED','后台页面没有返回原标签回执');accountGuard();};
    try{
-    account=this.account(engine,profileId);
+    initialIdentity=accountExpectation(engine,profileId);account=engine.db.marketAccounts.some(row=>row.profileId===profileId)?this.account(engine,profileId):null;
     identityGuard();
     if(plan.activeListingId||engine.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&isPublicationOpen(row)))throw fail('PUBLICATION_EXISTS','原商品或提交记录尚未关闭，不能再次刊登');
     const missing=missingListingFields(plan.listing),labels={title:'标题',description:'商品描述',condition:'成色',brand:'品牌',color:'颜色',parcel:'包裹规格',categoryPath:'完整商品分类'};
@@ -87,7 +105,15 @@ class VintedSalesRuntime extends VintedAdapter {
     }
     accountGuard();
     this.step(context,'check_catalog',expected);
+    if(!account){
+     await go('https://www.vinted.fr/','identity');
+     const observed=await this.inspectInitialAccount(profileId,{signal,guard:accountGuard,tab:ownedTab,expectedAccount:initialIdentity.account,expectedMemberId:initialIdentity.memberId});accountGuard();
+     if(initialIdentity.memberId&&observed.memberId!==initialIdentity.memberId)throw fail('ACCOUNT_CHANGED','当前登录账号与原任务身份不一致');
+     account=engine.bindJobAccount(job.id,observed,{signal,guard});accountGuard();
+    }
     await go(account.profileURL,'catalog');
+    const ownerAccount=await this.inspectCurrentAccount(profileId,{signal,expectedAccount:account,closeMenu:true});accountGuard();
+    account=engine.bindJobAccount(job.id,ownerAccount,{signal,guard});accountGuard();
     const catalog=await this.inspectCatalog(profileId,{expectedAccount:account,title:plan.listing.title,signal});accountGuard();
     if(catalog.complete!==true)throw fail('CATALOG_INCOMPLETE',catalog.reason||'衣橱未完整加载，无法核对是否已有相同商品');
     if(catalog.duplicate!==false)throw fail('LISTING_EXISTS','该账号衣橱中已有相同标题的商品，已停止重复刊登');

@@ -5,7 +5,7 @@ const MAX_BYTES=2*1024*1024,MAX_DIMENSION=640,MAX_SOURCE_SIDE=8192,MAX_SOURCE_PI
 const COVER_FIELDS=['displayImageUrl','thumbnailUrl','thumbnail_url','coverImageUrl','cover_image_url','coverUrl','cover_url','imageUrl','image_url'];
 const MIME=new Set(['image/jpeg','image/png','image/webp']);
 function failure(code='PRODUCT_DISPLAY_UNAVAILABLE'){
- const messages={PRODUCT_DISPLAY_UNAVAILABLE:'商品展示图暂不可用。',PRODUCT_DISPLAY_CHANGED:'商品或货盘来源已改变，请刷新商品后重试。',PRODUCT_DISPLAY_BUSY:'展示图读取繁忙，请稍后重试。',PRODUCT_DISPLAY_TIMEOUT:'展示图读取超时，请稍后重试。'};
+ const messages={PRODUCT_DISPLAY_UNAVAILABLE:'商品展示图暂不可用。',PRODUCT_DISPLAY_DECODE_FAILED:'商品展示图解码失败，请重试展示图。',PRODUCT_DISPLAY_CHANGED:'商品或货盘来源已改变，请刷新商品后重试。',PRODUCT_DISPLAY_BUSY:'展示图读取繁忙，请稍后重试。',PRODUCT_DISPLAY_TIMEOUT:'展示图读取超时，请稍后重试。'};
  return Object.assign(Error(messages[code]||messages.PRODUCT_DISPLAY_UNAVAILABLE),{code});
 }
 function ensure(value,code){if(!value)throw failure(code);}
@@ -77,7 +77,9 @@ function createProductDisplayService({normalizeImage,fetchImpl=globalThis.fetch,
    guard(engine,original,signal);const base=new URL(original.baseURL),url=new URL(original.source,base),api=url.origin===base.origin&&(url.pathname===base.pathname||url.pathname.startsWith(base.pathname+'/'));let bytes;
    if(api){ensure(authenticatedImageRoute(url,base,original.productId));const client=engine.client();ensure(client&&typeof client.download==='function');bytes=await client.download(url.href,{signal,maxBytes:MAX_BYTES});}
    else{ensure(url.protocol==='https:'&&!url.username&&!url.password&&!url.hash);const response=await fetchImpl(url.href,{method:'GET',headers:{},credentials:'omit',referrerPolicy:'no-referrer',redirect:'error',signal});try{bytes=await readPublic(response,url.href,signal);}catch(error){await response?.body?.cancel?.().catch(()=>{});throw error;}}
-   guard(engine,original,signal);imageInfo(bytes);const converted=await normalizeImage(bytes,{maxDimension:MAX_DIMENSION});guard(engine,original,signal);return {productId:original.productId,...normalizedPreview(converted)};
+   guard(engine,original,signal);imageInfo(bytes);let converted;
+   try{converted=await normalizeImage(bytes,{maxDimension:MAX_DIMENSION,signal});}catch{guard(engine,original,signal);throw failure('PRODUCT_DISPLAY_DECODE_FAILED');}
+   guard(engine,original,signal);try{return {productId:original.productId,...normalizedPreview(converted)};}catch{throw failure('PRODUCT_DISPLAY_DECODE_FAILED');}
   }));
  }
  return {async preview(engine,productId){
@@ -86,7 +88,7 @@ function createProductDisplayService({normalizeImage,fetchImpl=globalThis.fetch,
    const stamp=now();for(const [key,entry] of cache)if(entry.expiresAt<=stamp)cache.delete(key);const cached=cache.get(original.key);if(cached){cache.delete(original.key);cache.set(original.key,cached);return {...cached.value};}
    let pending=inflight.get(original.key);if(!pending){pending=load(engine,original).then(value=>{guard(engine,original);cache.set(original.key,{value,expiresAt:now()+CACHE_MS});while(cache.size>CACHE_SIZE)cache.delete(cache.keys().next().value);return value;});inflight.set(original.key,pending);pending.finally(()=>{if(inflight.get(original.key)===pending)inflight.delete(original.key);}).catch(()=>{});}
    const result=await pending;guard(engine,original);return {...result};
-  }catch(error){if(['PRODUCT_DISPLAY_CHANGED','PRODUCT_DISPLAY_BUSY','PRODUCT_DISPLAY_TIMEOUT'].includes(error?.code))throw failure(error.code);throw failure();}
+  }catch(error){if(['PRODUCT_DISPLAY_CHANGED','PRODUCT_DISPLAY_BUSY','PRODUCT_DISPLAY_TIMEOUT','PRODUCT_DISPLAY_DECODE_FAILED'].includes(error?.code))throw failure(error.code);throw failure();}
  }};
 }
 module.exports={productCoverSource,createProductDisplayService};

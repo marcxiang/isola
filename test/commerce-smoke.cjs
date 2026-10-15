@@ -37,7 +37,8 @@ module.exports = async function commerceSmoke(api, check) {
   });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
   const baseURL = `http://127.0.0.1:${server.address().port}/api/v1`;
-  let view, wrongWindow, profile, engine, originalDB, originalConnection, plan, originalThrottle;
+  let view, wrongWindow, profile, engine, originalDB, originalConnection, plan, originalThrottle, fixtureSession;
+  const browserRequests=[];
   const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
   const waitFor = async (predicate,message) => {
     const deadline = Date.now()+8000;
@@ -164,19 +165,26 @@ module.exports = async function commerceSmoke(api, check) {
       return {wrongAccountRejected:true,sourceChangeRejected:true,sameAccountRotationPreservedPlan:true};
     });
 
-    await check('sales runtime keeps an unverified account queued before opening its profile with zero writes',async()=>{
+    await check('sales runtime opens its original environment and pauses unreadable identity before any photo claim or publication',async()=>{
+      fixtureSession=api.sesFor(profile);
+      fixtureSession.protocol.handle('https',request=>{
+        const url=new URL(request.url);browserRequests.push({method:request.method,origin:url.origin,path:url.pathname});
+        if(request.method!=='GET'||url.href!=='https://www.vinted.fr/')return new Response('Isolated fixture: no external traffic is forwarded',{status:403});
+        return new Response('<!doctype html><html lang="fr"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Fixture Vinted non connecté</title></head><body><main><h1>Connecte-toi</h1><p>Local unsigned-in fixture. No account menu, images, or publication controls.</p></main></body></html>',{headers:{'content-type':'text/html; charset=utf-8'}});
+      });
+      await invoke('savePlan',{...plan,listing:{...plan.listing,brand:'Sans marque',color:'Noir',parcel:'Moyen'}});plan=engine.db.plans.find(row=>row.id===plan.id);
       await invoke('setPlanEnabled',plan.id,true);
       const before=requests.length;
       await view.webContents.executeJavaScript(`document.querySelector('#run-once').click()`);
-      await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='queued'&&job.blockedReason==='ACCOUNT_RECHECK_REQUIRED'),'unverified account waiting state');await frames();
-      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'queued');assert.equal(job.blockedReason,'ACCOUNT_RECHECK_REQUIRED');assert.match(job.error,/账号中心.*核对/);assert.equal(api.windows.has(profile.id),false);assert.equal(job.mutationPending,false);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
+      await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='needs_review'&&job.blockedReason==='ACCOUNT_UNVERIFIED')&&!engine.active.has(profile.id)&&!engine.ticking,'unsigned-in account to pause the original job after native identity read');await frames();
+      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'needs_review');assert.equal(job.blockedReason,'ACCOUNT_UNVERIFIED');assert.match(job.error,/账号|头像|登录/);assert.equal(api.windows.has(profile.id),true);assert.equal(api.windows.get(profile.id).profile.id,profile.id);assert.ok(browserRequests.some(request=>request.method==='GET'&&request.origin==='https://www.vinted.fr'&&request.path==='/'),'The automatic native preflight must read the intercepted homepage');assert.equal(job.accountMemberId,undefined);assert.equal(job.mutationPending,false);assert.equal(job.operation,null);assert.equal(job.result,null);assert.equal(engine.db.marketAccounts.length,0);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.photoPreparations.length,0);assert.equal(engine.db.publications.submissions.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
       assert.equal(requests.length,before);assert.equal(requests.filter(request=>request.method!=='GET').length,0);
       await view.webContents.executeJavaScript(`document.querySelector('[data-page="jobs"]').click();document.querySelector('#jobs button').click()`);await frames();
       const receipt=await view.webContents.executeJavaScript(`({text:document.querySelector('#job-detail').innerText,reconcileHidden:document.querySelector('#reconcile-form').hidden})`);
-      assert.match(receipt.text,/待执行|等待|排队/);assert.match(receipt.text,/账号中心.*核对/);assert.equal(receipt.reconcileHidden,true);
+      assert.match(receipt.text,/需要核对/);assert.match(receipt.text,/账号|头像|登录/);assert.equal(receipt.reconcileHidden,true);
       await view.webContents.executeJavaScript(`document.querySelector('#job-dialog').close()`);
-      await invoke('runOnce');assert.equal(engine.db.jobs.length,1);assert.equal(requests.length,before);
-      return {jobState:job.state,writeRequests:0,duplicateJobs:0};
+      const reads=browserRequests.length;await invoke('runOnce');assert.equal(engine.db.jobs.length,1);assert.equal(engine.db.jobs[0].id,job.id);assert.equal(engine.db.jobs[0].dedupeKey,job.dedupeKey);assert.equal(browserRequests.length,reads);assert.equal(requests.length,before);assert.equal(engine.db.publications.submissions.length,0);
+      return {jobState:job.state,automaticOriginalEnvironment:true,unreadableIdentityPaused:true,photoClaims:0,writeRequests:0,publications:0,duplicateJobs:0};
     });
 
     await check('commerce IPC denies identical preload bridges from an unauthorized renderer',async()=>{
@@ -212,6 +220,8 @@ module.exports = async function commerceSmoke(api, check) {
     if(view&&!view.webContents.isDestroyed()&&typeof originalThrottle==='boolean')view.webContents.setBackgroundThrottling(originalThrottle);
     if(wrongWindow&&!wrongWindow.isDestroyed())wrongWindow.destroy();
     if(engine){if(engine.running)engine.setRunning(false);if(originalDB){engine.db=originalDB;engine.connection=originalConnection;engine.persist();engine.emit();}}
+    if(profile){const window=api.windows.get(profile.id);if(window&&!window.isDestroyed()){window.close();await waitFor(()=>!api.windows.has(profile.id),'automatic fixture environment to close');}}
+    if(fixtureSession)fixtureSession.protocol.unhandle('https');
     await api.showEnvironmentManager();
     if(profile)await api.deleteProfile(profile.id);
     server.closeAllConnections();await new Promise(resolve=>server.close(resolve));

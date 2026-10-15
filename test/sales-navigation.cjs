@@ -18,6 +18,9 @@ test('only the exact French target and session-refresh return URL are accepted',
  assert.equal(salesNavigationURL('https://www.vinted.fr/session-refresh?ref_url='+encodeURIComponent(target),target),'refresh');
  for(const value of ['https://vinted.fr/member/123456','https://www.vinted.fr/member/999','https://www.vinted.fr/member/123456#other','https://www.vinted.fr/member/login','https://www.vinted.fr/session-refresh?ref_url=%2Fmember%2F999','https://www.vinted.fr/session-refresh?ref_url=%2Fmember%2F123456&next=other','https://www.vinted.fr/session-refresh?ref_url=%2Fmember%2F123456&ref_url=%2Fmember%2F123456','https://www.vinted.fr/session-refresh?ref_url=https%3A%2F%2Fevil.invalid%2Fmember%2F123456','https://www.vinted.fr@evil.invalid/member/123456'])assert.equal(salesNavigationURL(value,target),null,value);
  assert.equal(salesNavigationURL('https://www.vinted.fr/items/new','https://www.vinted.fr/items/new'),'target');
+ assert.equal(salesNavigationURL('https://www.vinted.fr/','https://www.vinted.fr/'),'target');
+ assert.equal(salesNavigationURL('https://www.vinted.fr/session-refresh?ref_url=%2F','https://www.vinted.fr/'),'refresh');
+ for(const value of ['https://www.vinted.fr/?other=1','https://www.vinted.fr/member/123456','https://www.vinted.fr/member/login','https://www.vinted.fr/session-refresh?ref_url=%2Fmember%2F123456'])assert.equal(salesNavigationURL(value,'https://www.vinted.fr/'),null,value);
  assert.equal(salesNavigationURL('https://www.vinted.fr/items/123456','https://www.vinted.fr/items/123456'),null,'published item receipt must not use initial navigation recovery');
 });
 test('normal target load waits for main-frame completion and settles without issuing another request',async()=>{

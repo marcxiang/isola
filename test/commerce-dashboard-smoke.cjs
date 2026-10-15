@@ -81,18 +81,17 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       await js(`document.querySelector('[data-page="overview"]').click()`);
       return {environmentPricesPreserved:true,unassignedProductSelected:true};
     });
-    await check('operations account and publication checks keep unverified accounts explicit and never expose a publish action',async()=>{
-      assert.match(await js(`document.querySelector('[data-plan-id="listed"] .distribution-account').innerText`),/账号未核对/);
-      await js(`Array.from(document.querySelectorAll('[data-plan-id="listed"] button')).find(button=>button.textContent==='核对账号').click()`);await frames();
-      const calls=await js(`window.dashboardFixture.calls()`);assert.deepEqual(calls[calls.length-1],{name:'inspectAccount',args:['listed']});
-      assert.match(await js(`document.querySelector('[data-plan-id="listed"] .distribution-account').innerText`),/账号未核对/);
+    await check('operations removes manual account verification while keeping publication receipts separate',async()=>{
+      assert.match(await js(`document.querySelector('[data-plan-id="listed"] .distribution-account').innerText`),/执行时自动识别登录账号/);
+      assert.equal(await js(`Array.from(document.querySelectorAll('[data-plan-id="listed"] button')).some(button=>button.textContent==='核对账号')`),false);
+      assert.equal(await js(`window.dashboardFixture.calls().filter(row=>row.name==='inspectAccount').length`),0);
       const changed=structuredClone(fixture);changed.profiles[1].marketAccount={platform:'vinted-fr',username:'fixture_seller',verifiedAt:'2026-10-13T19:00:00Z'};await update(changed);
-      assert.equal(await js(`document.querySelector('[data-plan-id="listed"] .distribution-account').innerText`),'绑定账号：fixture_seller（历史核对）');
+      assert.equal(await js(`document.querySelector('[data-plan-id="listed"] .distribution-account').innerText`),'保存身份：fixture_seller');
       await js(`Array.from(document.querySelectorAll('[data-plan-id="listed"] button')).find(button=>button.textContent==='核对发布条件').click()`);await frames();
       const report=await js(`({open:document.querySelector('#preflight-dialog').open,title:document.querySelector('#preflight-title').innerText,body:document.querySelector('#preflight-detail').innerText,fillHidden:document.querySelector('#preflight-fill').hidden,buttons:Array.from(document.querySelectorAll('#preflight-dialog button'),button=>button.innerText)})`);
       assert.equal(report.open,true);assert.equal(report.title,'核对发布条件');assert.match(report.body,/当前页面缺少照片回执/);assert.match(report.body,/请先上传并核对照片/);assert.equal(report.fillHidden,true);assert.equal(report.buttons.includes('发布'),false);
       await js(`document.querySelector('#preflight-dialog').close()`);await update(fixture);
-      return {unverifiedAccountExplicit:true,onlyReadOnlyChecks:true,publishButtonAbsent:true};
+      return {automaticIdentityHint:true,manualAccountCheckRemoved:true,publishButtonAbsent:true};
     });
     await check('operations recovers after state refresh and shows unresolved work before completed targets',async()=>{
       await selectEnvironment('paris');
@@ -178,7 +177,7 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       const report=inspectQueue({...changed,requireVerifiedAccount:true,accounts:[{platform:'vinted-fr',profileId:'paris',memberId:'123'}],observedAccounts:[],maxConcurrent:2},{now:Date.parse(at)});changed.jobs[0].scheduling=report.jobs[0];assert.deepEqual(report.runnableJobIds,['auto-open-job']);assert.equal(report.jobs[0].reasonCode,'PROFILE_AUTO_OPEN');
       const before=(await js('window.dashboardFixture.calls()')).length;await update(changed);await js(`document.querySelector('[data-page="overview"]').click()`);
       let shown=await js(`({message:document.querySelector('#readiness-message').textContent,overview:document.querySelector('[data-plan-id="unpublished"]').textContent,plan:document.querySelector('.plan-card[data-listing-plan-id="unpublished"]').textContent})`);
-      assert.match(shown.message,/无需逐个手动打开/);for(const text of [shown.overview,shown.plan]){assert.match(text,/等待自动打开/);assert.match(text,/启动调度后执行/);assert.match(text,/无需手动打开/);}
+      assert.match(shown.message,/自动打开计划.*固定环境.*读取实际登录账号/);for(const text of [shown.overview,shown.plan]){assert.match(text,/等待自动打开/);assert.match(text,/启动调度后执行/);assert.match(text,/无需手动打开/);}
       await js(`Array.from(document.querySelectorAll('[data-plan-id="unpublished"] button')).find(button=>button.textContent==='任务记录').click();document.querySelector('#jobs button').click()`);await frames();assert.match(await js(`document.querySelector('#job-detail').textContent`),/下一步：自动打开环境/);
       changed.running=true;changed.jobs[0].state='running';changed.jobs[0].step='open_environment';changed.jobs[0].scheduling={state:'running',reasonCode:'OPERATION_ACTIVE'};await update(changed);
       for(const text of await js(`Array.from(document.querySelectorAll('[data-plan-id="unpublished"],.plan-card[data-listing-plan-id="unpublished"],#job-detail'),element=>element.textContent)`)){assert.match(text,/自动打开账号环境/);assert.doesNotMatch(text,/下一步：自动打开环境|等待自动打开/);}

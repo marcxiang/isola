@@ -28,6 +28,14 @@ test('automatic opening defers only fresh observation checks and does not accept
  const f=autoOpenFixture();f.jobs[0].accountMemberId='456';assert.equal(first(f).reasonCode,'ACCOUNT_CHANGED');
  for(const observation of [[],[{profileId:'profile-1',memberId:'123',verified:true,checkedAt:new Date(NOW-600000).toISOString(),documentKey:'old-doc'}]]){const fresh=autoOpenFixture();fresh.observedAccounts=observation;assert.equal(first(fresh).reasonCode,'PROFILE_AUTO_OPEN');fresh.profiles[0].status='running';assert.equal(first(fresh).reasonCode,'READY');assert.match(first(fresh).nextAction,/重新核对当前页面的登录身份/);fresh.readiness.capabilities.autoOpenProfile=false;assert.equal(first(fresh).reasonCode,'ACCOUNT_RECHECK_REQUIRED');}
 });
+test('native auto-binding explicitly admits a first listing without treating conflicting account evidence as fresh',()=>{
+ const f=autoOpenFixture();f.accounts=[];f.readiness.capabilities.autoBindAccount=true;
+ for(const status of ['closed','running']){f.profiles[0].status=status;const result=inspect(f);assert.deepEqual(result.runnableJobIds,['job-1']);assert.equal(result.jobs[0].reasonCode,'ACCOUNT_AUTO_BIND');assert.match(result.jobs[0].nextAction,/无需手动核对/);}
+ f.profiles[0].status='running';f.readiness.capabilities.autoOpenProfile=false;assert.equal(first(f).reasonCode,'ACCOUNT_AUTO_BIND');
+ f.readiness.capabilities.autoBindAccount=false;assert.equal(first(f).reasonCode,'ACCOUNT_NOT_BOUND');
+ f.readiness.capabilities.autoBindAccount=true;f.accounts=[{platform:'vinted-fr',profileId:'profile-1',memberId:'123'}];f.jobs[0].accountMemberId='456';assert.equal(first(f).reasonCode,'ACCOUNT_CHANGED');assert.deepEqual(inspect(f).runnableJobIds,[]);
+ f.jobs[0].accountMemberId='123';f.accounts.push({platform:'vinted-fr',profileId:'other-profile',memberId:'123'});assert.equal(first(f).reasonCode,'ACCOUNT_RECORD_CONFLICT');
+});
 test('automatic opening applies only to exact closed listing profiles with explicit per-profile support',()=>{
  for(const type of ['message','offer','sale_confirmation','fulfillment']){const f=autoOpenFixture();f.jobs[0].type=type;assert.equal(first(f).reasonCode,'PROFILE_NOT_OPEN');}
  for(const status of ['starting','closing','unavailable',undefined]){const f=autoOpenFixture();f.profiles[0].status=status;assert.equal(first(f).reasonCode,'PROFILE_NOT_OPEN');assert.deepEqual(inspect(f).runnableJobIds,[]);}

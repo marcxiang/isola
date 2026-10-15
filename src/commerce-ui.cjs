@@ -12,7 +12,7 @@
   const photoDialog = $('#plan-photos-dialog');
   const associationDialog = $('#publication-association-dialog');
   const withdrawalDialog = $('#publication-withdrawal-dialog');
-  const accountForm = $('#account-form'), accountDialog = $('#account-dialog'), accountVerifyDialog = $('#account-verify-dialog'), accountDeleteDialog = $('#account-delete-dialog');
+  const accountForm = $('#account-form'), accountDialog = $('#account-dialog'), accountDeleteDialog = $('#account-delete-dialog');
   const recordDeleteDialog = $('#record-delete-dialog');
   const reviewStates = new Set(['needs_review', 'pending_review', 'waiting_review', 'review', 'unknown', 'uncertain', 'blocked', 'failed', 'error']);
   const completedStates = new Set(['completed', 'complete', 'done', 'succeeded']);
@@ -30,14 +30,13 @@
   let jobPlanFilter = '', distributionLimit = 100;
   const photoReports = new Map();
   const publicationAttempts = new Map();
-  const planAccountReports = new Map();
   const productCoverRequests = new Map();
   const productCoverObserver = new IntersectionObserver(entries=>{for(const entry of entries)if(entry.isIntersecting){productCoverObserver.unobserve(entry.target);entry.target.loadProductCover?.();}},{rootMargin:'180px'});
-  let accountVerifyPlanId='',manualPhotoToken='',manualPhotoCount=0;
+  let manualPhotoToken='',manualPhotoCount=0;
   let publicationReviewedPlan = '';
   let associationPlanId = '', associationReport = null, associationReviewToken = '', associationError = '', associationResult = null;
   let withdrawalReview = null, withdrawalError = '', withdrawalResult = '', withdrawalTimer;
-  let accountVerifyId = '', accountDeleteId = '', accountProfileLocked = false;
+  let accountDeleteId = '', accountProfileLocked = false;
   let selectedPlanProfileId='',environmentTab='plans',pendingPlanProductId='',pendingPlanCreate=false,pendingEnvironmentContext=null,jobProfileFilter='',recordDeleteReview=null;
   const listingFields = {title:'listingTitle',description:'listingDescription',categoryPath:'listingCategoryPath',condition:'listingCondition',brand:'listingBrand',size:'listingSize',color:'listingColor',parcel:'listingParcel'};
   const listingNames = {title:'商品标题',description:'商品描述',categoryPath:'分类路径',condition:'成色',brand:'品牌',size:'尺码',color:'颜色',parcel:'包裹规格',price:'价格',photos:'图片'};
@@ -120,24 +119,22 @@
   function fillListing(form,listing={}) { for(const [key,field] of Object.entries(listingFields))form.elements[field].value=key==='categoryPath'?(listing[key]||[]).join(' / '):listing[key]||''; }
   function formListingMissing(form) { const listing=formListing(form);listing.categoryPath=listing.categoryPath.split('/').map(value=>value.trim()).filter(Boolean);return listingMissing({listing}); }
   function renderListingHint(form,node) { const missing=formListingMissing(form);node.textContent=missing.length?`自动上架前还需填写：${missing.map(key=>listingNames[key]).join('、')}。`:'基本商品资料已填齐；执行时还会核对分类所需尺码、页面选项与实际图片。'; }
-  function hasBoundAccount(profileId) { return !!find(state.profiles,profileId)?.marketAccount||state.accounts.some(account=>same(account.profileId,profileId)&&account.identity?.memberId); }
   function setupNext() {
     if(supplierRequired()&&(!state.settings.hasToken||!isConnected()))return {page:'settings',label:state.settings.hasToken?'检查货盘连接':'配置货盘连接'};
     if(!state.products.length)return {page:'inventory',label:state.settings.hasToken?'同步或添加商品':'自己添加商品'};
     if(!currentPlans().length&&!state.products.some(product=>{const saved=productListing(product);return saved&&!listingMissing(saved).length;}))return {page:'inventory',label:'填写商品资料'};
     if(!currentPlans().length)return {page:'plans',label:'创建或恢复上架计划'};
     const enabled=currentPlans().filter(plan=>plan.enabled),pending=enabled.filter(plan=>!plan.activeListingId&&number(plan.completedCount)<number(plan.targetCount));
-    if(pending.some(plan=>!hasBoundAccount(plan.profileId)))return {page:'accounts',label:'绑定并核对账号'};
     if(!enabled.length||pending.some(plan=>listingMissing(plan).length))return {page:'plans',label:'完善并启用计划'};
     if(!state.settings.backgroundEnabled)return {page:'settings',label:'允许后台调度'};
     return {page:state.running?'jobs':'overview',label:state.running?'查看执行进度':'查看上架流程'};
   }
   function renderListingWorkflow() {
-    const products=state.products,templates=products.filter(product=>{const saved=productListing(product);return saved&&!listingMissing(saved).length;}),enabled=currentPlans().filter(plan=>plan.enabled),ready=enabled.filter(plan=>!listingMissing(plan).length&&hasBoundAccount(plan.profileId)),review=state.jobs.filter(job=>reviewStates.has(job.state));
+    const products=state.products,templates=products.filter(product=>{const saved=productListing(product);return saved&&!listingMissing(saved).length;}),enabled=currentPlans().filter(plan=>plan.enabled),ready=enabled.filter(plan=>!listingMissing(plan).length),review=state.jobs.filter(job=>reviewStates.has(job.state));
     const rows=[
       {id:'connection',title:'执行规则',complete:!!state.settings.backgroundEnabled&&(!supplierRequired()||isConnected()),text:!state.settings.backgroundEnabled?'先允许后台执行并保存。手动商品无需货盘。':supplierRequired()&&!isConnected()?'使用货盘的计划还需检查连接。':'已允许执行；只有货盘商品需要货盘连接。',label:'设置执行规则',page:'settings'},
       {id:'products',title:'商品信息',complete:templates.length>0,text:!products.length?'自己添加商品和本地照片，也可连接并同步货盘。':`${products.length} 个商品 · ${templates.length} 份基本资料已齐。先保存资料，再分配计划。`,label:products.length?'编辑商品资料':'添加商品',page:'inventory'},
-      {id:'plans',title:'上架计划',complete:ready.length>0,text:`${enabled.length} 个启用计划 · ${ready.length} 个资料齐备且账号已绑定。执行时重新核对登录。`,label:'配置计划',page:'plans'},
+      {id:'plans',title:'上架计划',complete:ready.length>0,text:`${enabled.length} 个启用计划 · ${ready.length} 个商品资料齐备。开启计划后自动识别当前环境的登录账号。`,label:'配置计划',page:'plans'},
       {id:'execution',title:'自动上架',complete:state.jobs.some(job=>job.type==='listing'&&completedStates.has(job.state)),text:state.running?'按已开始的计划自动开窗、核对衣橱、上传照片、填写并提交，最后读取商品回执。':review.length?`${review.length} 个任务需核对原记录；其他计划按各自条件执行。`:'点击计划中的“启用并开始”即可执行；发布结果以商品回执为准。',label:state.running||review.length?'查看任务':'查看执行条件',page:state.running||review.length?'jobs':'plans'}
     ];
     const list=$('#listing-workflow-steps');list.replaceChildren();for(const row of rows){const item=el('li');item.dataset.step=row.id;item.dataset.complete=String(row.complete);item.append(el('h3','',row.title),badge(row.complete?'已配置':'待处理',row.complete?'good':'neutral'),el('p','',row.text),makeButton(row.label,()=>changePage(row.page)));list.append(item);}
@@ -277,29 +274,27 @@
     renderAccountControls();renderAccounts();renderDeletionControls();
   }
 
-  function accountsAvailable(){return ['saveAccount','deleteAccount','loginAccount','openAccount','verifyAccount'].every(key=>typeof api[key]==='function');}
-  function accountMutationPending(){return [...pending].some(key=>/^account-(?:save|login|delete|verify)/.test(key));}
+  function accountsAvailable(){return ['saveAccount','deleteAccount','loginAccount','openAccount'].every(key=>typeof api[key]==='function');}
+  function accountMutationPending(){return [...pending].some(key=>/^account-(?:save|login|delete)/.test(key));}
   function accountBusy(account){return account?.status==='logging_in'||[...pending].some(key=>key.startsWith('account-')&&key.endsWith('-'+account?.id));}
   function accountHasHistory(account){return !!account&&['plans','jobs','photoPreparations','publications'].some(key=>state[key].some(row=>same(row.profileId,account.profileId)));}
   function accountStatus(account){
     if(pending.has('account-login-'+account.id)||account.status==='logging_in')return {key:'logging_in',label:'正在登录',tone:'neutral'};
-    if(['logged_in','authenticated','verified'].includes(account.status))return {key:'logged_in',label:'最近登录已核验',tone:'good'};
-    if(['awaiting_user','awaiting_result','submitted','manual_required','needs_manual','challenge','uncertain'].includes(account.status))return {key:'attention',label:'需要手动接管',tone:'warn'};
-    if(['error','failed','blocked'].includes(account.status))return {key:'attention',label:'登录需要处理',tone:'warn'};
-    return {key:'saved',label:'待登录',tone:'neutral'};
+    if(['logged_in','authenticated','verified'].includes(account.status))return {key:'logged_in',label:'已有登录记录',tone:'good'};
+    if(['CHALLENGE_REQUIRED','INVALID_CREDENTIALS','LOGIN_OUTCOME_UNKNOWN'].includes(account.lastResult?.code))return {key:'attention',label:'请在窗口继续登录',tone:'warn'};
+    return {key:'saved',label:'登录资料已保存',tone:'neutral'};
   }
   function accountResultText(account){
     const result=account.lastResult;if(!result||result.status==='saved')return account.hasPassword?'登录密码已保存，打开环境后可尝试登录。':'尚未保存密码；可编辑补充，或打开环境手动登录。';
-    if(['logged_in','authenticated','verified'].includes(result.status))return '最近一次账号菜单读取已完成；当前会话仍以实际窗口为准。';
-    const currentFailure={UNAVAILABLE:'本次账号核对暂未完成，请保持固定环境显示、等待页面就绪后再核对。',STOPPED:'本次账号核对已停止，请检查当前窗口后重新核对。',IDENTITY_UNVERIFIED:'本次尚未读到可核对的本人身份，请检查当前窗口的登录和 Profil 页面。',ACCOUNT_CHANGED:'当前窗口账号与保存的绑定不同，请核对账号归属。',ACCOUNT_CONFLICT:'这个 Vinted 身份已绑定其他环境，请核对原绑定。',PAGE_CHANGED:'本次核对时页面发生变化，请保持当前环境稳定后再核对。'};
-    if(currentFailure[result.code])return currentFailure[result.code]+(account.loginReviewPending?' 原登录结果仍待核对，不会自动重复提交登录。':'');
-    if(['awaiting_user','awaiting_result','submitted','manual_required','needs_manual','challenge','uncertain'].includes(result.status)||/SUBMIT|UNCERTAIN|CHALLENGE|CAPTCHA|MANUAL|AWAIT|MFA|TWO_FACTOR/i.test(result.code||''))return '请手动接管当前窗口，完成登录或验证后点击“核对登录”；不要重复提交结果未明的登录。';
-    if(['error','failed','blocked'].includes(result.status))return '最近登录未完成，请检查账号资料并打开窗口处理；遇到验证请手动接管。';
-    return '已有登录操作记录，请打开固定环境核对当前页面。';
+    if(['logged_in','authenticated','verified'].includes(result.status))return '已有此环境的登录身份记录；自动执行前会检查实际会话。';
+    if(result.code==='CHALLENGE_REQUIRED')return '请打开当前环境完成验证码或安全验证；应用不会重复提交结果未明的登录。';
+    if(result.code==='INVALID_CREDENTIALS')return '请编辑登录资料，或在当前环境中手动登录。';
+    if(result.code==='LOGIN_OUTCOME_UNKNOWN'||account.loginReviewPending)return '请打开当前环境继续登录；自动执行前会读取实际会话，不会重复提交结果未明的登录。';
+    return '可直接设置并开启计划，执行时会自动识别当前环境的登录账号。';
   }
   function accountProfileText(profile){const os={windows:'Windows',macos:'macOS',linux:'Linux',android:'Android 模拟',ios:'iOS 兼容模拟'};return profile?profile.name+(profile.deviceModel?' · '+profile.deviceModel:profile.operatingSystem&&os[profile.operatingSystem]?' · '+os[profile.operatingSystem]:''):'环境不可用';}
-  function accountNotice(result,fallback){return typeof result?.message==='string'&&result.message.length<=300?result.message:fallback;}
-  function accountFailure(error,fallback){const message=cleanError(error);const known=["这个账号正在登录或核对，请等待这一步结束后修改资料。","此账号有关联运营记录，不能换绑环境；可以修改登录资料，或仅删除本机登录资料并保留原运营绑定。","原运营记录的账号身份尚未完整保存在运营绑定中，请先核对当前账号，再删除本机登录资料。","本机登录资料与原运营账号绑定不一致，请先核对原身份；原资料和任务记录已保留。","请先关闭需要换绑的浏览器环境，再创建或换绑账号。","账号或运营存储无法安全保存，请检查磁盘并重启应用后再修改。","应用正在关闭，请重新打开后修改本机登录资料。","当前账号步骤尚未结束，或原绑定需要先核对；本机登录资料已保留。",'账号正在操作，请等待当前步骤结束。','账号正在登录或核对，请等待当前操作结束','账号关联了运营记录，不能删除、更换登录名或换绑环境。','请先关闭对应浏览器环境，再删除账号或换绑。','当前 Vinted 身份与固定账号不一致，已保留原绑定。','此 Vinted 账号已绑定其他环境，请使用原环境。','账号保存失败，请检查输入、环境和本机加密状态。'];return known.includes(message)?message:fallback;}
+  function accountNotice(result,fallback){if(result?.result?.verified===false)return accountResultText(result.account||{});if(result?.result?.verified===true)return '已识别当前环境的登录账号，可继续使用。';return typeof result?.message==='string'&&result.message.length<=300?result.message:fallback;}
+  function accountFailure(error,fallback){const message=cleanError(error);const known=["这个账号正在登录或核对，请等待这一步结束后修改资料。","此账号有关联运营记录，不能换绑环境；可以修改登录资料，或仅删除本机登录资料并保留原运营绑定。","原运营记录的账号身份尚未完整保存在运营绑定中，请先核对当前账号，再删除本机登录资料。","本机登录资料与原运营账号绑定不一致，请先核对原身份；原资料和任务记录已保留。","请先关闭需要换绑的浏览器环境，再创建或换绑账号。","账号或运营存储无法安全保存，请检查磁盘并重启应用后再修改。","应用正在关闭，请重新打开后修改本机登录资料。","当前账号步骤尚未结束，或原绑定需要先核对；本机登录资料已保留。",'账号正在操作，请等待当前步骤结束。','账号正在登录或核对，请等待当前操作结束','账号关联了运营记录，不能删除、更换登录名或换绑环境。','请先关闭对应浏览器环境，再删除账号或换绑。','当前 Vinted 身份与固定账号不一致，已保留原绑定。','此 Vinted 账号已绑定其他环境，请使用原环境。','账号保存失败，请检查输入、环境和本机加密状态。'];if(!known.includes(message))return fallback;if(message.includes('账号身份尚未完整保存在运营绑定'))return '原账号身份尚未同步到运营绑定；开启此环境的计划后会自动识别身份，再删除本机资料。';if(message.includes('原运营账号绑定不一致')||message.includes('Vinted 身份与固定账号不一致'))return '当前窗口账号与原运营身份不同，请在原环境登录正确账号；原资料和任务记录保留。';return message.replaceAll('正在登录或核对','正在登录').replaceAll('原绑定需要先核对','原绑定需要由执行流程自动识别');}
   async function accountRequest(key,work,success,failure){
     if(pending.has(key))return {ok:false};pending.add(key);renderControls();
     try{const result=await work();await refresh();toast(accountNotice(result,success));return {ok:true,result};}
@@ -307,33 +302,31 @@
     finally{pending.delete(key);renderControls();}
   }
   function renderAccountControls(){
-    const available=accountsAvailable(),busy=accountMutationPending(),blocked=!!state.running||!!state.configBusy||!!state.faulted,edited=find(state.accounts,accountForm.elements.id.value),localBlocked=!!state.faulted||!!edited&&accountBusy(edited);
+    const available=accountsAvailable(),edited=find(state.accounts,accountForm.elements.id.value),localBlocked=!!state.faulted||!!edited&&accountBusy(edited);
     $('#new-account').disabled=!available||pending.has('account-save')||!!state.faulted||!selectedPlanProfileId||state.accounts.some(account=>same(account.profileId,selectedPlanProfileId));
-    $('#account-service-note').textContent=!available?'当前连接尚未提供账号管理接口。':state.faulted?'本机运营存储异常，账号操作已停止。':state.running?'后台调度中，仍可编辑账号或删除本机登录资料；操作网页登录前请先暂停调度。':state.configBusy?'正在处理运营操作，仍可编辑未在核验中的账号资料。':!state.profiles.length?'还没有设备环境，请先在浏览器环境管理中创建。':'';
+    $('#account-service-note').textContent=!available?'当前连接尚未提供账号管理接口。':state.faulted?'本机运营存储异常，账号操作已停止。':state.running?'后台调度中，仍可编辑账号或删除本机登录资料；操作网页登录前请先暂停调度。':state.configBusy?'正在处理运营操作，仍可编辑空闲账号的登录资料。':!state.profiles.length?'还没有设备环境，请先在浏览器环境管理中创建。':'';
     const saving=pending.has('account-save');for(const field of accountForm.elements)if(field.name)field.disabled=saving;
     accountForm.elements.profileId.disabled=saving||accountProfileLocked;
     $('#account-save').disabled=!available||saving||localBlocked;$('#account-save').textContent=saving?'正在保存…':'保存账号';
-    $('#account-verify-confirm').disabled=!available||busy||blocked||!find(state.accounts,accountVerifyId);
     const removing=find(state.accounts,accountDeleteId);$('#account-delete-confirm').disabled=!available||!!state.faulted||!removing||accountBusy(removing)||pending.has('account-delete-'+accountDeleteId);
   }
   function renderAccounts(){
     const root=$('#accounts-list'),query=$('#account-search').value.trim().toLowerCase(),filter=$('#account-status').value;root.replaceChildren();
     const ownAccounts=state.accounts.filter(account=>same(account.profileId,selectedPlanProfileId)),accounts=ownAccounts.filter(account=>(!query||[account.label,account.login,account.identity?.username,profileName(account.profileId)].join(' ').toLowerCase().includes(query))&&(!filter||accountStatus(account).key===filter));
     $('#account-count').textContent=accounts.length+' / '+ownAccounts.length+' 个账号';$('#nav-account-count').textContent=state.accounts.length;$('#nav-account-count').hidden=!state.accounts.length;
-    if(!accounts.length){root.append(empty(ownAccounts.length?'没有符合筛选条件的账号。':'当前环境还没有账号，在这里添加后完成登录与核对。'));return;}
+    if(!accounts.length){root.append(empty(ownAccounts.length?'没有符合筛选条件的账号。':'可在这里保存登录资料，也可直接使用当前环境已有的登录会话。'));return;}
     for(const account of accounts){
       const profile=find(state.profiles,account.profileId),status=accountStatus(account),card=el('article','account-card'),heading=el('div','account-card-heading'),title=el('div','account-title'),metrics=el('dl','account-metrics');card.dataset.accountId=String(account.id);
       title.append(el('h3','',account.label||'Vinted 账号'),el('p','account-login-name',account.login));heading.append(title,badge(status.label,status.tone));card.append(heading);
-      const identity=account.identity;for(const [name,value] of [['固定环境',accountProfileText(profile)],['环境状态',profile?{closed:'已关闭',running:'运行中',starting:'正在启动'}[profile.status]||'待确认':'环境不可用'],['保存密码',account.hasPassword?'已保存':'未保存'],['上次登录',when(account.lastLoginAt)],['最近核验',identity?identity.username+' · '+when(identity.verifiedAt):'尚未核验']])metrics.append(el('dt','',name),el('dd','',value));card.append(metrics);
+      const identity=account.identity;for(const [name,value] of [['固定环境',accountProfileText(profile)],['环境状态',profile?{closed:'已关闭',running:'运行中',starting:'正在启动'}[profile.status]||'待确认':'环境不可用'],['保存密码',account.hasPassword?'已保存':'未保存'],['上次登录',when(account.lastLoginAt)],['已保存身份',identity?identity.username:'执行时自动识别']])metrics.append(el('dt','',name),el('dd','',value));card.append(metrics);
       card.append(el('p','account-result '+(status.key==='attention'?'needs-attention':''),accountResultText(account)));
       if(accountHasHistory(account))card.append(el('p','account-history-note','这个环境已有运营记录，账号与原环境的历史关联将保留。'));
       const actions=el('div','account-actions'),blocked=!accountsAvailable()||!!state.faulted||!!state.running||!!state.configBusy,busy=accountBusy(account);
       const login=makeButton(pending.has('account-login-'+account.id)?'正在登录…':'打开并登录',()=>accountRequest('account-login-'+account.id,()=>api.loginAccount(account.id),'已打开固定环境，请查看登录结果。'),'primary');login.disabled=blocked||!profile||busy||accountMutationPending();
       const open=makeButton('手动接管',()=>accountRequest('account-open-'+account.id,()=>api.openAccount(account.id),'已打开固定环境，请手动处理当前页面。'));open.disabled=typeof api.openAccount!=='function'||!profile||pending.has('account-open-'+account.id)||!!state.faulted;
-      const verify=makeButton('核对登录',()=>confirmAccount(account,'verify'));verify.disabled=blocked||!profile||busy||accountMutationPending();
       const edit=makeButton('编辑',()=>editAccount(account));edit.disabled=!!state.faulted||busy||pending.has('account-save');
       const remove=makeButton('删除本机资料',()=>confirmAccount(account,'delete'));remove.disabled=!!state.faulted||busy||pending.has('account-save');remove.title='删除本机保存的账号登录资料，原环境会话与运营绑定保留。';
-      actions.append(login,open,verify,edit,remove);card.append(actions);root.append(card);
+      actions.append(login,open,edit,remove);card.append(actions);root.append(card);
     }
   }
   function editAccount(account){
@@ -342,19 +335,10 @@
     const fixedProfileId=account?.profileId||selectedPlanProfileId;fields.profileId.replaceChildren(new Option('当前自动化环境',''));for(const profile of state.profiles.filter(row=>same(row.id,fixedProfileId))){const option=new Option(accountProfileText(profile),String(profile.id));fields.profileId.add(option);}fields.profileId.value=fixedProfileId;
     accountProfileLocked=true;
     $('#account-title').textContent=account?'编辑账号':'添加账号';$('#account-password-hint').textContent=account?.hasPassword?'密码已经保存，留空会保留原密码；输入新密码会替换。密码不会回显。':'可以暂不保存密码，使用已有会话或手动登录；自动填写密码前需在这里补充。';
-    $('#account-profile-hint').textContent=account?'可以修改名称、登录邮箱和保存密码；原已核对身份与运营绑定保留。':'账号固定在当前自动化环境中，可直接保存当前窗口使用的登录资料。';$('#account-error').hidden=true;renderAccountControls();accountDialog.showModal();
+    $('#account-profile-hint').textContent=account?'可以修改名称、登录邮箱和保存密码；原身份与运营绑定保留。':'账号固定在当前自动化环境中，可直接保存当前窗口使用的登录资料。';$('#account-error').hidden=true;renderAccountControls();accountDialog.showModal();
   }
   function accountConfirmationSummary(root,account){root.replaceChildren();const grid=el('dl','detail-grid');for(const [label,value] of [['账号名称',account.label],['登录名',account.login],['固定环境',accountProfileText(find(state.profiles,account.profileId))]])grid.append(el('dt','',label),el('dd','',value));root.append(grid);}
-  function confirmAccount(account,action,planId=''){if(action==='verify'){accountVerifyId=String(account.id);accountVerifyPlanId=String(planId);$('#account-verify-feedback').hidden=true;accountConfirmationSummary($('#account-verify-summary'),account);renderAccountControls();accountVerifyDialog.showModal();}else{accountDeleteId=String(account.id);$('#account-delete-error').hidden=true;accountConfirmationSummary($('#account-delete-summary'),account);renderAccountControls();accountDeleteDialog.showModal();}}
-  function setPlanAccountReport(id,status,message){if(!id)return;planAccountReports.set(String(id),{status,message});renderPlans();renderDistribution();}
-  async function inspectPlanAccount(id){
-    const plan=find(state.plans,id);if(!plan||pageActionPending()||accountMutationPending())return;
-    const saved=state.accounts.find(account=>same(account.profileId,plan.profileId));
-    if(saved&&typeof api.verifyAccount==='function'){confirmAccount(saved,'verify',id);return;}
-    setPlanAccountReport(id,'checking','正在读取当前环境的登录账号…');
-    try{const result=await request(`plan-preflight-account-${id}`,()=>api.inspectAccount(id));if(!result?.account?.memberId||!result.account.username)throw Error('没有读取到可核验的账号身份，请在账号中心核对登录。');setPlanAccountReport(id,'verified',`已核对账号：${result.account.username} · ID ${result.account.memberId}${result.usernameSource==='saved-binding'?'（用户名沿用已验证绑定）':''}`);}
-    catch(error){setPlanAccountReport(id,'failed',cleanError(error));}
-  }
+  function confirmAccount(account){accountDeleteId=String(account.id);$('#account-delete-error').hidden=true;accountConfirmationSummary($('#account-delete-summary'),account);renderAccountControls();accountDeleteDialog.showModal();}
   function renderSummary() {
     const active=currentPlans().filter(plan=>plan.enabled), attention=state.jobs.filter(job=>reviewStates.has(job.state));
     $('#stat-plans').textContent=active.length; $('#stat-profiles').textContent=`覆盖 ${new Set(active.map(plan=>plan.profileId)).size} 个环境`;
@@ -366,7 +350,7 @@
     const association=typeof api.inspectPublishedListing==='function'&&typeof api.associatePublishedListing==='function';
     $('#readiness').classList.toggle('ready',allReady);
     $('#readiness-title').textContent=available.length?(allReady?`${salesOnly()?'后台售卖':'后台业务'}流程可用`:'后台部分流程可用'):`${manualPublish?'手动上架可用':'资料准备可用'} · 后台业务待验证`;
-    $('#readiness-message').textContent=available.length?`后台可按计划执行${available.map(([name])=>name).join('、')}。${automaticListing()&&capabilities.autoOpenProfile===true?'上架时会自动打开已绑定的账号环境，无需逐个手动打开。':''}每个步骤核对账号、商品和回执；提交结果不明确时停止并保留原记录。`:manualPublish?'可准备资料和照片，逐项核对后手动发布一次。启动调度不会启用下方仍待验证的业务。':'可连接货盘、保存计划并准备资料和照片；当前版本尚未提供手动发布入口。';
+    $('#readiness-message').textContent=available.length?`后台可按计划执行${available.map(([name])=>name).join('、')}。${automaticListing()&&capabilities.autoOpenProfile===true?'上架时会自动打开计划的固定环境并读取实际登录账号。':''}每个步骤核对账号、商品和回执；提交结果不明确时停止并保留原记录。`:manualPublish?'可准备资料和照片，逐项核对后手动发布一次。启动调度不会启用下方仍待验证的业务。':'可连接货盘、保存计划并准备资料和照片；当前版本尚未提供手动发布入口。';
     const capabilityList=$('#readiness-capabilities');capabilityList.replaceChildren();
     for(const [name,available,detail] of [
       ['资料与照片',capabilities.inspect!==false&&typeof api.prepareDraft==='function'&&typeof api.uploadPhotos==='function','可准备'],
@@ -593,13 +577,12 @@
       for(const {plan,operation} of group.operations){
         const row=el('section','distribution-row');row.dataset.planId=String(plan.id);row.dataset.operation=operation.key;
         const heading=el('div','distribution-row-heading'), name=el('div','distribution-environment'), account=find(state.profiles,plan.profileId)?.marketAccount;
-        name.append(el('b','',profileName(plan.profileId)),el('small','','Vinted · 法国站 / EUR'),el('small','distribution-account',account?.platform==='vinted-fr'&&typeof account.username==='string'&&account.username&&account.verifiedAt?`绑定账号：${account.username}（历史核对）`:'账号未核对'));
+        name.append(el('b','',profileName(plan.profileId)),el('small','','Vinted · 法国站 / EUR'),el('small','distribution-account',account?.platform==='vinted-fr'&&typeof account.username==='string'&&account.username&&account.verifiedAt?`保存身份：${account.username}`:'执行时自动识别登录账号'));
         const states=el('div','distribution-badges');states.append(badge(operation.label,operation.tone),badge(plan.enabled?'计划已启用':'计划未启用'));heading.append(name,states);
         const metrics=el('dl','distribution-metrics');for(const [label,value] of [['上架价格',currency(plan.listingPriceCents)],['最低接受价格',currency(plan.minOfferCents)],['累计成交 / 目标',`${number(plan.completedCount)} / ${number(plan.targetCount)}`],['实际在售编号',plan.activeListingId?String(plan.activeListingId):publicationOccupied(plan)?'原发布结果待核对':'待发布 · 暂无回执']]){const metric=el('div','distribution-metric');metric.append(el('dt','',label),el('dd','',value));metrics.append(metric);}
         const next=el('div',`distribution-next ${operation.tone==='warn'?'warn':''}`);next.append(el('b','','下一步'),el('span','',operation.next));
         const actions=el('div','distribution-actions'), edit=makeButton('编辑计划',()=>editPlan(plan)), open=makeButton('打开刊登页',()=>request(`plan-open-${plan.id}`,()=>api.openListing(plan.id),'已打开对应环境的刊登页面')), photos=makeButton('照片与上传',()=>openPhotoPlan(plan.id)), records=makeButton('任务记录',()=>showPlanJobs(plan.id));
         edit.disabled=disabled;open.disabled=disabled||publicationOccupied(plan)||!find(state.profiles,plan.profileId);open.title=publicationOccupied(plan)?'已有在售或原提交记录，请核对原刊登。':'';photos.disabled=checking||!!state.faulted;actions.append(edit,open,photos,records);
-        if(typeof api.inspectAccount==='function'){const accountCheck=makeButton('核对账号',()=>inspectPlanAccount(plan.id));accountCheck.disabled=disabled||!!state.running;actions.append(accountCheck);}
         if(typeof api.inspectPublication==='function'){const publication=makeButton('核对发布条件',()=>inspectPlan(plan.id,'publication'));publication.disabled=disabled||!!state.running;actions.append(publication);}
         if(canInspectAssociation(plan.id)){const original=makeButton('核对原刊登',()=>openAssociation(plan.id));original.disabled=disabled||!!state.running;actions.append(original);}
         appendWithdrawalAction(actions,plan.id);
@@ -635,19 +618,17 @@
       const metrics=el('div','plan-metrics');
       for (const [name,value] of [['累计成交 / 目标',`${number(plan.completedCount)} / ${number(plan.targetCount)}`],['上架价格',currency(plan.listingPriceCents)],['最低接受价格',currency(plan.minOfferCents)],['当前商品',plan.activeListingId?'已有在售记录':occupied?'发布结果待核对':'暂无在售记录']]) { const metric=el('div');metric.append(el('span','',name),el('b','',value));metrics.append(metric); }
       const footer=el('div','plan-footer');footer.append(badge('每个 SKU 最多一个在售商品'),badge(plan.reuseOwnPhotos?'可复用自己的图片':'每次使用新图片'),badge(plan.autoReply?'自动回复规则已保存':'消息待人工处理'),badge(plan.autoAcceptOffers?'底价接受规则已保存':'报价待人工处理'));if(plan.status)footer.append(statusBadge(plan.status));
-      const config=el('section','listing-config-note'),missing=listingMissing(plan);config.append(badge(missing.length?'商品资料待补充':'基本商品资料已齐',missing.length?'warn':'good'),el('p','',missing.length?`还缺：${missing.map(key=>listingNames[key]).join('、')}。编辑计划补齐后再执行。`:'计划保留创建时的商品资料；执行时按当前网页逐项核对。'));if(!hasBoundAccount(plan.profileId))config.append(el('p','form-error','请先在账号中心为该环境绑定并核对 Vinted 账号。'));if(automaticListing())config.append(el('p','field-hint','点击“启用并开始”或“开始上架”后，自动打开原环境、核对衣橱、准备和上传照片、填写并发布；条件不足会显示原因。下方按钮用于手动检查或恢复。'));
+      const config=el('section','listing-config-note'),missing=listingMissing(plan);config.append(badge(missing.length?'商品资料待补充':'基本商品资料已齐',missing.length?'warn':'good'),el('p','',missing.length?`还缺：${missing.map(key=>listingNames[key]).join('、')}。编辑计划补齐后再执行。`:'计划保留创建时的商品资料；执行时按当前网页逐项核对。'));config.append(el('p','field-hint','使用当前固定环境的登录会话；开始执行时自动识别账号并检查原身份。'));if(automaticListing())config.append(el('p','field-hint','点击“启用并开始”或“开始上架”后，自动打开原环境、核对衣橱、准备和上传照片、填写并发布；条件不足会显示原因。下方按钮用于手动检查或恢复。'));
       card.append(head,metrics,config,renderPlanPublicationActions(plan,operation),renderPlanPhotoActions(plan),footer);list.append(card);
     }
   }
   function renderPlanPublicationActions(plan,operation) {
     const section=el('section','plan-publication-section'), heading=el('div','plan-photo-heading'), actions=el('div','photo-actions');
     heading.append(el('b','','刊登与回执'),badge(operation.label,operation.tone));section.append(heading,el('p','field-hint',operation.next));
-    const accountReport=planAccountReports.get(String(plan.id));if(accountReport){const note=el('div','account-check-feedback');note.setAttribute('role','status');note.dataset.accountCheck=accountReport.status;note.append(badge(accountReport.status==='verified'?'最近账号核对成功':accountReport.status==='checking'?'正在核对账号':'账号核对未完成',accountReport.status==='verified'?'good':accountReport.status==='checking'?'neutral':'warn'),el('p','',accountReport.message));section.append(note);}
     const blocked=pageActionPending()||!!state.running||!!state.faulted||!!state.configBusy;
     if(canInspectAssociation(plan.id)){const original=makeButton('核对原刊登',()=>openAssociation(plan.id),'primary');original.disabled=blocked;actions.append(original);}
     appendWithdrawalAction(actions,plan.id);
     if(listingReceiptURL(plan)&&typeof api.openActiveListing==='function'){const view=makeButton('查看在售商品',()=>request(`plan-open-${plan.id}`,()=>api.openActiveListing(plan.id),'已在对应环境打开在售商品'));view.disabled=blocked;actions.append(view);}
-    if(typeof api.inspectAccount==='function'){const account=makeButton('核对账号',()=>inspectPlanAccount(plan.id));account.disabled=blocked;actions.append(account);}
     if(typeof api.inspectPublication==='function'){const inspect=makeButton('核对发布条件',()=>inspectPlan(plan.id,'publication'));inspect.disabled=blocked||publicationOccupied(plan);inspect.title=publicationOccupied(plan)?'已有原提交或在售记录，请核对原刊登。':'只读取并核对当前页面，不会点击发布。';actions.append(inspect);}
     actions.append(makeButton('任务记录',()=>showPlanJobs(plan.id)));section.append(actions);return section;
   }
@@ -800,9 +781,13 @@
     node.replaceChildren(el('span','product-cover-placeholder',product.source==='local'?'本地商品':product.displayImageUrl?'展示图加载中…':'暂无商品展示图'));
     if(product.source==='local'||!product.displayImageUrl||typeof api.productCover!=='function')return;
     const key=JSON.stringify([state.settings.baseURL,state.connection.checkedAt,product.id,product.sku,product.revision,product.displayImageUrl]);
-    node.dataset.productCoverKey=key;node.loadProductCover=()=>{
-      if(!node.isConnected)return;if(!productCoverRequests.has(key)){const pendingCover=Promise.resolve().then(()=>api.productCover(String(product.id))).finally(()=>productCoverRequests.delete(key));productCoverRequests.set(key,pendingCover);}
-      productCoverRequests.get(key).then(result=>{if(!node.isConnected||node.dataset.productCoverKey!==key)return;const latest=find(state.products,product.id);if(!latest||latest.displayImageUrl!==product.displayImageUrl)return;if(!result?.dataURL){node.replaceChildren(el('span','product-cover-placeholder','暂无商品展示图'));return;}if(!same(result.productId,product.id)||typeof result.dataURL!=='string'||result.dataURL.length>3*1024*1024||!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(result.dataURL)||![result.width,result.height].every(n=>Number.isSafeInteger(n)&&n>0&&n<=640))throw Error('展示图回执无效');const image=el('img');image.alt=(product.name||'商品')+' · 商品展示图';image.width=result.width;image.height=result.height;image.src=result.dataURL;image.addEventListener('error',()=>node.replaceChildren(el('span','product-cover-placeholder','展示图暂不可用')),{once:true});node.replaceChildren(image);}).catch(()=>{if(node.isConnected&&node.dataset.productCoverKey===key)node.replaceChildren(el('span','product-cover-placeholder','展示图暂不可用'));});
+    node.dataset.productCoverKey=key;node.coverLoading=false;
+    const current=()=>node.isConnected&&node.dataset.productCoverKey===key&&find(state.products,product.id)?.displayImageUrl===product.displayImageUrl;
+    const failed=error=>{if(!current())return;const messages={PRODUCT_DISPLAY_DECODE_FAILED:'展示图解码失败，请重试。',PRODUCT_DISPLAY_TIMEOUT:'展示图读取超时，请重试。',PRODUCT_DISPLAY_CHANGED:'商品信息已更新，请刷新商品。',PRODUCT_DISPLAY_BUSY:'展示图读取繁忙，请重试。'};const feedback=el('div','product-cover-error');feedback.setAttribute('role','status');feedback.append(el('span','product-cover-placeholder',messages[error?.code]||'展示图暂不可用'),makeButton('重试展示图',()=>node.loadProductCover(),'small'));node.replaceChildren(feedback);};
+    node.loadProductCover=()=>{
+      if(!current()||node.coverLoading)return;node.coverLoading=true;node.replaceChildren(el('span','product-cover-placeholder','展示图加载中…'));
+      if(!productCoverRequests.has(key)){const pendingCover=Promise.resolve().then(()=>api.productCover(String(product.id))).finally(()=>productCoverRequests.delete(key));productCoverRequests.set(key,pendingCover);}
+      productCoverRequests.get(key).then(result=>{if(!current())return;if(!result?.dataURL){node.replaceChildren(el('span','product-cover-placeholder','暂无商品展示图'));return;}if(!same(result.productId,product.id)||typeof result.dataURL!=='string'||result.dataURL.length>3*1024*1024||!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(result.dataURL)||![result.width,result.height].every(n=>Number.isSafeInteger(n)&&n>0&&n<=640))throw Error('展示图回执无效');const image=el('img');image.alt=(product.name||'商品')+' · 商品展示图';image.width=result.width;image.height=result.height;image.src=result.dataURL;image.addEventListener('error',()=>failed(),{once:true});node.replaceChildren(image);}).catch(failed).finally(()=>{if(node.dataset.productCoverKey===key)node.coverLoading=false;});
     };productCoverObserver.observe(node);
   }
   function openProductDetail(id){
@@ -947,7 +932,7 @@
   $('#new-account').addEventListener('click',()=>editAccount());
   $('#account-search').addEventListener('input',renderAccounts);$('#account-status').addEventListener('change',renderAccounts);
   accountDialog.addEventListener('close',()=>{accountForm.elements.password.value='';});
-  accountVerifyDialog.addEventListener('close',()=>{if(!accountVerifyDialog.open){accountVerifyId='';accountVerifyPlanId='';}});accountDeleteDialog.addEventListener('close',()=>{if(!accountDeleteDialog.open)accountDeleteId='';});
+  accountDeleteDialog.addEventListener('close',()=>{if(!accountDeleteDialog.open)accountDeleteId='';});
   recordDeleteDialog.addEventListener('close',()=>{if(!recordDeleteDialog.open)recordDeleteReview=null;});
   $('#record-delete-confirm').addEventListener('click',()=>{
     if($('#record-delete-confirm').disabled||!recordDeleteReview)return;const review=recordDeleteReview,row=find(review.kind==='plan'?state.plans:state.products,review.id);if(!row||recordDeleteSignature(review.kind,row)!==review.signature){renderDeletionControls();return;}
@@ -960,16 +945,7 @@
     if(input.password&&/[\x00-\x1f\x7f]/.test(input.password)){delete input.password;$('#account-error').textContent='密码不能包含换行或控制字符，请重新输入。';$('#account-error').hidden=false;return;}
     void (async()=>{try{const saved=await accountRequest('account-save',()=>api.saveAccount(input),'账号已保存。','账号未保存，请检查资料、固定环境状态与本机凭据存储后重试。');if(saved.ok)accountDialog.close();else if(accountDialog.open){$('#account-error').textContent=saved.message||'正在保存，请稍候。';$('#account-error').hidden=false;}}finally{delete input.password;fields.password.value='';}})();
   });
-  $('#account-verify-confirm').addEventListener('click',()=>{
-    if($('#account-verify-confirm').disabled||!accountVerifyId)return;
-    const id=accountVerifyId,planId=accountVerifyPlanId,feedback=$('#account-verify-feedback');feedback.hidden=false;feedback.textContent='正在核对当前环境；手机版会打开独立核验标签，点击 Profil 后读取本人身份。';setPlanAccountReport(planId,'checking',feedback.textContent);
-    void accountRequest('account-verify-'+id,()=>api.verifyAccount(id,{confirmCurrent:true}),'账号核对已返回。','未能核对当前账号，请打开固定环境确认登录与账号归属后重试。').then(response=>{
-      const result=response.result,verified=response.ok&&result?.result?.verified===true,message=verified?'已核对当前 Vinted 登录身份。':result?.message||response.message||'账号核对未完成，请检查固定环境的登录、验证提示与本人主页。';
-      setPlanAccountReport(planId,verified?'verified':'failed',message);toast(message);
-      if(accountVerifyId===id&&accountVerifyDialog.open){feedback.hidden=false;feedback.textContent=message;if(verified)accountVerifyDialog.close();}
-    });
-  });
-  $('#account-delete-confirm').addEventListener('click',()=>{if($('#account-delete-confirm').disabled||!accountDeleteId)return;const id=accountDeleteId;$('#account-delete-error').hidden=true;void accountRequest('account-delete-'+id,()=>api.deleteAccount(id),'本机登录资料已删除，原运营绑定与任务保留。','本机登录资料未删除，请检查本账号是否正在登录或核对。').then(result=>{if(result.ok)accountDeleteDialog.close();else if(accountDeleteId===id){$('#account-delete-error').textContent=result.message;$('#account-delete-error').hidden=false;}});});
+  $('#account-delete-confirm').addEventListener('click',()=>{if($('#account-delete-confirm').disabled||!accountDeleteId)return;const id=accountDeleteId;$('#account-delete-error').hidden=true;void accountRequest('account-delete-'+id,()=>api.deleteAccount(id),'本机登录资料已删除，原运营绑定与任务保留。','本机登录资料未删除，请等待当前账号的登录步骤结束后重试。').then(result=>{if(result.ok)accountDeleteDialog.close();else if(accountDeleteId===id){$('#account-delete-error').textContent=result.message;$('#account-delete-error').hidden=false;}});});
   $('#readiness-settings').addEventListener('click',()=>changePage(setupNext().page));
   $('#preflight-edit').addEventListener('click',()=>{const plan=find(state.plans,selectedPlanId);if(plan){preflightDialog.close();editPlan(plan);}});
   $('#preflight-fill').addEventListener('click',()=>{if(selectedPlanId)void inspectPlan(selectedPlanId,'draft');});

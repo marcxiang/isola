@@ -10,7 +10,9 @@ function createPhotoService({nativeImage,focusProfile=()=>{}}){
  function planId(value){if(typeof value!=='string'||!value||value.length>256)throw Error('照片计划编号无效');return value;}
  function materialReceipt(value){
   if(!value||typeof value!=='object'||Array.isArray(value)||!Object.hasOwn(value,'verified')||typeof value.verified!=='boolean')return undefined;
-  return Object.fromEntries(['verified','cleared','unchanged'].filter(key=>Object.hasOwn(value,key)&&typeof value[key]==='boolean').map(key=>[key,value[key]]));
+  const receipt=Object.fromEntries(['verified','cleared','unchanged'].filter(key=>Object.hasOwn(value,key)&&typeof value[key]==='boolean').map(key=>[key,value[key]]));
+  if(receipt.verified===false&&Object.hasOwn(value,'reason')&&['picker_scope','picker_choices','picker_groups','picker_done','original_fields'].includes(value.reason))receipt.reason=value.reason;
+  return receipt;
  }
  async function prepared(engine,id){const result=await photos.readPreparedPhotos(engine,planId(id));if(!result.manifest||!result.summary?.ready)throw Error(result.summary?.error||'请先领取并下载本计划照片');return result;}
  return {

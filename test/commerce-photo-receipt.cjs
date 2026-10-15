@@ -53,3 +53,15 @@ test('photo panel warns on failed, ambiguous or contradictory material states wi
  }
  const failed=materialStatus({verified:false});assert.match(failed.message,/照片回执已核对不代表材质核对完成/);
 });
+test('material failure diagnostics cross IPC only as known static reasons and never raw page text',async()=>{
+ for(const reason of ['picker_scope','picker_choices','picker_groups','picker_done','original_fields']){
+  const f=fixture({optionalMaterial:{verified:false,reason,message:'private-fixture-value'}}),result=clone(await f.service.upload(f.engine,'fixture-plan'));
+  assert.deepEqual(result.optionalMaterial,{verified:false,reason});assert.doesNotMatch(JSON.stringify(result),/private-fixture-value/);
+  const shown=materialStatus(result.optionalMaterial);assert.equal(shown.className,'photo-result-warning');assert.match(shown.message,/材质|原商品字段/);assert.doesNotMatch(shown.message,/picker_|original_fields/);
+ }
+ for(const reason of ['private-fixture-value','__proto__',{},Object.create(null),['picker_scope'],null]){
+  const f=fixture({optionalMaterial:{verified:false,reason}}),result=clone(await f.service.upload(f.engine,'fixture-plan'));assert.deepEqual(result.optionalMaterial,{verified:false});assert.doesNotMatch(materialStatus({verified:false,reason}).message,/private-fixture-value|__proto__/);
+ }
+ const inherited=Object.assign(Object.create({reason:'picker_scope'}),{verified:false}),f=fixture({optionalMaterial:inherited});assert.deepEqual(clone(await f.service.upload(f.engine,'fixture-plan')).optionalMaterial,{verified:false});
+ const success=fixture({optionalMaterial:{verified:true,cleared:true,unchanged:false,reason:'picker_scope'}});assert.deepEqual(clone(await success.service.upload(success.engine,'fixture-plan')).optionalMaterial,{verified:true,cleared:true,unchanged:false});
+});

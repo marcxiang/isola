@@ -69,6 +69,7 @@ await require(path.join(root,'test/commerce-photo-service-smoke.cjs'))(api,check
 await require(path.join(root,'test/vinted-photo-smoke.cjs'))(api,check);
 await require(path.join(root,'test/runtime-audit-v052.cjs'))(api,check);
 await require(path.join(root,'test/vinted-form-smoke.cjs'))(api,check);
+await require(path.join(root,'test/vinted-material-picker-discovery-smoke.cjs'))(api,check);
 await require(path.join(root,'test/vinted-account-smoke.cjs'))(api,check);
 await require(path.join(root,'test/vinted-catalog-smoke.cjs'))(api,check);
 await require(path.join(root,'test/vinted-account-continuity-smoke.cjs'))(api,check);

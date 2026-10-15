@@ -8,7 +8,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.26**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.27**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
 - Starting the scheduler automatically opens a closed listing profile in its original persistent session and uses that session directly for the configured listing. It does not require member binding or read the account menu. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
@@ -19,6 +19,18 @@ The current development version is **0.5.3-dev.26**. Listing plans use the selec
 - The original Mac TEST submission and relisting history remain in the original Mac data. Live preparation reached the publication check and stopped before any new publish click because the site had filled an unconfirmed optional material. Clearing that suggestion through the native picker has been checked; live publication and the complete updated automated flow remain unverified.
 
 启动计划后直接使用指定独立窗口的现有登录会话，不再把账号菜单、用户名或会员绑定作为自动上架前置。手动商品与货盘商品共用字段、原图、上传、单次提交和商品回执链路；登录失效或网站要求人工验证时，保留当前任务等待处理。原提交结果未知时仍只核对原请求，不能重新发布。办公室与 Mac 接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
+
+## Mac 上架恢复与手机材质选择器 — 0.5.3-dev.27，2026-10-15
+
+真实 dev.26 已完成八项字段和原照片 1/1 上传，但手机材质选择器打开后仍未清空。用隔离原生页面分别复现两个缺陷：选择器自有 header 被误排除，以及长列表达到通用 160 控件上限时，初始 disabled 的 Fait 被降权截掉。旧 helper 在三种布局中都只打开选择器，未取消或提交；不据此断言真实站只存在其中一种原因。
+
+现在可用唯一原生 BUTTON Fait 只读识别选择器，包括其自有 header；实际点击仍要求原按钮已启用并具有最新快照 ID。全局控件上限保持。取消或确认前重新核对完整原生/role 复选框集合、预期选中状态、原标签、分组、标题和按钮节点；新增、漏登记、重用或替换节点均停止。其他商品字段、包裹与发布前检查保持。界面只显示五个已知静态原因和布尔状态，不传任意页面值、错误原文或路径。
+
+还修复“启动调度但原任务不动”：原 listing 在 `publish_listing / PUBLICATION_EVIDENCE_BLOCKED` 停止，旧恢复白名单把它永久排除；`check_optional_fields` 同样遗漏。正常“继续上架”现在仅在原任务身份、周期、版本、去重和照片一致且当前周期/版本完全无提交记录时恢复。同一版本有任何 prepared、cancelled、closed 或已尝试记录都拒绝这项例外；publish 步骤额外要求 session driver、needs_review 和精确错误码。旧版合法已闭合历史保持，原记录、照片及版本不重建；真实商品、库存、照片与单次提交检查重新执行。真实数据库未手动修改。
+
+最终完整 Node 1286/1286 通过，零失败、零跳过；恢复相关 208 项及 adapter 85 项均包含在单元回归中。材质最终源码哈希锁定的桌面关联 8/8 通过：先通过 5 项，余下照片用例因夹具加载后显示尚未就绪而停止，保留失败日志后在夹具等待真实 ready/active/inputVisible，续跑失败及未完成 3 项通过，生产 guard 未放宽。此前候选的新选择器 4 项与原表单 25 项共 29/29 为上一检查点，不重复计入最终 8 项。恢复集成使用真实 sales driver，证明显式开始确实到达开环境、刊登页与字段准备，再受控停止于照片/发布之前。
+
+用户选择保留系统钥匙串保护货盘 API Token，未改存储方案。Mac 目标为 Apple Silicon arm64、macOS 13 起，本机 ad-hoc 签名；dev.27 原 TEST 真实端到端验证将在新构建中继续，尚未认定新商品已发布。
 
 ## 已保存资料填写不再读取货盘密钥 — 0.5.3-dev.26，2026-10-15
 

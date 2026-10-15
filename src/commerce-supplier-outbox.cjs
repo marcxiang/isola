@@ -83,6 +83,7 @@ function binding(engine,id){
  for(const item of related)validateSupplierSyncRecord(item);
  ensure(related.every(item=>item.profileId===row.profileId&&item.productId===row.productId)&&related.filter(item=>['pending','dispatching','uncertain'].includes(item.state)).length<=1,'照片领取关联记录冲突');
  const claim=one(db.claims,item=>item.id===row.claimId,'原照片领取缺失或重复');
+  ensure(claim.source!=='local'&&!(db.localProducts||[]).some(product=>product.id===row.productId),'本地商品不允许生成或发送货盘上架关联','SUPPLIER_LOCAL_PRODUCT');
  ensure(claim.profileId===row.profileId&&claim.productId===row.productId&&identifier(claim.setId)&&Array.isArray(claim.listings),'原照片领取与环境或商品不一致');
  const link=one(claim.listings,item=>String(item.listingId)===row.payload.listingId,'原刊登在照片领取历史中缺失或重复');ensure(link.url===row.payload.listingUrl,'原刊登与货盘关联链接不一致');
  const index=claim.listings.indexOf(link),prior=related.filter(item=>item.id!==row.id),untouched=item=>item.state==='cancelled'&&item.attemptCount===0&&item.operation===null&&item.receipt===null;

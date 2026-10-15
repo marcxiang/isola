@@ -17,7 +17,7 @@ function fixtureBridge(state,secret){
   },
   openAccount:async id=>{calls.push({method:'openAccount',args:[id]});return {account:account(id),message:'已打开固定环境。'};},
   verifyAccount:async(id,options)=>{
-   calls.push({method:'verifyAccount',args:[id,options]});const row=account(id);row.status='logged_in';row.identity={memberId:'12345',username:'fixture_vinted_user',profileURL:'https://www.vinted.fr/member/12345',verifiedAt:new Date().toISOString()};row.lastResult={status:'logged_in',code:'VERIFIED',message:'Private '+secret,at:row.identity.verifiedAt};emit();return {account:row,message:'当前账号已核验。'};
+   calls.push({method:'verifyAccount',args:[id,options]});const row=account(id);row.status='logged_in';row.identity={memberId:'12345',username:'fixture_vinted_user',profileURL:'https://www.vinted.fr/member/12345',verifiedAt:new Date().toISOString()};row.lastResult={status:'logged_in',code:'VERIFIED',message:'Private '+secret,at:row.identity.verifiedAt};emit();return {account:row,result:{verified:true,status:'logged_in'},message:'当前账号已核验。'};
   },
   deleteAccount:async id=>{calls.push({method:'deleteAccount',args:[id]});state.accounts=state.accounts.filter(row=>row.id!==id);emit();return {message:'本机账号记录已删除。'};},
   saveSettings:noOp,savePlan:noOp,openListing:noOp,openActiveListing:noOp,preflight:noOp,inspectAccount:noOp,inspectPublication:noOp,submitPublication:noOp,inspectPublishedListing:noOp,associatePublishedListing:noOp,prepareDraft:noOp,inspectPhotos:noOp,preparePhotos:noOp,photoPreview:noOp,uploadPhotos:noOp,setPlanEnabled:noOp,runOnce:noOp,setRunning:noOp,resolve:noOp,connect:noOp,sync:noOp

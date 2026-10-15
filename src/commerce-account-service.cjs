@@ -37,7 +37,16 @@ class CommerceAccountService{
  expectations(account){
   const bound=this.engine.db.marketAccounts.find(row=>row.profileId===account.profileId);
   if(bound&&account.identity&&bound.memberId!==account.identity.memberId)throw fail('ACCOUNT_CHANGED');
-  return {login:account.login,expectedMemberId:account.identity?.memberId||bound?.memberId,expectedUsername:undefined};
+  const expectedMemberId=account.identity?.memberId||bound?.memberId;
+  // Only an earlier verified binding can supply the username omitted from a
+  // mobile home-page drawer. A saved email/login or confirmCurrent cannot.
+  const previous=[account.identity,bound].find(value=>value?.profileURL!==undefined&&value?.username!==undefined);
+  let expectedAccount;
+  if(previous){
+   if(typeof expectedMemberId!=='string'||!/^[1-9]\d{0,29}$/.test(expectedMemberId)||previous.memberId!==expectedMemberId||previous.profileURL!=='https://www.vinted.fr/member/'+expectedMemberId||typeof previous.username!=='string'||!previous.username||previous.username.trim()!==previous.username||previous.username.length>100||/[\u0000-\u001f\u007f]/.test(previous.username))throw fail('ACCOUNT_CHANGED');
+   expectedAccount=Object.freeze({profileId:account.profileId,memberId:expectedMemberId,profileURL:previous.profileURL,username:previous.username});
+  }
+  return {login:account.login,expectedMemberId,expectedUsername:undefined,...(expectedAccount?{expectedAccount}:{})};
  }
  commitIdentity(account,observed,guard){
   guard();if(observed?.verified!==true)throw fail('ACCOUNT_UNAVAILABLE');
@@ -50,7 +59,23 @@ class CommerceAccountService{
   await this.openPage(account.profileId,{signal,guard});guard();
   const wasSubmitted=pendingReview.has(account.lastResult?.code);
   let result;
-  try{result=await this.loginService.verify(account.profileId,{...this.expectations(account),signal,confirmCurrent:options?.confirmCurrent===true});guard();}
+  try{
+   const expected=this.expectations(account),confirmed=options?.confirmCurrent===true;
+   result=await this.loginService.verify(account.profileId,{...expected,signal,confirmCurrent:confirmed,closeAccountMenu:true});guard();
+   if(!expected.expectedMemberId&&!hasVerifiedResult(result)&&result?.code==='ACCOUNT_UNVERIFIED'&&confirmed&&typeof this.loginService.inspectOwnProfileLink==='function'&&typeof this.loginService.validateOwnProfileLink==='function'){
+    const review=await this.openPage(account.profileId,{signal,guard,freshAccountReview:true});guard();
+    if(review?.profileId!==account.profileId||review.url!=='https://www.vinted.fr/')throw fail('ACCOUNT_UNAVAILABLE');
+    const candidate=await this.loginService.inspectOwnProfileLink(account.profileId,{signal});guard();
+    if(candidate?.kind!=='own-profile-candidate'||candidate.verified!==false||candidate.profileId!==account.profileId||candidate.tabId!==review.tabId||candidate.consistentReads!==2||typeof candidate.memberId!=='string'||!/^[1-9]\d{0,29}$/.test(candidate.memberId)||candidate.profileURL!=='https://www.vinted.fr/member/'+candidate.memberId||candidate.expiresAt<=Date.now())throw fail('ACCOUNT_UNAVAILABLE');
+    await this.loginService.validateOwnProfileLink(account.profileId,candidate,{signal});guard();
+    const opened=await this.openPage(account.profileId,{signal,guard,ownProfileURL:candidate.profileURL});guard();
+    if(opened?.profileId!==account.profileId||opened.url!==candidate.profileURL||opened.tabId!==candidate.tabId)throw fail('ACCOUNT_UNAVAILABLE');
+    // A candidate is not a prior account mapping. Do not promote its member ID
+    // to expectedMemberId or synthesize a username before the normal reader.
+    result=await this.loginService.verify(account.profileId,{...expected,signal,confirmCurrent:confirmed,closeAccountMenu:true});guard();
+    if(hasVerifiedResult(result)&&(candidate.expiresAt<=Date.now()||result.account.memberId!==candidate.memberId||result.account.profileURL!==candidate.profileURL))throw fail('ACCOUNT_CHANGED');
+   }
+  }
   catch(error){return this.record(account,{status:'awaiting_user',code:error?.code,submitted:wasSubmitted},guard);}
   if(hasVerifiedResult(result))return this.commitIdentity(account,result.account,guard);
   return this.record(account,{...result,submitted:wasSubmitted||result?.submitted===true},guard);

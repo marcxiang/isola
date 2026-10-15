@@ -42,7 +42,9 @@ function probeLoginDOM(expected){
   const documentKey=String(performance.timeOrigin),url=location.href;
   const headings=[...document.querySelectorAll('h1,h2,[role=alert]')].filter(visible).map(e=>clean(d.safeText(e,300)));
   const challenge=!!document.querySelector('input[autocomplete="one-time-code"]')||[...document.querySelectorAll('iframe')].some(e=>visible(e)&&/captcha|challenge|verification/i.test(e.src||e.title||''))||headings.some(t=>/captcha|vérifi(?:e|er|cation)|verification|two.factor|code de sécurité|security code|compte (?:bloqué|suspendu)|account (?:blocked|suspended)/i.test(t));
-  const accountHint=[...document.querySelectorAll('header button,nav button,[role=navigation] button')].some(e=>visible(e)&&[...e.querySelectorAll('img[alt]')].some(img=>visible(img)&&clean(img.getAttribute('alt'))));
+  // A mobile SVG menu is only a route to the existing identity reader. Its
+  // label alone never establishes a logged-in account or authorizes input.
+  const accountHint=[...document.querySelectorAll('header button,nav button,[role=navigation] button')].some(e=>visible(e)&&(['Menu ouvert','Menu fermé'].includes(clean(d.label(e)))||[...e.querySelectorAll('img[alt]')].some(img=>visible(img)&&clean(img.getAttribute('alt')))));
   const base={documentKey,url,challenge,accountHint};
   if(challenge||accountHint)return {...base,kind:challenge?'challenge':'account'};
   if(location.origin!=='https://www.vinted.fr'||location.pathname!=='/member/login/email'||location.username||location.password)return {...base,kind:'unknown'};
@@ -164,24 +166,31 @@ class VintedLogin {
   }
   identity(account,options){
     if(account?.verified!==true||!account.memberId)throw failure('ACCOUNT_UNVERIFIED');
-    if(options.expectedMemberId){if(account.memberId!==String(options.expectedMemberId))return 'ACCOUNT_MISMATCH';return 'LOGGED_IN';}
+    const memberId=options.expectedMemberId||options.expectedAccount?.memberId;
+    if(memberId){if(account.memberId!==String(memberId))return 'ACCOUNT_MISMATCH';return 'LOGGED_IN';}
     const expected=options.expectedUsername||(!options.login?.includes('@')?options.login:'');
     if(expected)return normal(account.username)===normal(expected)?'LOGGED_IN':'ACCOUNT_MISMATCH';
     return options.confirmCurrent===true?'LOGGED_IN':'ACCOUNT_CONFIRMATION_REQUIRED';
   }
-  validate(options,needsPassword){
+  validate(options,needsPassword,profileId){
     if(!options||typeof options!=='object'||options.expectedMemberId!==undefined&&!/^[1-9]\d{0,29}$/.test(String(options.expectedMemberId))||options.expectedUsername!==undefined&&(typeof options.expectedUsername!=='string'||!options.expectedUsername.trim()||options.expectedUsername.length>100||/[\u0000-\u001f\u007f]/.test(options.expectedUsername)))throw failure('INVALID_CREDENTIALS');
+    const binding=options.expectedAccount;
+    if(binding!==undefined&&(!binding||typeof binding!=='object'||Array.isArray(binding)||binding.profileId!==profileId||typeof binding.memberId!=='string'||!/^[1-9]\d{0,29}$/.test(binding.memberId)||binding.profileURL!==ORIGIN+'/member/'+binding.memberId||typeof binding.username!=='string'||!binding.username||binding.username.trim()!==binding.username||binding.username.length>100||/[\u0000-\u001f\u007f]/.test(binding.username)||options.expectedMemberId!==undefined&&String(options.expectedMemberId)!==binding.memberId))throw failure('INVALID_CREDENTIALS');
     if(needsPassword&&(typeof options.login!=='string'||!options.login.trim()||options.login.length>254||/[\u0000-\u001f\u007f]/.test(options.login)||typeof options.password!=='string'||!options.password||options.password.length>1024||/[\u0000\r\n]/.test(options.password)))throw failure('INVALID_CREDENTIALS');
     if(options.login!==undefined&&(typeof options.login!=='string'||!options.login.trim()||options.login.length>254||/[\u0000-\u001f\u007f]/.test(options.login)))throw failure('INVALID_CREDENTIALS');
   }
   async accountResult(context,options){
-    this.guard(context);const observed=await this.account.inspectAccount(context.profileId,{signal:context.signal,controller:context.controller,tab:context.tab});this.guard(context);
+    this.guard(context);let observed;
+    try{observed=await this.account.inspectAccount(context.profileId,{signal:context.signal,controller:context.controller,tab:context.tab,...(options.expectedAccount?{expectedAccount:options.expectedAccount}:{}),...(options.closeAccountMenu===true?{closeMenu:true}:{})});}
+    catch(error){if(error?.code==='ACCOUNT_CHANGED'&&options.expectedAccount)throw failure('ACCOUNT_MISMATCH');throw error;}
+    this.guard(context);
     const code=this.identity(observed,options);return output(code==='LOGGED_IN'?'logged_in':code==='ACCOUNT_MISMATCH'?'error':'awaiting_user',code,context.submitted,observed);
   }
   async run(profileId,options,login){
     let context,w,contents,onNavigate,onDestroyed,onAbort,throttling;
     try{
-      this.validate(options,login);if(options.signal?.aborted)throw failure('STOPPED');
+      this.validate(options,login,profileId);if(options.signal?.aborted)throw failure('STOPPED');
+      if(options.expectedAccount)options={...options,expectedAccount:Object.freeze({...options.expectedAccount})};
       const controller=new AbortController();context={profileId,controller,signal:controller.signal,submitted:false,epoch:0,startEpoch:0,values:{username:'',password:''}};
       const selected=this.guard(context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;
       w.vintedDraftController=controller;
@@ -224,5 +233,7 @@ class VintedLogin {
   }
   login(profileId,options){return this.run(profileId,options,true);}
   verify(profileId,options={}){return this.run(profileId,options,false);}
+  inspectOwnProfileLink(profileId,options={}){return this.account.inspectOwnProfileLink(profileId,options);}
+  validateOwnProfileLink(profileId,candidate,options={}){return this.account.validateOwnProfileLink(profileId,candidate,options);}
 }
 module.exports={VintedLogin,LOGIN_URL,probeLoginDOM};

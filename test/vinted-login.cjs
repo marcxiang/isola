@@ -1,13 +1,14 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
+const vm=require('node:vm');
 const {EventEmitter}=require('node:events');
-const {VintedLogin,LOGIN_URL}=require('../src/vinted-login.cjs');
+const {VintedLogin,LOGIN_URL,probeLoginDOM}=require('../src/vinted-login.cjs');
 const SECRET='private-test-password-不可输出';
 function fixture(options={}){
   let url=options.url||LOGIN_URL,kind=options.kind||'form',focused='other',loginLength=options.prefilled?1:0,passwordLength=0,presses=0,reads=0;
   const commands=[],c=Object.assign(new EventEmitter(),{isDestroyed:()=>false,getURL:()=>url,isLoadingMainFrame:()=>false,capturePage:async()=>({})});
   const tab={id:'login-tab',aiContext:17,isInputVisible:()=>options.visible!==false,view:{webContents:c}},w={isDestroyed:()=>false,isVisible:()=>true,isMinimized:()=>false,tabs:[tab],activeTab:tab.id};
-  const api={commands,tab,w,setKind(value){kind=value;},setURL(value){url=value;},presses:()=>presses};
+  const api={commands,tab,w,accountRequests:[],setKind(value){kind=value;},setURL(value){url=value;},presses:()=>presses};
   const current=(_id,{signal,tab:expected,controller}={})=>{
     if(signal?.aborted)throw Object.assign(Error('aborted'),{code:'STOPPED'});
     if(w.vintedDraftController&&w.vintedDraftController!==controller)throw Object.assign(Error('busy'),{code:'PAGE_BUSY'});
@@ -31,7 +32,7 @@ function fixture(options={}){
     if(options.hang)return new Promise(()=>{});
     return {documentKey:'doc-1',url,kind,empty:!loginLength&&!passwordLength,focused,challenge:kind==='challenge',accountHint:kind==='account',submitPoint:{x:200,y:300},submitRect:{x:150,y:280,width:100,height:40},touch:!!options.touch};
   }}};
-  const account={inspectAccount:async()=>{options.beforeAccount?.(api);return {verified:true,memberId:options.memberId||'123456',username:options.username||'fixture_seller',profileURL:'https://www.vinted.fr/member/'+(options.memberId||'123456'),evidence:{kind:'current-account-menu',consistentReads:2}};}};
+  const account={inspectAccount:async(_profileId,input)=>{api.accountRequests.push(input);options.beforeAccount?.(api,input);if(options.accountError)throw Object.assign(Error('Untrusted provider detail'),{code:options.accountError});return {verified:true,memberId:options.memberId||'123456',username:options.username||'fixture_seller',profileURL:'https://www.vinted.fr/member/'+(options.memberId||'123456'),evidence:{kind:'current-account-menu',consistentReads:2}};}};
   api.service=new VintedLogin(adapter,{account,timeoutMs:options.timeoutMs||100,resultWaitMs:0,pollIntervalMs:10});return api;
 }
 const credentials={login:'fixture_seller',password:SECRET};
@@ -42,6 +43,30 @@ test('observed email URL and one submit use dedicated CDP without a generic pass
 });
 test('mobile form activates the same proven submit with one trusted keyboard gesture',async()=>{const f=fixture({touch:true,resultKind:'account'}),out=await f.service.login('p',credentials);assert.equal(out.status,'logged_in');assert.equal(f.presses(),1);assert.deepEqual(f.commands.filter(c=>c.method==='Input.dispatchKeyEvent').map(c=>c.type),['keyDown','keyUp']);assert.equal(f.commands.some(c=>c.method==='Input.dispatchMouseEvent'||c.method==='Input.dispatchTouchEvent'),false);});
 test('an existing expected session is verified with no credential dispatch',async()=>{const f=fixture({kind:'account'}),out=await f.service.login('p',{...credentials,expectedMemberId:'123456'});assert.equal(out.status,'logged_in');assert.equal(out.submitted,false);assert.equal(f.commands.some(c=>c.method.startsWith('Input.')),false);});
+test('operator verification can require strict menu closure while normal login leaves the existing menu behavior unchanged',async()=>{
+  const login=fixture({kind:'account'});assert.equal((await login.service.login('p',credentials)).verified,true);assert.equal(Object.hasOwn(login.accountRequests[0],'closeMenu'),false);
+  for(const closeAccountMenu of [true,false,'true']){const f=fixture({kind:'account'}),out=await f.service.verify('p',{expectedMemberId:'123456',closeAccountMenu});assert.equal(out.verified,true);assert.equal(f.accountRequests[0].closeMenu,closeAccountMenu===true?true:undefined);assert.equal(f.accountRequests[0].tab,f.tab);assert.equal(f.commands.some(command=>command.method.startsWith('Input.')),false);}
+  const changed=fixture({kind:'account',accountError:'ACCOUNT_UNVERIFIED'}),rejected=await changed.service.verify('p',{expectedMemberId:'123456',closeAccountMenu:true});assert.equal(changed.accountRequests[0].closeMenu,true);assert.equal(rejected.verified,false);assert.equal(rejected.code,'ACCOUNT_UNVERIFIED');assert.equal(rejected.submitted,false);
+});
+test('mobile SVG labels only select the account-reader route, while challenges keep priority',()=>{
+  for(const label of ['Menu ouvert','Menu fermé','Unrelated menu']){
+    const button={isConnected:true,label,querySelectorAll:()=>[]},location={href:'https://www.vinted.fr/',origin:'https://www.vinted.fr',pathname:'/'},context={location,performance:{timeOrigin:1},globalThis:{__isolaDOM:{visible:()=>true,label:e=>e.label,safeText:()=>''}},document:{querySelector:()=>null,querySelectorAll:selector=>selector.startsWith('header button')?[button]:[]}};
+    const state=vm.runInNewContext('('+probeLoginDOM.toString()+')(null)',context);assert.equal(state.kind,label==='Unrelated menu'?'unknown':'account');assert.equal(state.accountHint,label!=='Unrelated menu');
+    context.document.querySelector=()=>({});assert.equal(vm.runInNewContext('('+probeLoginDOM.toString()+')(null)',context).kind,'challenge');
+  }
+});
+test('saved mobile identity reaches the existing account reader without entering credentials or authorizing a different member',async()=>{
+  const binding={profileId:'p',memberId:'123456',profileURL:'https://www.vinted.fr/member/123456',username:'fixture_seller'};
+  const f=fixture({kind:'account'}),out=await f.service.login('p',{...credentials,expectedAccount:binding});assert.equal(out.status,'logged_in');assert.equal(out.submitted,false);assert.deepEqual(f.accountRequests[0].expectedAccount,binding);assert.equal(Object.isFrozen(f.accountRequests[0].expectedAccount),true);assert.equal(f.accountRequests[0].tab,f.tab);assert.equal(f.commands.some(command=>command.method.startsWith('Input.')),false);
+  const wrong=fixture({kind:'account',memberId:'999999'}),mismatch=await wrong.service.verify('p',{expectedAccount:binding});assert.equal(mismatch.code,'ACCOUNT_MISMATCH');assert.equal(mismatch.verified,false);
+  const changed=fixture({kind:'account',accountError:'ACCOUNT_CHANGED'});assert.equal((await changed.service.verify('p',{expectedAccount:binding})).code,'ACCOUNT_MISMATCH');
+  const missing=fixture({kind:'account',accountError:'ACCOUNT_UNVERIFIED'});assert.equal((await missing.service.verify('p',{login:'fixture@example.invalid',confirmCurrent:true})).code,'ACCOUNT_UNVERIFIED');assert.equal(Object.hasOwn(missing.accountRequests[0],'expectedAccount'),false);
+});
+test('malformed or cross-environment saved identities stop before any page read or credential dispatch',async()=>{
+  const binding={profileId:'p',memberId:'123456',profileURL:'https://www.vinted.fr/member/123456',username:'fixture_seller'};
+  for(const expectedAccount of [{...binding,profileId:'other'},{...binding,profileURL:'https://www.vinted.fr/member/999999'},{...binding,username:''},{...binding,memberId:'bad'},[]]){const f=fixture({kind:'account'});assert.equal((await f.service.login('p',{...credentials,expectedAccount})).code,'INVALID_CREDENTIALS');assert.equal(f.commands.length,0);assert.equal(f.accountRequests.length,0);}
+  const f=fixture({kind:'account'});assert.equal((await f.service.verify('p',{expectedAccount:binding,expectedMemberId:'999999'})).code,'INVALID_CREDENTIALS');assert.equal(f.accountRequests.length,0);
+});
 test('a known member ID has priority over a changed username',async()=>{const f=fixture({kind:'account',username:'renamed_seller'}),out=await f.service.verify('p',{expectedMemberId:'123456',expectedUsername:'old_name'});assert.equal(out.status,'logged_in');});
 test('another logged account is preserved without logout or input',async()=>{for(const options of [{expectedMemberId:'654321'},{expectedUsername:'other_seller'},{login:'other_seller'}]){const f=fixture({kind:'account'}),out=await f.service.verify('p',options);assert.equal(out.code,'ACCOUNT_MISMATCH');assert.equal(out.status,'error');assert.equal(f.commands.some(c=>c.method.startsWith('Input.')),false);}});
 test('first email session requires explicit local confirmation and cannot override known member mismatch',async()=>{

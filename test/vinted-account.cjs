@@ -46,9 +46,10 @@ function fixture(options={}){
   const control={
     checkedSnapshot:async()=>{options.beforeSnapshot?.(api);return snapshot();},
     isolated:async(_tab,expression)=>{
+      if(!rootBody)snapshot();
       if(expression.includes('probeAccountDOM')){stateReads++;options.beforeProbe?.(api,stateReads);if(options.hangRead)return new Promise(()=>{});}
       Object.assign(isolatedGlobal,{__isolaElements:ids,__isolaDOM:{parents,closest:(e,selector)=>parents(e).find(p=>matches(p,selector))||null,visible:e=>parents(e).every(p=>!p.hidden),disabled:e=>!!e.attrs.disabled,safeText:e=>e.text||'',label:e=>e.attrs['aria-label']||e.text||'button'}});
-      return vm.runInNewContext(expression,{globalThis:isolatedGlobal,URL,MutationObserver:FixtureObserver,performance:{timeOrigin:documentKey},location:{href:url},document:{documentElement:rootBody,querySelectorAll:selector=>rootBody.querySelectorAll(selector)},innerHeight:900,innerWidth:1200});
+      return vm.runInNewContext(expression,{globalThis:isolatedGlobal,URL,MutationObserver:FixtureObserver,performance:{timeOrigin:documentKey},location:{href:url},document:{readyState:'complete',documentElement:rootBody,querySelectorAll:selector=>rootBody.querySelectorAll(selector)},innerHeight:900,innerWidth:1200});
     },
     performAction:async(_tab,args,opts)=>{
       calls.push(args);options.beforeAction?.(api);await opts.onProgress?.();if(opts.signal.aborted)throw Object.assign(Error('stopped'),{code:'STOPPED'});
@@ -58,6 +59,27 @@ function fixture(options={}){
   };
   api.adapter=new VintedAdapter({windows:new Map([['profile-1',w]]),control,isBusy:()=>!!options.busy});api.account=new VintedAccount(api.adapter,{menuWaitMs:15,pollIntervalMs:10,timeoutMs:options.timeoutMs||200});return api;
 }
+
+test('native mobile profile candidate contains no identity authority and is validated once before navigation',async()=>{
+ const f=fixture({mobile:true,url:'https://www.vinted.fr/',unrelated:true,profileHeading:false,logoutTag:'div',logoutRole:'button'}),candidate=await f.account.inspectOwnProfileLink('profile-1');
+ assert.equal(candidate.verified,false);assert.equal(candidate.kind,'own-profile-candidate');assert.equal(candidate.memberId,'123456');assert.equal(candidate.profileURL,PROFILE);assert.equal(candidate.consistentReads,2);assert.equal(candidate.tabId,f.tab.id);assert.equal(Object.isFrozen(candidate),true);assert.equal(Object.hasOwn(candidate,'username'),false);assert.equal(Object.hasOwn(candidate,'guardToken'),false);assert.equal(f.calls.length,1);assert.equal(getClosedAccountEvidence(f.adapter,{profileId:'profile-1',tab:f.tab,documentKey:candidate.documentKey}),null);
+ assert.equal(await f.account.validateOwnProfileLink('profile-1',candidate),true);await assert.rejects(f.account.validateOwnProfileLink('profile-1',candidate),{code:'ACCOUNT_UNVERIFIED'});assert.equal(f.w.vintedDraftController,null);
+});
+test('profile candidates reject already-open, ambiguous, non-native and non-review pages without acquiring an identity',async()=>{
+ for(const extra of [{open:true},{duplicateButton:true},{duplicateDrawer:true},{mobile:false},{url:FORM},{ariaOwned:true}]){
+  const f=fixture({mobile:true,url:'https://www.vinted.fr/',unrelated:true,profileHeading:false,...extra});await assert.rejects(f.account.inspectOwnProfileLink('profile-1'));assert.equal(getClosedAccountEvidence(f.adapter,{profileId:'profile-1',tab:f.tab,documentKey:'1'}),null);
+ }
+});
+test('profile candidates preserve native menu continuity across both reads and reject transient member changes',async()=>{
+ for(const restore of [false,true]){const f=fixture({mobile:true,url:'https://www.vinted.fr/',unrelated:true,profileHeading:false,beforeProbe:(api,count)=>{if(count===3)api.changeProfile('https://www.vinted.fr/member/999999',restore);}});await assert.rejects(f.account.inspectOwnProfileLink('profile-1'));assert.equal(f.calls.length,1);assert.equal(f.w.vintedDraftController,null);}
+});
+test('profile candidates cannot be forged, transferred, expired or consumed after their original menu changes',async()=>{
+ for(const change of ['forged','profile','expired','tab','identity','navigation']){
+  const f=fixture({mobile:true,url:'https://www.vinted.fr/',unrelated:true,profileHeading:false}),candidate=await f.account.inspectOwnProfileLink('profile-1');let value=candidate,id='profile-1',options={};
+  if(change==='forged')value={...candidate};if(change==='profile')id='another-profile';if(change==='expired')options.now=candidate.expiresAt;if(change==='tab')f.w.activeTab='another-tab';if(change==='identity')f.changeProfile('https://www.vinted.fr/member/999999',true);if(change==='navigation')f.setURL(PROFILE);
+  await assert.rejects(f.account.validateOwnProfileLink(id,value,options));assert.equal(getClosedAccountEvidence(f.adapter,{profileId:'profile-1',tab:f.tab,documentKey:candidate.documentKey}),null);
+ }
+});
 
 test('opens only the account avatar once and obtains two consistent menu receipts',async()=>{
   const f=fixture();const out=await f.account.inspectAccount('profile-1');assert.equal(out.memberId,'123456');assert.equal(out.username,'fixture_seller');assert.equal(out.profileURL,PROFILE);assert.equal(out.verified,true);assert.equal(out.menuOpened,true);assert.equal(out.menuClosed,false);assert.equal(out.evidence.consistentReads,2);assert.equal(f.calls.length,1);assert.equal(f.calls[0].action,'click');assert.equal(f.w.vintedDraftController,null);assert.equal(f.tab.view.webContents.listenerCount('did-start-navigation'),0);assert.equal(f.adapter.readiness().capabilities.publish,false);

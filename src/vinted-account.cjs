@@ -3,6 +3,7 @@ const {randomUUID}=require('node:crypto');
 const ORIGIN='https://www.vinted.fr';
 const MENU_LABELS=['Mon profil','Paramètres','Mes commandes','Se déconnecter'];
 const closedReceipts=new WeakMap(),CLOSED_RECEIPT_MS=30000;
+const profileCandidates=new WeakMap(),PROFILE_CANDIDATE_MS=30000;
 const receiptKey=(profileId,tab)=>profileId+'\0'+tab.id;
 const norm=value=>String(value||'').replace(/\s+/g,' ').trim();
 const stopped=()=>problem('STOPPED','账号核验已停止');
@@ -38,6 +39,12 @@ function memberURL(value){
   const match=/^\/member\/([1-9]\d*)(?:-[^/]+)?\/?$/.exec(url.pathname);
   if(url.origin!==ORIGIN||url.username||url.password||url.search||url.hash||!match)throw problem('ACCOUNT_UNVERIFIED','账号菜单的个人主页地址不属于法国 Vinted');
   return {memberId:match[1],profileURL:ORIGIN+'/member/'+match[1]};
+}
+
+function probeOwnProfileSurface(){
+ const d=globalThis.__isolaDOM,visible=e=>!!e?.isConnected&&d.visible(e),clean=value=>String(value||'').replace(/\s+/g,' ').trim();
+ const challenge=[...document.querySelectorAll('input')].some(e=>e.getAttribute('autocomplete')==='one-time-code')||[...document.querySelectorAll('iframe')].some(e=>visible(e)&&/captcha|challenge|verification/i.test((e.src||'')+' '+(e.title||'')))||[...document.querySelectorAll('h1,h2,[role=alert]')].filter(visible).some(e=>/captcha|vérifi(?:e|er|cation)|verification|two.factor|code de sécurité|security code|compte (?:bloqué|suspendu)|account (?:blocked|suspended)/i.test(clean(d.safeText(e,300))));
+ return {documentKey:String(performance.timeOrigin),url:String(location.href),ready:document.readyState==='complete',challenge};
 }
 
 // Read only nodes from the current trusted snapshot, plus their descendants and
@@ -260,6 +267,10 @@ class VintedAccount {
       closedReceipts.get(this.adapter)?.delete(receiptKey(profileId,context.tab));
       if(state.menus.length!==1||!state.menus[0].valid)throw accountFailure('个人主页链接无法唯一关联当前账号菜单',state);
       const identity=memberURL(state.menus[0].href),bound=context.expectedAccount;
+      if(context.profileCandidateOnly===true){
+        if(button.kind!=='mobile-menu'||!context.nativeDrawerToken||state.menus[0].association!=='mobile-native-toggle-drawer')throw accountFailure('个人主页候选缺少本次原生打开的手机菜单关联',state);
+        state.profileCandidate={...identity,association:state.menus[0].association};return state;
+      }
       let username=button.username,usernameSource=button.kind==='mobile-menu'?'own-profile-heading':'avatar';
       if(button.kind==='mobile-menu'){
         let own=false;try{own=memberURL(state.pageURL).memberId===identity.memberId;}catch{}
@@ -278,6 +289,50 @@ class VintedAccount {
       }
     }
     return state;
+  }
+  // A navigation candidate is deliberately weaker than an account receipt.
+  // Only a freshly opened native mobile drawer may produce one; it supplies
+  // no username, binding, login status or closed-menu publication authority.
+  async inspectOwnProfileLink(profileId,{signal}={}){
+    const controller=new AbortController(),cancel=()=>controller.abort(),context={controller,signal:controller.signal,profileCandidateOnly:true};let w,contents,menuOpenAttempted=false;
+    const navigated=(_event,_url,_inPlace,mainFrame)=>{if(mainFrame!==false)cancel();};
+    try{
+      if(signal?.aborted)throw stopped();signal?.addEventListener('abort',cancel,{once:true});
+      const selected=this.adapter.current(profileId,context);w=selected.w;context.tab=selected.tab;contents=context.tab.view.webContents;
+      if(contents.getURL()!==ORIGIN+'/'||contents.isLoadingMainFrame?.())throw problem('ACCOUNT_UNVERIFIED','请在新建的本人账号核验标签页读取个人主页');
+      w.vintedDraftController=controller;closedReceipts.get(this.adapter)?.delete(receiptKey(profileId,context.tab));
+      contents.on?.('did-start-navigation',navigated);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);
+      const surface=await this.bounded(()=>this.adapter.control.isolated(context.tab,'('+probeOwnProfileSurface.toString()+')()'),context);
+      if(surface?.challenge)throw problem('LOGIN_CHALLENGE','请先在核验标签页完成人工验证');if(surface?.ready!==true||surface.url!==ORIGIN+'/')throw problem('ACCOUNT_UNVERIFIED','本人账号核验页尚未完整加载');
+      const guard=()=>this.adapter.current(profileId,context),initial=await this.state(profileId,context),expected={documentKey:initial.documentKey};
+      if(surface.documentKey!==expected.documentKey)throw problem('PAGE_CHANGED','本人账号核验页已经重新加载');
+      if(initial.button.kind!=='mobile-menu'||initial.button.expanded!=='false'||initial.visibleMenuParts||initial.menus.length||!initial.clickable)throw accountFailure('个人主页候选必须从本次尚未展开的唯一手机菜单开始',initial);
+      const token=randomUUID(),armed=await this.bounded(()=>this.adapter.control.isolated(context.tab,'('+beginNativeDrawerGuard.toString()+')('+JSON.stringify(initial.button.id)+','+JSON.stringify(expected.documentKey)+','+JSON.stringify(contents.getURL())+','+JSON.stringify(token)+')'),context);guard();
+      if(armed?.armed!==true)throw problem('ACCOUNT_CHANGED','读取个人主页前原手机菜单按钮或页面已改变');context.nativeDrawerToken=token;menuOpenAttempted=true;
+      await this.bounded(()=>this.adapter.control.performAction(context.tab,{action:'click',elementId:initial.button.id},this.adapter.options(context.signal,guard)),context);guard();
+      const until=Date.now()+this.menuWaitMs;let first;
+      do{first=await this.state(profileId,context,expected);if(first.profileCandidate)break;if(Date.now()>=until)throw accountFailure('打开手机菜单后没有取得可核对的本人主页候选',first);await this.bounded(()=>new Promise(resolve=>setTimeout(resolve,this.pollIntervalMs)),context);}while(true);
+      const second=await this.state(profileId,context,expected);guard();
+      if(!second.profileCandidate||JSON.stringify(first.profileCandidate)!==JSON.stringify(second.profileCandidate)||first.pageURL!==second.pageURL||second.pageURL!==ORIGIN+'/')throw problem('ACCOUNT_CHANGED','两次手机菜单读取的本人主页候选不一致');
+      const createdAt=Date.now(),candidate=Object.freeze({kind:'own-profile-candidate',verified:false,profileId,tabId:context.tab.id,documentKey:second.documentKey,...memberURL(second.profileCandidate.profileURL),observedAt:new Date(createdAt).toISOString(),expiresAt:createdAt+PROFILE_CANDIDATE_MS,consistentReads:2});
+      profileCandidates.set(candidate,{adapter:this.adapter,profileId,tab:context.tab,token,createdAt});return candidate;
+    }catch(error){error.accountMenuOpenAttempted=menuOpenAttempted;throw error;}
+    finally{signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('destroyed',cancel);contents?.removeListener?.('render-process-gone',cancel);if(w?.vintedDraftController===controller)w.vintedDraftController=null;}
+  }
+  async validateOwnProfileLink(profileId,candidate,{signal,now=Date.now()}={}){
+    const entry=profileCandidates.get(candidate);profileCandidates.delete(candidate);
+    if(!entry||entry.adapter!==this.adapter||entry.profileId!==profileId||candidate.verified!==false||candidate.expiresAt<=now||entry.createdAt>now)throw problem('ACCOUNT_UNVERIFIED','个人主页候选已过期或不属于原环境，请重新核验');
+    const controller=new AbortController(),cancel=()=>controller.abort(),context={controller,signal:controller.signal,tab:entry.tab,profileCandidateOnly:true,nativeDrawerToken:entry.token};let w,contents;
+    const navigated=(_event,_url,_inPlace,mainFrame)=>{if(mainFrame!==false)cancel();};
+    try{
+      if(signal?.aborted)throw stopped();signal?.addEventListener('abort',cancel,{once:true});const selected=this.adapter.current(profileId,context);w=selected.w;contents=entry.tab.view.webContents;w.vintedDraftController=controller;
+      contents.on?.('did-start-navigation',navigated);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);
+      if(contents.getURL()!==ORIGIN+'/'||contents.isLoadingMainFrame?.())throw problem('ACCOUNT_CHANGED','原个人主页核验标签页已改变');
+      const surface=await this.bounded(()=>this.adapter.control.isolated(context.tab,'('+probeOwnProfileSurface.toString()+')()'),context);
+      if(surface?.challenge)throw problem('LOGIN_CHALLENGE','请先在核验标签页完成人工验证');if(surface?.ready!==true||surface.url!==ORIGIN+'/'||surface.documentKey!==candidate.documentKey)throw problem('ACCOUNT_CHANGED','原个人主页核验页已改变');
+      const state=await this.state(profileId,context,{documentKey:candidate.documentKey});this.adapter.current(profileId,context);
+      if(state.profileCandidate?.memberId!==candidate.memberId||state.profileCandidate?.profileURL!==candidate.profileURL||state.pageURL!==ORIGIN+'/'||candidate.expiresAt<=Date.now())throw problem('ACCOUNT_CHANGED','导航前手机菜单或个人主页候选已改变');return true;
+    }finally{signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('destroyed',cancel);contents?.removeListener?.('render-process-gone',cancel);if(w?.vintedDraftController===controller)w.vintedDraftController=null;}
   }
   async inspectAccount(profileId,{signal,controller:providedController,tab:providedTab,expectedAccount,closeMenu=false}={}){
     const controller=providedController||new AbortController();

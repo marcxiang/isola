@@ -47,6 +47,8 @@ await require(path.join(root,'test/vinted-sales-main-smoke.cjs'))(api,check);
 await require(path.join(root,'test/vinted-sales-navigation-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-dashboard-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-listing-setup-smoke.cjs'))(api,check);
+await require(path.join(root,'test/commerce-manual-start-ui-smoke.cjs'))(api,check);
+await require(path.join(root,'test/commerce-manual-main-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-publication-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-withdrawal-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-association-ui-smoke.cjs'))(api,check);
@@ -63,6 +65,7 @@ await require(path.join(root,'test/vinted-publish-submit-smoke.cjs'))(api,check)
 await require(path.join(root,'test/navigation-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-accounts-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/vinted-login-smoke.cjs'))(api,check);
+await require(path.join(root,'test/vinted-mobile-account-review-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-accounts-integration-smoke.cjs'))(api,check);
 await require(path.join(root,'test/environment-manager-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/device-diagnostics-smoke.cjs'))(api,check);

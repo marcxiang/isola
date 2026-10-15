@@ -15,7 +15,10 @@ async function publicationInput(engine,id,signal,guard){
  if(!prepared.summary?.ready||!prepared.manifest)throw Error('请先准备本计划的照片，并完成当前页面上传');
  const manifest=prepared.manifest,claims=engine.db.claims.filter(claim=>claim.id===manifest.claimId&&claim.profileId===plan.profileId&&claim.productId===plan.productId);
  if(claims.length!==1)throw Error('照片领取与当前计划无法唯一关联，已停止刊登核对');
- const product=await engine.product(plan,engine.client(),signal);guard();
+ const local=plan.source==='local';
+ if(local)require('./commerce-local-products.cjs').localClaimBinding(engine.db,plan,claims[0]);
+ else if(claims[0].source==='local')throw Error('本地照片不能用于货盘商品刊登');
+ const product=local?require('./commerce-local-products.cjs').getLocalProduct(engine,plan):await engine.product(plan,engine.client(),signal);guard();
  return {plan,product,claim:claims[0],expectedAccount,manifest};
 }
 function inspectPublication(engine,id){

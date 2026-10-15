@@ -13,7 +13,7 @@ const {FORM_URL,listingRevision,isPublicationOpen}=require('./vinted-publication
 const {missingListingFields}=require('./listing-config.cjs');
 const clone=value=>JSON.parse(JSON.stringify(value));
 const fail=(code,message,ambiguous=false)=>Object.assign(Error(message),{code,ambiguous});
-const binding=plan=>JSON.stringify([plan.id,plan.profileId,plan.productId,plan.sku,plan.enabled,plan.completedCount,listingRevision(plan.listingRevision),plan.targetCount,plan.listingPriceCents,plan.minOfferCents,plan.reuseOwnPhotos,plan.listing]);
+const binding=plan=>JSON.stringify([plan.id,plan.profileId,plan.productId,plan.source||'supplier',plan.sku,plan.enabled,plan.completedCount,listingRevision(plan.listingRevision),plan.targetCount,plan.listingPriceCents,plan.minOfferCents,plan.reuseOwnPhotos,plan.listing]);
 
 // One visible browser action at a time across profiles. The engine may run
 // independent supplier reads concurrently, but never steals focus mid-click.
@@ -130,16 +130,26 @@ class VintedSalesRuntime extends VintedAdapter {
    }finally{if(this.uiOwner===owner)this.uiOwner=null;}
   });
  }
- async maintenance({engine,signal}){
+ async maintenance({engine,signal,planIds=null}){
   if(signal.aborted||engine.closing||engine.faulted)return;
+  // A scoped plan start cannot dispatch associations belonging to another plan.
+  // Missing or ambiguous original publications never authorize an outbox write.
+  const owned=id=>{
+   if(planIds!==null&&!(planIds instanceof Set))return null;
+   const rows=(engine.db.publicationSupplierSync||[]).filter(row=>row.id===id),row=rows[0];if(rows.length!==1)return null;
+   const records=(engine.db.publications?.submissions||[]).filter(record=>record.id===row.submissionId),record=records[0],facts=record?.proof?.facts;
+   if(records.length!==1||record.state!=='published'||typeof facts?.planId!=='string'||!facts.planId||facts.profileId!==row.profileId||facts.productId!==row.productId||planIds!==null&&!planIds.has(facts.planId)||engine.db.plans?.some(plan=>plan.id===facts.planId&&plan.source==='local'))return null;
+   return {row,signature:JSON.stringify([row.id,row.submissionId,row.profileId,row.productId,record.id,record.state,facts.planId,facts.profileId,facts.productId])};
+  };
   for(const id of (engine.db.publicationSupplierSync||[]).filter(row=>!['synced','cancelled','needs_review'].includes(row.state)).map(row=>row.id)){
    if(signal.aborted||engine.closing||engine.faulted)return;
+   const original=owned(id);if(!original)continue;
    if((this.maintenanceAfter.get(id)||0)>Date.now())continue;
-   const row=engine.db.publicationSupplierSync.find(row=>row.id===id),profileId=row.profileId;
+   const row=original.row,profileId=row.profileId;
    if(engine.active.has(profileId))continue;
    const lease=engine.leases.acquire(profileId,'supplier:'+id);if(!lease)continue;
    const controller=new AbortController(),abort=()=>controller.abort();signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();engine.active.set(profileId,controller);
-   const guard=()=>{if(controller.signal.aborted||engine.closing||engine.faulted||engine.active.get(profileId)!==controller||!engine.leases.snapshot().some(row=>row.profileId===profileId&&row.jobId===lease.jobId))throw fail('STOPPED','货盘照片关联已停止');};
+   const guard=()=>{if(controller.signal.aborted||engine.closing||engine.faulted||engine.active.get(profileId)!==controller||!engine.leases.snapshot().some(row=>row.profileId===profileId&&row.jobId===lease.jobId)||owned(id)?.signature!==original.signature)throw fail('STOPPED','货盘照片关联已停止');};
    try{guard();await this.outbox.run(engine,id,{signal:controller.signal,guard,allowDispatch:true});}
    catch(error){if(!controller.signal.aborted&&!engine.faulted)engine.event('warning','照片上架关联：'+String(error.message).slice(0,400));}
    finally{this.maintenanceAfter.set(id,Date.now()+60000);signal.removeEventListener('abort',abort);if(engine.active.get(profileId)===controller)engine.active.delete(profileId);engine.leases.release(lease);engine.emit();}

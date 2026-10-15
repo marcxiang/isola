@@ -111,6 +111,7 @@ function jpegSize(bytes){
 }
 async function validateBytes(bytes,validateImage,signal){const size=jpegSize(bytes),decoded=await bounded(()=>validateImage(bytes),signal);if(!decoded||decoded.width!==size.width||decoded.height!==size.height)throw failure('PHOTO_IMAGE','JPEG 无法完整解码或尺寸不一致');return {...size,size:bytes.length,sha256:hash(bytes)};}
 function readPreparedPhotos(engine,planId){
+ if(engine.plan(planId).source==='local')return require('./commerce-local-products.cjs').readLocalPreparedPhotos(engine,planId);
  const record=findRecord(engine,engine.plan(planId));if(!record)return {summary:null,manifest:null};
  const summary=summarizePreparation(record);if(record.state!=='ready')return {summary,manifest:null};
  try{
@@ -155,6 +156,10 @@ async function preparePhotoWork(engine,planId,{setId,callerSignal,validateImage}
   const save=()=>{record.updatedAt=stamp();engine.persist();engine.emit();};
   try{
    guard();const plan=engine.plan(planId);if(!engine.profiles().some(p=>p.id===plan.profileId))throw failure('PHOTO_PROFILE','照片计划的环境不存在');
+   if(plan.source==='local'){
+    if(setId!==undefined)throw failure('PHOTO_SET','本地商品仅使用已导入的原照片，不领取货盘套组');
+    return require('./commerce-local-products.cjs').prepareLocalPhotos(engine,planId,{signal,guard});
+   }
    record=findRecord(engine,plan);if(record&&setId!==undefined&&setId!==record.setId)throw failure('PHOTO_CONFLICT','原照片任务已固定套组，不能改成另一套重新领取');
    const client=engine.client(),me=await bounded(s=>client.me({signal:s}),signal);guard();const accountId=engine.accountIdentity(me);
    if(!accountId||!engine.db.supplierAccountId||accountId!==engine.db.supplierAccountId||record&&accountId!==record.supplierAccountId)throw failure('PHOTO_IDENTITY','货盘账号与原连接或照片记录不一致');
@@ -191,4 +196,4 @@ async function preparePhotoWork(engine,planId,{setId,callerSignal,validateImage}
    throw error;
   }finally{for(const signal of [configSignal,callerSignal])signal?.removeEventListener('abort',abort);}
 }
-module.exports={preparePhotos,preparePhotosForJob,readPreparedPhotos,summarizePreparation,restorePhotoPreparations,MAX_IMAGE_BYTES,READ_TIMEOUT_MS};
+module.exports={preparePhotos,preparePhotosForJob,readPreparedPhotos,summarizePreparation,restorePhotoPreparations,jpegSize,MAX_IMAGE_BYTES,READ_TIMEOUT_MS};

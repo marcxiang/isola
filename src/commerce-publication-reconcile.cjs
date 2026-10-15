@@ -47,6 +47,9 @@ function projectPublicationReconciliation(db,nextPublications,{now=Date.now(),ac
   ensure(['dispatching','uncertain','published'].includes(old.state)&&old.attemptCount===1,'不能从未提交记录关联平台刊登');
   ensure(next.submissions.filter(row=>row.receipt?.listingId===receipt.listingId).length===1,'平台刊登编号关联了多个提交');
   const plan=one(staged.plans,row=>row.id===facts.planId,'销售计划'),account=one(staged.marketAccounts,row=>row.profileId===facts.profileId,'平台账号绑定'),claim=one(staged.claims,row=>row.id===facts.photos.claimId,'照片领取记录');
+  const local=plan.source==='local'||claim.source==='local';
+  if(local)require('./commerce-local-products.cjs').localClaimBinding(staged,plan,claim);
+  else ensure(!(staged.localProducts||[]).some(product=>product.id===facts.productId)&&[undefined,'supplier'].includes(plan.source)&&[undefined,'supplier'].includes(claim.source),'刊登商品来源与原照片不一致');
   ensure(plan.profileId===facts.profileId&&plan.productId===facts.productId&&plan.sku===facts.sku,'原计划的账号、商品或 SKU 已改变');
   ensure(account.memberId===facts.account.memberId&&account.profileURL===facts.account.profileURL,'原计划绑定的当前账号已改变');
   ensure(claim.profileId===facts.profileId&&claim.productId===facts.productId&&claim.setId===facts.photos.setId&&Array.isArray(claim.images)&&claim.images.length===facts.photos.count&&Array.isArray(claim.listings),'照片领取身份、套组或数量与原提交不一致');
@@ -75,12 +78,13 @@ function projectPublicationReconciliation(db,nextPublications,{now=Date.now(),ac
   for(const job of jobs){
    ensure(job.profileId===facts.profileId&&job.productId===facts.productId&&job.dedupeKey===listingJobKey(facts.planId,facts.cycle,revision)&&staged.jobs.filter(other=>other.id===job.id||other.dedupeKey===job.dedupeKey).length===1&&(!job.payload.claimId||job.payload.claimId===claim.id)&&(!job.accountMemberId||job.accountMemberId===facts.account.memberId),'原刊登任务身份不一致');
    ensure(job.operation==null&&job.mutationPending===false,'原刊登任务已有业务请求，需先核对，不能覆盖');
-   const result={externalId:receipt.listingId,submissionId:record.id,verified:true,summary:'实际刊登回执已核对；货盘上架关联另行核对'};
+   const result={externalId:receipt.listingId,submissionId:record.id,verified:true,summary:local?'实际本地商品刊登回执已核对；没有货盘关联请求':'实际刊登回执已核对；货盘上架关联另行核对'};
    if(job.state==='completed'){ensure(job.step==='publication_reconciled'&&same(job.result,result),'原完成任务与本次刊登回执不同');continue;}
    const leased=job.state==='running'&&Array.isArray(activeLeases)&&activeLeases.filter(lease=>lease.profileId===facts.profileId&&lease.jobId===job.id).length===1;
    ensure((['queued','needs_review','cancelled','rejected'].includes(job.state)||leased)&&job.result==null,'原刊登任务状态不能自动覆盖');
    Object.assign(job,{state:'completed',step:'publication_reconciled',result,error:'',retryAt:null,updatedAt:at,accountMemberId:facts.account.memberId});completedJobIds.push(job.id);
   }
+  if(local){ensure(!staged.publicationSupplierSync.some(row=>row.claimId===claim.id),'本地商品存在不合法的货盘关联请求');reconciledSubmissionIds.push(record.id);continue;}
   // Only one association may ever be sent for a photo claim. An older item
   // explicitly withdrawn before its association was sent may be skipped, while
   // the original local photo/listing history remains immutable. Missing history
@@ -112,6 +116,7 @@ function projectPublicationReconciliation(db,nextPublications,{now=Date.now(),ac
  for(const sync of staged.publicationSupplierSync){
   try{validateSupplierSyncRecord(sync);}catch{ensure(false,'货盘上架关联历史的请求或回执无效');}
   const claim=one(staged.claims,row=>row.id===sync.claimId,'货盘关联的原照片领取');
+  ensure(claim.source!=='local'&&!(staged.localProducts||[]).some(product=>product.id===sync.productId),'本地商品不能含有货盘关联历史');
   ensure(sync.profileId===claim.profileId&&sync.productId===claim.productId&&Array.isArray(claim.listings),'货盘上架关联历史不属于原环境或商品');
   const linked=one(claim.listings,row=>String(row.listingId)===sync.payload.listingId,'货盘关联的原刊登历史');
   ensure(linked.url===sync.payload.listingUrl,'货盘关联历史的原刊登链接不同');

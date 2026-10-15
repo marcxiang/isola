@@ -36,5 +36,6 @@ dialog{background:#242426;color:var(--ink);border:1px solid #51515b;border-radiu
 .listing-workflow-steps [data-complete="true"]{border-color:#416d58}.listing-workflow-steps [data-complete="true"] h3:before{background:#234d3a;color:#a3e1bc}
 .listing-config-note{padding:12px 16px;border-top:1px solid var(--line,#3b3b40)}.listing-config-note p{margin:5px 0;font-size:12px;line-height:1.6}.product-listing-status{display:block;margin-top:5px;font-size:12px}
 #product-listing-dialog{width:min(760px,calc(100vw - 36px));max-height:calc(100vh - 36px);overflow:auto}.inventory-intro{margin-bottom:16px}.inventory-intro h2{margin:0 0 8px}
+.manual-photo-picker{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:16px 0}.manual-photo-picker span{font-size:12px;color:var(--muted)}.account-check-feedback{padding:12px 14px;background:#2b2b32;border:1px solid var(--line);border-radius:7px;margin-bottom:12px}.account-check-feedback p{margin:8px 0 0;font-size:12px;overflow-wrap:anywhere}.account-check-feedback[data-account-check=failed]{border-color:#805d35}.account-check-feedback[data-account-check=verified]{border-color:#416d58}#account-verify-feedback{margin-top:16px}
 @media(max-width:1150px){.listing-workflow-steps{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){.listing-workflow-steps{grid-template-columns:1fr}}

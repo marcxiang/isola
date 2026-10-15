@@ -7,6 +7,10 @@ const {projectPublicationReconciliation}=require('../src/commerce-publication-re
 const clone=value=>JSON.parse(JSON.stringify(value));
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 const failure=(code,message=code)=>Object.assign(Error(message),{code});
+function associationRecord(f,{id='association',plan=f.context.plan,state='pending',publicationState='published'}={}){
+ const submissionId='submission-'+id,row={id,profileId:plan.profileId,productId:plan.productId,submissionId,state};
+ f.engine.db.publicationSupplierSync.push(row);f.engine.db.publications.submissions.push({id:submissionId,state:publicationState,proof:{facts:{planId:plan.id,profileId:plan.profileId,productId:plan.productId}}});return row;
+}
 
 // The test adapter substitutes browser reads at the existing main-process
 // boundaries, but uses the real publication proof, journal and DB projection.
@@ -102,20 +106,20 @@ test('a tab change after the single publish attempt is retained as uncertain wit
 });
 
 test('maintenance owns and releases a profile lease and only calls the photo-association outbox',async()=>{
- const f=fixture(),controller=new AbortController();f.engine.active.clear();f.engine.leases.release(f.context.lease);f.engine.db.publicationSupplierSync=[{id:'association',profileId:'profile-1',state:'pending'}];const observed=[];
+ const f=fixture(),controller=new AbortController();f.engine.active.clear();f.engine.leases.release(f.context.lease);associationRecord(f);const observed=[];
  f.runtime.outbox={run:async(engine,id,options)=>{observed.push(id);assert.equal(engine,f.engine);assert.equal(options.allowDispatch,true);assert.match(engine.leases.snapshot()[0].jobId,/^supplier:/);assert.equal(engine.active.get('profile-1').signal,options.signal);options.guard();}};
  await f.runtime.maintenance({engine:f.engine,signal:controller.signal});assert.deepEqual(observed,['association']);assert.equal(f.engine.active.size,0);assert.deepEqual(f.engine.leases.activeProfileIds(),[]);assert.equal(f.calls.length,0);assert.equal(f.clicks,0);await f.runtime.maintenance({engine:f.engine,signal:controller.signal});assert.equal(observed.length,1);
 });
 
 test('maintenance failure or cancellation releases only its own controller without touching browser tasks',async()=>{
- for(const stop of [false,true]){const f=fixture(),parent=new AbortController();f.engine.active.clear();f.engine.leases.release(f.context.lease);f.engine.db.publicationSupplierSync=[{id:'association',profileId:'profile-1',state:'pending'}];let signal;
+ for(const stop of [false,true]){const f=fixture(),parent=new AbortController();f.engine.active.clear();f.engine.leases.release(f.context.lease);associationRecord(f);let signal;
   f.runtime.outbox={run:async(_engine,_id,options)=>{signal=options.signal;if(stop)parent.abort();options.guard();throw Error('Association failed');}};
   await f.runtime.maintenance({engine:f.engine,signal:parent.signal});assert.equal(signal.aborted,stop);assert.equal(f.engine.active.size,0);assert.equal(f.engine.leases.activeProfileIds().length,0);assert.equal(f.clicks,0);if(!stop)assert.match(f.events.at(-1).text,/Association failed/);
  }
 });
 
 test('maintenance does not compete with an existing browser lease or replay reviewed and finished associations',async()=>{
- const f=fixture(),controller=new AbortController(),seen=[];f.engine.db.publicationSupplierSync=[{id:'pending',profileId:'profile-1',state:'pending'},{id:'done',profileId:'other',state:'synced'},{id:'review',profileId:'other',state:'needs_review'}];f.runtime.outbox={run:async(_engine,id)=>seen.push(id)};await f.runtime.maintenance({engine:f.engine,signal:controller.signal});assert.deepEqual(seen,[]);assert.equal(f.engine.active.get('profile-1'),f.context.controller);assert.equal(f.engine.leases.snapshot()[0].jobId,f.context.job.id);
+ const f=fixture(),controller=new AbortController(),seen=[];associationRecord(f,{id:'pending'});associationRecord(f,{id:'done',state:'synced'});associationRecord(f,{id:'review',state:'needs_review'});f.runtime.outbox={run:async(_engine,id)=>seen.push(id)};await f.runtime.maintenance({engine:f.engine,signal:controller.signal});assert.deepEqual(seen,[]);assert.equal(f.engine.active.get('profile-1'),f.context.controller);assert.equal(f.engine.leases.snapshot()[0].jobId,f.context.job.id);
 });
 
 test('an ambiguous plan identity cannot pass the owned listing guard',async()=>{
@@ -127,7 +131,7 @@ test('legacy engines without an association outbox do not produce a maintenance 
 });
 
 test('maintenance guard refuses an outbox mutation after its exact supplier lease is revoked',async()=>{
- const f=fixture(),controller=new AbortController();f.engine.active.clear();f.engine.leases.release(f.context.lease);f.engine.db.publicationSupplierSync=[{id:'association',profileId:'profile-1',state:'pending'}];let lease,mutation=false;const acquire=f.engine.leases.acquire.bind(f.engine.leases);f.engine.leases.acquire=(...args)=>(lease=acquire(...args));
+ const f=fixture(),controller=new AbortController();f.engine.active.clear();f.engine.leases.release(f.context.lease);associationRecord(f);let lease,mutation=false;const acquire=f.engine.leases.acquire.bind(f.engine.leases);f.engine.leases.acquire=(...args)=>(lease=acquire(...args));
  f.runtime.outbox={run:async(_engine,_id,options)=>{f.engine.leases.release(lease);options.guard();mutation=true;}};
  await f.runtime.maintenance({engine:f.engine,signal:controller.signal});assert.equal(mutation,false);assert.equal(f.engine.active.size,0);assert.equal(f.engine.leases.activeProfileIds().length,0);
 });
@@ -174,4 +178,36 @@ test('an archived withdrawal cannot make a later revision failure look like anot
  plan.listingRevision=1;job.payload.listingRevision=1;job.dedupeKey='listing:'+plan.id+':0:r1';
  f.engine.db.publications.submissions.push({id:'old-submission',state:'uncertain',attemptCount:1,proof:{facts:{planId:plan.id,cycle:0,listingRevision:0}},closedWithdrawal:{kind:'operator_confirmed_deletion'}});
  await assert.rejects(f.run(),error=>error.code==='READ_TIMEOUT'&&error.ambiguous!==true);assert.equal(f.calls.some(row=>row.name==='catalog'),true);assert.equal(f.calls.some(row=>row.name==='photos'),false);assert.equal(f.clicks,0);
+});
+
+test('listing guards bind the saved product source while preserving legacy supplier defaults',async()=>{
+ const changed=fixture({hooks:{catalog:async f=>{f.context.plan.source='local';}}});await assert.rejects(changed.run(),{code:'PLAN_CHANGED'});assert.equal(changed.calls.some(row=>row.name==='photos'),false);assert.equal(changed.clicks,0);assert.equal(changed.runtime.uiOwner,null);
+ const legacy=fixture({hooks:{catalog:async f=>{f.context.plan.source='supplier';}}});await legacy.run();assert.equal(legacy.clicks,1);assert.equal(legacy.engine.db.jobs[0].state,'completed');
+});
+
+test('scoped maintenance executes only the matching original publication and leaves other plan outboxes untouched',async()=>{
+ const f=fixture(),second=f.add(2),parent=new AbortController(),seen=[];f.engine.active.clear();f.engine.leases.release(f.context.lease);f.engine.leases.release(second.lease);associationRecord(f,{id:'selected'});associationRecord(f,{id:'other',plan:second.plan});
+ f.runtime.outbox={run:async(_engine,id,options)=>{options.guard();seen.push(id);}};
+ await f.runtime.maintenance({engine:f.engine,signal:parent.signal,planIds:new Set([f.context.plan.id])});assert.deepEqual(seen,['selected']);assert.equal(f.runtime.maintenanceAfter.has('other'),false);assert.equal(f.engine.db.publicationSupplierSync.find(row=>row.id==='other').state,'pending');assert.equal(f.engine.active.size,0);assert.deepEqual(f.engine.leases.snapshot(),[]);
+ await f.runtime.maintenance({engine:f.engine,signal:parent.signal,planIds:null});assert.deepEqual(seen,['selected','other']);
+});
+
+test('missing, ambiguous, uncertain or mismatched publication ownership cannot authorize maintenance',async()=>{
+ const changes=[
+  f=>f.engine.db.publications.submissions=[],
+  f=>f.engine.db.publications.submissions.push(clone(f.engine.db.publications.submissions[0])),
+  f=>f.engine.db.publications.submissions[0].state='uncertain',
+  f=>f.engine.db.publications.submissions[0].proof.facts.profileId='another-profile',
+  f=>f.engine.db.publications.submissions[0].proof.facts.productId='another-product',
+  f=>f.engine.db.publicationSupplierSync.push(clone(f.engine.db.publicationSupplierSync[0])),
+  f=>f.context.plan.source='local'
+ ];
+ for(const change of changes){const f=fixture(),parent=new AbortController(),seen=[];f.engine.active.clear();f.engine.leases.release(f.context.lease);associationRecord(f);change(f);f.runtime.outbox={run:async(_engine,id)=>seen.push(id)};await f.runtime.maintenance({engine:f.engine,signal:parent.signal,planIds:null});assert.deepEqual(seen,[]);assert.equal(f.engine.active.size,0);assert.deepEqual(f.engine.leases.snapshot(),[]);assert.equal(f.runtime.maintenanceAfter.size,0);}
+ const malformed=fixture(),parent=new AbortController();malformed.engine.active.clear();malformed.engine.leases.release(malformed.context.lease);associationRecord(malformed);let called=false;malformed.runtime.outbox={run:async()=>{called=true;}};await malformed.runtime.maintenance({engine:malformed.engine,signal:parent.signal,planIds:[]});assert.equal(called,false);
+});
+
+test('a changed publication plan cannot cross the maintenance scope after the outbox read has started',async()=>{
+ const f=fixture(),parent=new AbortController();f.engine.active.clear();f.engine.leases.release(f.context.lease);associationRecord(f);let mutation=false;
+ f.runtime.outbox={run:async(_engine,_id,options)=>{f.engine.db.publications.submissions[0].proof.facts.planId='outside-started-scope';options.guard();mutation=true;}};
+ await f.runtime.maintenance({engine:f.engine,signal:parent.signal,planIds:new Set([f.context.plan.id])});assert.equal(mutation,false);assert.equal(f.engine.active.size,0);assert.deepEqual(f.engine.leases.snapshot(),[]);
 });

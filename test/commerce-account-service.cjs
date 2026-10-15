@@ -31,6 +31,49 @@ test('manual verification uses explicit confirmation without decrypting any pass
 test('previous account identity is passed to the login service and contradictory bindings block before decryption',async()=>{
  const f=fixture();f.engine.db.marketAccounts=[{profileId:'profile-1',memberId:'456'}];f.account.identity={memberId:'123'};await assert.rejects(f.service.login('account-1'),{code:'ACCOUNT_CHANGED'});assert.equal(f.credentialReads,0);
 });
+test('only a complete stored account or engine binding supplies the mobile expected-account context',async()=>{
+ for(const source of ['account','engine','partial-account']){
+  const f=fixture(),binding={memberId:'123',profileURL:'https://www.vinted.fr/member/123',username:'fixture_seller'};
+  if(source==='account')f.account.identity={...binding};else f.engine.db.marketAccounts=[{profileId:'profile-1',...binding}];if(source==='partial-account')f.account.identity={memberId:'123'};
+  let reads=0;f.login.verify=async(_id,input)=>{reads++;assert.equal(input.expectedMemberId,'123');assert.deepEqual(input.expectedAccount,{profileId:'profile-1',...binding});assert.equal(Object.isFrozen(input.expectedAccount),true);assert.equal(input.login,'fixture@example.invalid');assert.equal(Object.hasOwn(input,'password'),false);return {status:'logged_in',verified:true,account:observed};};
+  await f.service.verify('account-1');assert.equal(reads,1);assert.equal(f.credentialReads,0);
+ }
+ const first=fixture();first.login.verify=async(_id,input)=>{assert.equal(Object.hasOwn(input,'expectedAccount'),false);assert.equal(input.expectedMemberId,undefined);assert.equal(input.confirmCurrent,true);return {status:'awaiting_user',code:'ACCOUNT_UNVERIFIED'};};const out=await first.service.verify('account-1',{confirmCurrent:true});assert.equal(out.result.verified,false);assert.equal(first.account.identity,null);
+});
+test('pending mobile verification forwards its prior binding without decrypting or repeating the unknown submission',async()=>{
+ const f=fixture(),binding={memberId:'123',profileURL:'https://www.vinted.fr/member/123',username:'fixture_seller'};f.account.identity={...binding};f.account.lastResult={code:'LOGIN_OUTCOME_UNKNOWN'};
+ f.login.verify=async(_id,input)=>{assert.deepEqual(input.expectedAccount,{profileId:'profile-1',...binding});return {status:'awaiting_user',code:'ACCOUNT_UNVERIFIED',submitted:false};};
+ const out=await f.service.login('account-1');assert.equal(out.result.verified,false);assert.equal(out.result.submitted,true);assert.equal(out.result.code,'IDENTITY_UNVERIFIED');assert.equal(f.credentialReads,0);assert.equal(f.loginCalls,0);
+});
+test('corrupt saved mobile URLs or usernames are rejected before credential access',async()=>{
+ for(const change of [{profileURL:'https://www.vinted.fr/member/456'},{username:'   '}]){const f=fixture();f.account.identity={memberId:'123',profileURL:'https://www.vinted.fr/member/123',username:'fixture_seller',...change};await assert.rejects(f.service.login('account-1'),{code:'ACCOUNT_CHANGED'});assert.equal(f.credentialReads,0);assert.equal(f.loginCalls,0);}
+});
+function candidateFixture(){
+ const f=fixture(),calls=[],candidate={kind:'own-profile-candidate',verified:false,profileId:'profile-1',tabId:'review-tab',documentKey:'review-document',memberId:'123',profileURL:'https://www.vinted.fr/member/123',expiresAt:Date.now()+30000,consistentReads:2};let verifies=0;
+ f.service.openPage=async(profileId,input)=>{calls.push({name:'open',fresh:input.freshAccountReview===true,ownProfileURL:input.ownProfileURL});return {profileId,url:input.ownProfileURL||'https://www.vinted.fr/',tabId:'review-tab'};};
+ f.login.verify=async(_id,input)=>{calls.push({name:'verify',expectedMemberId:input.expectedMemberId,expectedAccount:input.expectedAccount,confirmCurrent:input.confirmCurrent,closeAccountMenu:input.closeAccountMenu});return ++verifies===1?{status:'awaiting_user',code:'ACCOUNT_UNVERIFIED'}:{status:'logged_in',verified:true,account:{...observed,usernameSource:'own-profile-heading'}};};
+ f.login.inspectOwnProfileLink=async()=>{calls.push({name:'candidate'});return candidate;};f.login.validateOwnProfileLink=async(_id,value)=>{assert.equal(value,candidate);calls.push({name:'validate'});return true;};return Object.assign(f,{calls,candidate});
+}
+test('explicit first mobile review navigates only a validated candidate then obtains a separate full profile identity',async()=>{
+ const f=candidateFixture(),out=await f.service.verify('account-1',{confirmCurrent:true});assert.equal(out.result.verified,true);assert.equal(f.engine.db.marketAccounts[0].memberId,'123');assert.deepEqual(f.calls.map(row=>row.name),['open','verify','open','candidate','validate','open','verify']);assert.equal(f.calls[2].fresh,true);assert.equal(f.calls[5].ownProfileURL,f.candidate.profileURL);assert.ok(f.calls.filter(row=>row.name==='verify').every(row=>row.expectedMemberId===undefined&&row.expectedAccount===undefined&&row.confirmCurrent===true&&row.closeAccountMenu===true));assert.equal(f.credentialReads,0);
+});
+test('repeated operator checks require menu closure each time and an unclosed result cannot replace the last trusted binding',async()=>{
+ const f=fixture(),requests=[];f.account.identity={memberId:'123',profileURL:observed.profileURL,username:observed.username};f.engine.db.marketAccounts=[{profileId:'profile-1',...f.account.identity}];
+ f.login.verify=async(_id,input)=>{requests.push(input);assert.equal(input.closeAccountMenu,true);assert.equal(input.expectedAccount.memberId,'123');return requests.length===2?{status:'awaiting_user',code:'ACCOUNT_UNVERIFIED',verified:false}:{status:'logged_in',verified:true,account:observed};};
+ const first=await f.service.verify('account-1',{confirmCurrent:true,closeAccountMenu:false});assert.equal(first.result.verified,true);
+ const failed=await f.service.verify('account-1',{confirmCurrent:true});assert.equal(failed.result.verified,false);assert.equal(failed.result.code,'IDENTITY_UNVERIFIED');assert.equal(f.engine.db.marketAccounts[0].memberId,'123');assert.equal(f.account.identity.memberId,'123');assert.equal(f.engine.accountObservations.size,0);
+ const third=await f.service.verify('account-1',{confirmCurrent:true});assert.equal(third.result.verified,true);assert.equal(requests.length,3);assert.equal(f.credentialReads,0);assert.equal(f.loginCalls,0);
+});
+test('a profile candidate cannot replace first confirmation or an existing trusted member binding',async()=>{
+ const first=candidateFixture(),out=await first.service.verify('account-1',{confirmCurrent:false});assert.equal(out.result.verified,false);assert.equal(first.calls.some(row=>row.name==='candidate'),false);
+ const bound=candidateFixture();bound.engine.db.marketAccounts=[{profileId:'profile-1',memberId:'123',profileURL:observed.profileURL,username:observed.username}];await bound.service.verify('account-1',{confirmCurrent:true});assert.equal(bound.calls.some(row=>row.name==='candidate'),false);
+});
+test('expired, changed or unvalidated profile candidates never navigate or bind another account',async()=>{
+ for(const change of ['expired','validation','different-account']){
+  const f=candidateFixture();if(change==='expired')f.candidate.expiresAt=Date.now()-1;if(change==='validation')f.login.validateOwnProfileLink=async()=>{throw Object.assign(Error('stale'),{code:'ACCOUNT_CHANGED'});};if(change==='different-account'){let reads=0;f.login.verify=async()=>++reads===1?{status:'awaiting_user',code:'ACCOUNT_UNVERIFIED'}:{status:'logged_in',verified:true,account:{...observed,memberId:'456',profileURL:'https://www.vinted.fr/member/456'}};}
+  const out=await f.service.verify('account-1',{confirmCurrent:true});assert.equal(out.result.verified,false);assert.equal(f.engine.db.marketAccounts.length,0);if(change!=='different-account')assert.equal(f.calls.some(row=>row.ownProfileURL),false);assert.equal(f.credentialReads,0);
+ }
+});
 test('raw provider failures and unknown codes never reach IPC results',async()=>{
  const f=fixture();f.login.verify=async()=>{const e=Error('fixture-secret');e.code='fixture-secret';throw e;};const out=await f.service.verify('account-1');assert.equal(out.result.code,'UNAVAILABLE');assert.doesNotMatch(JSON.stringify(out),/fixture-secret/);
  f.engine.configure=async()=>{throw Error('fixture-secret');};await assert.rejects(f.service.open('account-1'),error=>error.code==='ACCOUNT_UNAVAILABLE'&&!error.message.includes('fixture-secret'));

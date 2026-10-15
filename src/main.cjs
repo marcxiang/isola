@@ -16,6 +16,7 @@ const commercePreparation = require('./commerce-preflight.cjs');
 const {inspectPublication,submitPublication}=require('./commerce-publication-service.cjs');
 const associationService=require('./commerce-association-service.cjs').createAssociationService();
 const {createPhotoService}=require('./commerce-photo-service.cjs');
+const {createLocalProductService}=require('./commerce-local-products.cjs');
 const { SKUDeskClient } = require('./sku-desk.cjs');
 const { RequestGate } = require('./sku-transport.cjs');
 const {stopDraft,installUnloadGuard,closeContents}=require('./navigation-lifecycle.cjs');
@@ -31,10 +32,15 @@ let commerceView, commerceOwner, commerceLoading, managerLoading, workspacePage=
 let commerce, commerceAccounts, awakeId=null, commerceLoadError=false, managerStatusTimer=null;
 const COMMERCE_PAGES=new Set(['overview','accounts','inventory','plans','jobs','settings']);
 const accountTabs=new Map();
+const accountReviewTabs=new Map();
 const salesTabs=new Map();
 const skuGate=new RequestGate({maxConcurrent:3,maxPerMinute:100});
 const windows = new Map(), locks = new Set(), routes = new Map();
 const photoService=createPhotoService({nativeImage,focusProfile:id=>{const w=windows.get(id);if(w&&!w.isDestroyed()){if(w.isMinimized())w.restore();w.show();w.focus();}}});
+const localProductService=createLocalProductService({
+ selectFiles:async()=>{const result=await dialog.showOpenDialog(manager,{title:'选择自己的商品照片',properties:['openFile','multiSelections'],filters:[{name:'商品照片',extensions:['jpg','jpeg','png','webp']}]});return result.canceled?[]:result.filePaths;},
+ normalizeImage:bytes=>{let image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('商品照片无法解码，请选择有效图片');const size=image.getSize();if(!size.width||!size.height)throw Error('商品照片尺寸无效');const scale=Math.min(1,1200/size.width,1200/size.height);if(scale<1)image=image.resize({width:Math.max(1,Math.round(size.width*scale)),height:Math.max(1,Math.round(size.height*scale)),quality:'best'});const normalized=image.getSize(),output=image.toJPEG(90);if(!output.length)throw Error('商品照片无法安全转换');return {bytes:output,width:normalized.width,height:normalized.height};}
+});
 const hasInstanceLock = app.requestSingleInstanceLock();
 if (!hasInstanceLock) app.quit();
 app.on('second-instance', () => { if (manager && !manager.isDestroyed()) showWorkspaceWindow(manager); else void createManager().then(showWorkspaceWindow).catch(error=>log('主窗口打开失败: '+error.message)); });
@@ -281,14 +287,74 @@ async function openListingPage(engine,planId,{active=false}={}) {
     }finally{w.navigationPending=false;}
   });
 }
-async function openAccountPage(profileId,{signal,guard,freshLogin=false}){
- guard();if(signal.aborted)throw accountError('ACCOUNT_UNAVAILABLE');
- if(!windows.has(profileId))await launch(profileId);
+function waitOwnedPageReady(w,tab,url,{signal,guard,timeoutMs=10000,settleMs=0,failure=()=>accountError('ACCOUNT_UNAVAILABLE')}){
+ const c=tab.view.webContents,navigationId=tab.navigationId;
+ // loadURL can resolve before Chromium clears its main-frame loading flag.
+ // Native bounds may also still await the current display acknowledgement.
+ // Wait on this exact visible document; never reload it or retry an action.
+ return new Promise((resolve,reject)=>{
+  let done=false,timer,expires,stableAt=0,stableVersion;
+  const listeners=[],windowListeners=[],fail=failure;
+  const finish=error=>{if(done)return;done=true;clearTimeout(timer);clearTimeout(expires);for(const [name,fn] of listeners)c.removeListener(name,fn);for(const [name,fn] of windowListeners)w.removeListener(name,fn);signal?.removeEventListener('abort',cancel);if(error)reject(error);else resolve();};
+  const valid=()=>{guard();if(signal?.aborted||w.isDestroyed()||windows.get(w.profile.id)!==w||w.closingPromise||w.aiAgent?.state?.running||w.vintedDraftController||!w.tabs.includes(tab)||w.activeTab!==tab.id||!w.isVisible()||w.isMinimized()||tab.navigationId!==navigationId||c.isDestroyed()||tab.error||c.getURL()!==url)throw fail();};
+  const cancel=()=>finish(fail()),listen=(name,fn)=>{c.on(name,fn);listeners.push([name,fn]);};
+  const check=async()=>{
+   if(done)return;
+   try{
+    valid();const display=getDisplayState(c);let complete=false;
+    if(!c.isLoadingMainFrame()&&display.ready&&display.active){
+     const ready=await c.executeJavaScript('document.readyState === "complete"');if(done)return;
+     valid();const current=getDisplayState(c);
+     complete=ready===true&&!c.isLoadingMainFrame()&&current.ready&&current.active&&current.version===display.version&&tab.isInputVisible();
+     if(complete){if(stableVersion!==current.version){stableVersion=current.version;stableAt=Date.now();}if(Date.now()-stableAt>=settleMs)return finish();}
+    }
+    if(!complete){stableAt=0;stableVersion=undefined;}
+    timer=setTimeout(check,40);
+   }catch(error){finish(error);}
+  };
+  try{
+   valid();signal?.addEventListener('abort',cancel,{once:true});
+   listen('did-start-navigation',(event,_url,_inPlace,isMain)=>{if((event?.isMainFrame??isMain)!==false)finish(fail());});
+   listen('destroyed',cancel);listen('render-process-gone',cancel);
+   listen('did-fail-load',(_event,_code,_description,_url,isMain)=>{if(isMain!==false)finish(fail());});
+   for(const name of ['hide','minimize','closed']){w.on(name,cancel);windowListeners.push([name,cancel]);}
+   expires=setTimeout(()=>finish(fail()),timeoutMs);void check();
+  }catch(error){finish(error);}
+ });
+}
+async function openAccountPage(profileId,{signal,guard,freshLogin=false,freshAccountReview=false,ownProfileURL}){
+ const ownReview=ownProfileURL!==undefined,reviewHome='https://www.vinted.fr/';
+ if(freshAccountReview&&freshLogin||ownReview&&(freshLogin||freshAccountReview)||ownReview&&(typeof ownProfileURL!=='string'||!/^https:\/\/www\.vinted\.fr\/member\/[1-9]\d*$/.test(ownProfileURL)))throw accountError('ACCOUNT_UNAVAILABLE');
+ const valid=()=>{guard();if(signal.aborted)throw accountError('ACCOUNT_UNAVAILABLE');};
+ valid();
+ if(ownReview&&!windows.has(profileId))throw accountError('ACCOUNT_UNAVAILABLE');
+ if(!windows.has(profileId))await launch(profileId,{guard:valid,...(freshAccountReview?{initialURL:'about:blank'}:{})});
  guard();const w=windows.get(profileId);
  if(!w||w.isDestroyed())throw accountError('ACCOUNT_UNAVAILABLE');
  if(w.closingPromise||w.navigationPending||w.aiAgent?.state?.running||w.vintedDraftController)throw accountError('ACCOUNT_BUSY');
  w.navigationPending=true;
  try{
+  if(freshAccountReview||ownReview){
+   let tab;
+   if(freshAccountReview){
+    const old=accountReviewTabs.get(profileId);old?.dispose();accountReviewTabs.delete(profileId);
+    tab=await addTab(w,reviewHome);valid();await waitOwnedPageReady(w,tab,reviewHome,{signal,guard:valid});const c=tab.view.webContents;
+    if(c.isDestroyed()||tab.error||c.getURL()!==reviewHome)throw accountError('ACCOUNT_UNAVAILABLE');
+    const review={tabId:tab.id,navigationId:tab.navigationId,invalid:false};
+    const changed=(_event,_url,_inPlace,isMain)=>{if(isMain!==false)review.invalid=true;};
+    const gone=()=>{review.invalid=true;};c.on('did-start-navigation',changed);c.once('destroyed',gone);
+    review.dispose=()=>{c.removeListener('did-start-navigation',changed);c.removeListener('destroyed',gone);};accountReviewTabs.set(profileId,review);
+   }else{
+    const review=accountReviewTabs.get(profileId);tab=w.tabs.find(row=>row.id===review?.tabId);
+    if(!review||review.invalid||!tab||w.activeTab!==tab.id||tab.navigationId!==review.navigationId||tab.view.webContents.isDestroyed()||tab.view.webContents.getURL()!==reviewHome)throw accountError('ACCOUNT_UNAVAILABLE');
+    valid();review.dispose();accountReviewTabs.delete(profileId);
+    await navigateTab(w,tab,ownProfileURL);valid();await waitOwnedPageReady(w,tab,ownProfileURL,{signal,guard:valid});
+    if(tab.view.webContents.isDestroyed()||tab.error||tab.view.webContents.getURL()!==ownProfileURL)throw accountError('ACCOUNT_UNAVAILABLE');
+   }
+   valid();if(w.isDestroyed()||w.activeTab!==tab.id)throw accountError('ACCOUNT_UNAVAILABLE');
+   accountTabs.set(profileId,tab.id);if(w.isMinimized())w.restore();w.show();w.focus();tab.view.webContents.focus();
+   return {profileId,url:tab.view.webContents.getURL(),tabId:tab.id};
+  }
   let tab=freshLogin?null:w.tabs.find(t=>t.id===accountTabs.get(profileId)&&!t.view.webContents.isDestroyed());
   const compatible=t=>{try{const u=new URL(t.view.webContents.getURL());return u.origin==='https://www.vinted.fr'&&!u.username&&!u.password&&(freshLogin?u.href===LOGIN_URL:['/','/member/login','/member/login/email','/login'].includes(u.pathname));}catch{return false;}};
   if(!tab)tab=w.tabs.find(t=>t.id===w.activeTab&&compatible(t))||w.tabs.find(t=>!t.view.webContents.isDestroyed()&&compatible(t));
@@ -330,6 +396,7 @@ async function openSalesPage(profileId,url,{signal,guard,jobId,role}){
   if(tab){w.activeTab=tab.id;resizeViews(w);sendState(w);}else tab=await addTab(w,url,{salesNavigation:{signal,guard:valid},onCreated:created=>salesTabs.set(key,created.id)});
   valid();if(tab.error||tab.view.webContents.isDestroyed()||tab.view.webContents.isLoadingMainFrame()||tab.view.webContents.getURL()!==url)throw Object.assign(Error('后台页面未能完整打开，请检查账号和网络'),{code:'PAGE_CHANGED'});
   if(w.isMinimized())w.restore();w.show();w.focus();tab.view.webContents.focus();
+  await waitOwnedPageReady(w,tab,url,{signal,guard:valid,settleMs:200,failure:()=>Object.assign(Error('后台页面显示或加载尚未就绪，请核对原窗口'),{code:'INPUT_SURFACE_UNAVAILABLE'})});
   return {tab};
  }finally{w.navigationPending=false;}
 }
@@ -434,6 +501,10 @@ function register() {
   const desk=(name,fn)=>ipcMain.handle(name,(e,...args)=>{if(!manager||manager.isDestroyed()||commerceOwner!==manager||!commerceView||commerceView.webContents.isDestroyed()||e.sender!==commerceView.webContents||e.senderFrame!==commerceView.webContents.mainFrame||e.sender.getURL()!==localFile('commerce.html'))throw Error('无权访问运营工作台');return fn(ensureCommerce(),...args);});
   desk('commerce-home',()=>showEnvironmentManager());
   desk('commerce-product-listing-save',(c,input)=>c.saveProductListing(input));
+  desk('commerce-local-photos-import',(c,input)=>localProductService.importPhotos(c,input));
+  desk('commerce-local-product-save',(c,input)=>localProductService.saveManualProduct(c,input));
+  desk('commerce-plan-start',(c,id)=>c.startPlan(id));
+  desk('commerce-plan-save-start',(c,input)=>c.saveAndStartPlan(input));
   desk('commerce-account-save',(_c,input)=>commerceAccounts.save(input));desk('commerce-account-delete',(_c,id)=>commerceAccounts.remove(id));
   desk('commerce-account-login',(_c,id)=>commerceAccounts.login(id));desk('commerce-account-open',(_c,id)=>commerceAccounts.open(id));desk('commerce-account-verify',(_c,id,options)=>commerceAccounts.verify(id,options));
   desk('commerce-publication-inspect',(c,id)=>inspectPublication(c,id));

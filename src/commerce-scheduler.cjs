@@ -78,6 +78,7 @@ function inspectQueue(input,{now=Date.now()}={}){
     else if(job.state==='needs_review')status=decision('blocked','MANUAL_REVIEW',clean(job.error)||'此任务等待人工核对。','检查原记录，再决定重试或取消。');
     else if(job.state==='running')status=active.has(job.profileId)?decision('running','OPERATION_ACTIVE','该环境正在执行任务。','等待当前步骤结束。'):decision('blocked','ORPHAN_RUNNING','运行中的任务缺少当前操作租约。','先执行重启恢复检查，不能直接重复执行。');
     else if(!plan.enabled)status=decision('paused','PLAN_PAUSED','该销售计划已暂停。','启用计划后重新检查前置条件。');
+    else if(Array.isArray(input.runningPlanIds)&&!input.runningPlanIds.includes(plan.id))status=decision('paused','PLAN_NOT_STARTED','这个计划不在本次明确启动的范围内。','在该计划点击“启用并开始”，或明确启动全部已启用计划。');
     else if(input.configBusy)status=decision('waiting','CONFIG_BUSY','连接或配置正在更新。','等待配置保存完成。');
     else if(active.has(job.profileId))status=decision('waiting','PROFILE_BUSY','该环境已有操作正在执行。','等待原操作释放环境。');
     else if(quarantined.has(job.profileId))status=decision('blocked','PROFILE_RECONCILE_REQUIRED','该环境存在结果不明的业务操作。','先核对原操作，再恢复该账号的其他任务。');

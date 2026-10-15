@@ -67,9 +67,9 @@ module.exports=async function commerceListingSetupSmoke(_api,check){
   });
   await check('a new listing plan copies product details and prices while saving only the plan snapshot',async()=>{
    await openNewPlan();const shown=await planFields();assert.equal(shown.id,'');assert.equal(shown.productId,catalog[0].id);assert.equal(shown.profileId,initial.profiles[0].id);assert.deepEqual(shown.listing,expectedFormListing(firstListing));assert.equal(shown.price,'12.50');assert.equal(shown.min,'10.00');assert.match(shown.template,/已带入商品资料/);
-   await js(`(()=>{const form=document.querySelector('#plan-form');form.elements.enabled.checked=true;form.requestSubmit();})()`);await until(async()=>await count('savePlan')===1&&!await js('document.querySelector("#plan-dialog").open'),'plan snapshot saves');
-   const input=(await calls()).find(row=>row.name==='savePlan').args[0];assert.equal(input.productId,catalog[0].id);assert.equal(input.profileId,initial.profiles[0].id);assert.deepEqual(input.listing,expectedFormListing(firstListing));assert.equal(input.listingPriceCents,1250);assert.equal(input.minOfferCents,1000);assert.equal(input.enabled,true);assert.equal(input.targetCount,1);await assertNoExecution();
-   return {copiedToPlan:true,enabledPlanSaved:true,executionStillStopped:true};
+   await js(`(()=>{const form=document.querySelector('#plan-form');form.elements.enabled.checked=false;form.requestSubmit();})()`);await until(async()=>await count('savePlan')===1&&!await js('document.querySelector("#plan-dialog").open'),'plan snapshot saves');
+   const input=(await calls()).find(row=>row.name==='savePlan').args[0];assert.equal(input.productId,catalog[0].id);assert.equal(input.profileId,initial.profiles[0].id);assert.deepEqual(input.listing,expectedFormListing(firstListing));assert.equal(input.listingPriceCents,1250);assert.equal(input.minOfferCents,1000);assert.equal(input.enabled,false);assert.equal(input.targetCount,1);await assertNoExecution();
+   return {copiedToPlan:true,disabledDraftSaved:true,executionStillStopped:true};
   });
   await check('editing a product template affects future plans but preserves an existing plan listing and prices',async()=>{
    await openProduct();await fillProduct(secondListing,'14.99','11.00');await saveProduct(3);

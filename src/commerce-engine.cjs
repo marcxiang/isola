@@ -50,6 +50,23 @@ const eventIdentity=event=>Object.fromEntries(['type','id','profileId','memberId
 function saleCycleComplete(db,planId){return db.sales.filter(sale=>sale.planId===planId).every(sale=>db.jobs.filter(job=>job.id===sale.jobId&&['fulfillment','sale_confirmation'].includes(job.type)&&job.planId===planId&&job.state==='completed'&&job.mutationPending===false&&job.result?.verified===true&&validEventText(job.result?.externalId)&&(job.type!=='sale_confirmation'||job.result.kind==='sale_confirmation'&&job.result.externalId===sale.platformOrderId)).length===1);}
 function queuedJob(type,plan,payload,dedupeKey){return {id:randomUUID(),dedupeKey,type,planId:plan.id,profileId:plan.profileId,productId:plan.productId,state:'queued',step:'pending',payload,operation:null,mutationPending:false,createdAt:now(),updatedAt:now(),error:'',result:null};}
 function stopped(){return problem('STOPPED','操作已停止，未提交过期结果');}
+const SECRET_STORAGE_TIMEOUT_MS=30000;
+function boundedSecret(work,signal){
+ if(signal?.aborted)return Promise.reject(stopped());
+ return new Promise((resolve,reject)=>{
+  let settled=false,timer;
+  const finish=(callback,value)=>{if(settled)return;settled=true;clearTimeout(timer);signal?.removeEventListener('abort',onAbort);callback(value);};
+  const onAbort=()=>finish(reject,stopped());
+  signal?.addEventListener('abort',onAbort,{once:true});
+  timer=setTimeout(()=>finish(reject,problem('SECRET_STORAGE_TIMEOUT','系统密钥访问超时，操作已停止；请检查钥匙串后重试，原密钥已保留')),SECRET_STORAGE_TIMEOUT_MS);
+  // Native async keychain work cannot be cancelled. Consume late settlements,
+  // but never create a client, save a key or continue the original operation.
+  Promise.resolve().then(()=>{if(signal?.aborted)throw stopped();return work();}).then(
+   value=>finish(resolve,value),
+   ()=>finish(reject,problem('SECRET_STORAGE_UNAVAILABLE','系统密钥暂时无法访问，操作已停止；原密钥已保留'))
+  );
+ });
+}
 function boundedRead(fn,signal,timeout=30000){
  if(signal?.aborted)return Promise.reject(stopped());
  const controller=new AbortController();let timer,onAbort;
@@ -74,9 +91,9 @@ function validatePlan(input,{profiles,products,previous}={}){
   return {id:previous?.id||randomUUID(),profileId,productId,source:product.source==='local'?'local':'supplier',sku:product.sku,name:product.name,targetCount,listingPriceCents,minOfferCents,currency:'EUR',enabled:input.enabled===true,autoReply:input.autoReply===true,autoAcceptOffers:input.autoAcceptOffers===true,reuseOwnPhotos:input.reuseOwnPhotos!==false,replyPolicy:String(input.replyPolicy||'').slice(0,2000),listing:normalizeListing(input.listing===undefined?previous?.listing:input.listing),completedCount:previous?.completedCount||0,listingRevision:listingRevision(previous?.listingRevision),activeListingId:previous?.activeListingId||null,status:previous?.status||'paused',createdAt:previous?.createdAt||now(),updatedAt:now()};
 }
 class CommerceEngine{
- constructor({dir,profiles=()=>[],clientFactory,adapter,seal,unseal,accounts=null,onChange=()=>{}}){
+ constructor({dir,profiles=()=>[],clientFactory,adapter,seal,unseal,sealAsync=seal,unsealAsync=unseal,accounts=null,onChange=()=>{}}){
   this.accounts=accounts;
-  this.dir=dir;this.profiles=profiles;this.clientFactory=clientFactory;this.adapter=adapter;this.seal=seal;this.unseal=unseal;this.onChange=onChange;this.active=new Map();this.leases=new ProfileOperationLeases();this.accountObservations=new Map();this.running=false;this.timer=null;this.ticking=false;this.faulted=false;this.connection={status:'not_connected'};this.runGeneration=0;this.tickController=null;this.tickPromise=null;this.closing=false;this.closePromise=null;this.configPending=0;this.configController=null;this.configTail=Promise.resolve();
+  this.dir=dir;this.profiles=profiles;this.clientFactory=clientFactory;this.adapter=adapter;this.seal=seal;this.unseal=unseal;this.sealAsync=sealAsync;this.unsealAsync=unsealAsync;this.onChange=onChange;this.active=new Map();this.leases=new ProfileOperationLeases();this.accountObservations=new Map();this.running=false;this.timer=null;this.ticking=false;this.faulted=false;this.connection={status:'not_connected'};this.runGeneration=0;this.tickController=null;this.tickPromise=null;this.closing=false;this.closePromise=null;this.configPending=0;this.configController=null;this.configTail=Promise.resolve();
   this.runningPlanIds=null;
   fs.mkdirSync(dir,{recursive:true,mode:0o700});this.file=path.join(dir,'commerce-state.json');
   this.db=fs.existsSync(this.file)?JSON.parse(fs.readFileSync(this.file,'utf8')):{version:1,settings:{...DEFAULTS},encryptedToken:'',plans:[],products:[],productListings:[],photoSets:[],jobs:[],events:[],claims:[],sales:[],reservations:[]};
@@ -151,7 +168,15 @@ class CommerceEngine{
  }
  emit(){this.onChange(this.state());}
  event(kind,message){this.db.events.push({time:now(),kind,text:String(message).slice(0,500)});if(this.db.events.length>300)this.db.events.shift();}
- client(){if(!this.db.encryptedToken)throw problem('NOT_CONNECTED','请先填写货盘 API 密钥并测试连接');return this.clientFactory({baseURL:this.db.settings.baseURL,token:this.unseal(this.db.encryptedToken)});}
+ async client(signal){
+  if(this.closing||this.storageFaulted()||signal?.aborted)throw stopped();
+  const encrypted=this.db.encryptedToken,baseURL=this.db.settings.baseURL;
+  if(!encrypted)throw problem('NOT_CONNECTED','请先填写货盘 API 密钥并测试连接');
+  const token=await boundedSecret(()=>this.unsealAsync(encrypted),signal);
+  if(this.closing||this.storageFaulted()||signal?.aborted||this.db.encryptedToken!==encrypted||this.db.settings.baseURL!==baseURL)throw stopped();
+  if(typeof token!=='string'||!token.trim())throw problem('SECRET_STORAGE_UNAVAILABLE','系统密钥暂时无法访问，操作已停止；原密钥已保留');
+  return this.clientFactory({baseURL,token});
+ }
  hasHistory(){return ['plans','jobs','claims','sales','reservations','photoPreparations'].some(key=>this.db[key].length>0);}
  hasSupplierHistory(){
   const localIds=new Set(this.db.plans.filter(plan=>plan.source==='local').map(plan=>plan.id));
@@ -162,9 +187,9 @@ class CommerceEngine{
   this.db.products=[];this.db.photoSets=[];this.db.productListings=this.db.productListings.filter(row=>localIds.has(row.productId));
  }
  configure(work){
-  if(this.closing)return Promise.reject(stopped());if(this.active.size||this.running||this.ticking)return Promise.reject(Error('请先停止后台并等待当前步骤结束，再读取或修改货盘配置'));
+  if(this.closing||this.storageFaulted())return Promise.reject(stopped());if(this.active.size||this.running||this.ticking)return Promise.reject(Error('请先停止后台并等待当前步骤结束，再读取或修改货盘配置'));
   this.configPending++;
-  const task=this.configTail.then(async()=>{if(this.closing)throw stopped();const controller=new AbortController();this.configController=controller;const guard=()=>{if(this.closing||controller.signal.aborted)throw stopped();};try{guard();return await work(controller.signal,guard);}finally{if(this.configController===controller)this.configController=null;}});
+  const task=this.configTail.then(async()=>{if(this.closing||this.storageFaulted())throw stopped();const controller=new AbortController();this.configController=controller;const guard=()=>{if(this.closing||this.storageFaulted()||controller.signal.aborted)throw stopped();};try{guard();return await work(controller.signal,guard);}finally{if(this.configController===controller)this.configController=null;}});
   const finished=task.finally(()=>{this.configPending--;this.emit();});this.configTail=finished.catch(()=>{});return finished;
  }
  async saveSettings(input){
@@ -175,20 +200,25 @@ class CommerceEngine{
   const next={...this.db.settings,baseURL,backgroundEnabled:input.backgroundEnabled===true,maxConcurrent:integer(Number(input.maxConcurrent??2),1,3,'并发窗口数'),perOrderLimitCents:money(input.perOrderLimitCents??0,'单笔采购限额'),dailyLimitCents:money(input.dailyLimitCents??0,'每日采购限额'),fulfillmentMethod:input.fulfillmentMethod||this.db.settings.fulfillmentMethod};
   if(!['self','wms'].includes(next.fulfillmentMethod))throw Error('发货方式无效');
   if(next.dailyLimitCents&&next.perOrderLimitCents>next.dailyLimitCents)throw Error('单笔限额不能高于每日限额');
-  let encrypted=this.db.encryptedToken;const endpointChanged=baseURL!==this.db.settings.baseURL,history=this.hasSupplierHistory(),tokenChanged=!!input.clearToken||!!input.token&&(!encrypted||text(input.token,'API 密钥',4096)!==this.unseal(encrypted));
+  let encrypted=this.db.encryptedToken;const endpointChanged=baseURL!==this.db.settings.baseURL,history=this.hasSupplierHistory();
+  const token=!input.clearToken&&input.token?text(input.token,'API 密钥',4096):'',oldToken=token&&encrypted?await boundedSecret(()=>this.unsealAsync(encrypted),signal):null;guard();
+  if(token&&encrypted&&(typeof oldToken!=='string'||!oldToken.trim()))throw problem('SECRET_STORAGE_UNAVAILABLE','系统密钥暂时无法访问，操作已停止；原密钥已保留');
+  const tokenChanged=!!input.clearToken||!!token&&(!encrypted||token!==oldToken);
   if(endpointChanged){if(history)throw Error('已有运营计划或历史，不能把原照片和订单切换到另一货盘');encrypted='';}
   let accountId=this.db.supplierAccountId;
-  if(input.clearToken)encrypted='';else if(input.token){const token=text(input.token,'API 密钥',4096);if(history){const client=this.clientFactory({baseURL,token}),me=await boundedRead(requestSignal=>client.me({signal:requestSignal}),signal);guard();const id=this.accountIdentity(me);if(!accountId||!id||id!==accountId)throw Error('更换密钥前必须核对为同一个货盘账号，原密钥已保留');}encrypted=this.seal(token);}
-  guard();if(!history&&(endpointChanged||tokenChanged)){this.db.supplierAccountId=null;this.clearSupplierCatalog();}
-  this.db.settings=next;this.db.encryptedToken=encrypted;this.connection={status:'not_connected'};this.persist();this.emit();return this.state();});
+  if(input.clearToken)encrypted='';else if(token){if(history){const client=this.clientFactory({baseURL,token}),me=await boundedRead(requestSignal=>client.me({signal:requestSignal}),signal);guard();const id=this.accountIdentity(me);if(!accountId||!id||id!==accountId)throw Error('更换密钥前必须核对为同一个货盘账号，原密钥已保留');}encrypted=await boundedSecret(()=>this.sealAsync(token),signal);guard();if(typeof encrypted!=='string'||!encrypted)throw problem('SECRET_STORAGE_UNAVAILABLE','系统密钥暂时无法访问，操作已停止；原密钥已保留');}
+  guard();const previous={settings:this.db.settings,encryptedToken:this.db.encryptedToken,supplierAccountId:this.db.supplierAccountId,hadSupplierAccount:Object.hasOwn(this.db,'supplierAccountId'),products:this.db.products,photoSets:this.db.photoSets,productListings:this.db.productListings,connection:this.connection};
+  try{if(!history&&(endpointChanged||tokenChanged)){this.db.supplierAccountId=null;this.clearSupplierCatalog();}this.db.settings=next;this.db.encryptedToken=encrypted;this.connection={status:'not_connected'};this.persist();}
+  catch(error){for(const key of ['settings','encryptedToken','products','photoSets','productListings'])this.db[key]=previous[key];if(previous.hadSupplierAccount)this.db.supplierAccountId=previous.supplierAccountId;else delete this.db.supplierAccountId;this.connection=previous.connection;throw error;}
+  this.emit();return this.state();});
  }
  accountIdentity(data){const value=data.user?.id??data.account?.id??data.userId??data.accountId;return typeof value==='string'||Number.isSafeInteger(value)?String(value):null;}
  async connect(){
-  return this.configure(async(signal,guard)=>{try{const client=this.client(),data=await boundedRead(requestSignal=>client.me({signal:requestSignal}),signal);guard();const id=this.accountIdentity(data);if(this.db.supplierAccountId&&id!==this.db.supplierAccountId){if(this.hasSupplierHistory())throw Error('货盘账号与现有运营历史不匹配');this.clearSupplierCatalog();this.db.supplierAccountId=null;}if(id)this.db.supplierAccountId=id;this.connection={status:'connected',account:String(data.user?.username||data.account?.username||data.username||data.user?.id||data.account?.id||'已验证 API 密钥；账号字段待核对'),scopes:Array.isArray(data.scopes)?data.scopes:Array.isArray(data.permissions)?data.permissions:[],checkedAt:now()};this.event('info','货盘连接已验证');}
+  return this.configure(async(signal,guard)=>{try{const client=await this.client(signal);guard();const data=await boundedRead(requestSignal=>client.me({signal:requestSignal}),signal);guard();const id=this.accountIdentity(data);if(this.db.supplierAccountId&&id!==this.db.supplierAccountId){if(this.hasSupplierHistory())throw Error('货盘账号与现有运营历史不匹配');this.clearSupplierCatalog();this.db.supplierAccountId=null;}if(id)this.db.supplierAccountId=id;this.connection={status:'connected',account:String(data.user?.username||data.account?.username||data.username||data.user?.id||data.account?.id||'已验证 API 密钥；账号字段待核对'),scopes:Array.isArray(data.scopes)?data.scopes:Array.isArray(data.permissions)?data.permissions:[],checkedAt:now()};this.event('info','货盘连接已验证');}
   catch(e){guard();this.connection={status:'error',error:e.message,checkedAt:now()};this.persist();throw e;}guard();this.persist();this.emit();return this.state();});
  }
  async sync(){
-  return this.configure(async(signal,guard)=>{const client=this.client();const all=async(method,key)=>{let rows=[];for(let page=1;page<=100;page++){guard();const response=await boundedRead(requestSignal=>client[method]({page,pageSize:100},{signal:requestSignal}),signal);guard();if(!Array.isArray(response[key]))throw Error('货盘返回格式不兼容：'+key);rows.push(...response[key]);if(response[key].length<100||Number.isFinite(response.total)&&rows.length>=response.total)return rows;}throw Error('数据超过本次同步上限，已保留旧数据');};
+  return this.configure(async(signal,guard)=>{const client=await this.client(signal);guard();const all=async(method,key)=>{let rows=[];for(let page=1;page<=100;page++){guard();const response=await boundedRead(requestSignal=>client[method]({page,pageSize:100},{signal:requestSignal}),signal);guard();if(!Array.isArray(response[key]))throw Error('货盘返回格式不兼容：'+key);rows.push(...response[key]);if(response[key].length<100||Number.isFinite(response.total)&&rows.length>=response.total)return rows;}throw Error('数据超过本次同步上限，已保留旧数据');};
   // Keep below the provider's four-request server limit; avoid partial catalog commits.
   const products=await all('products','products'),sets=await all('photoSets','sets');
   guard();this.db.products=products.map(normalizeProduct).filter(p=>p.id&&p.sku);this.db.photoSets=sets.map(normalizeSet);this.event('info','已同步 '+this.db.products.length+' 个商品、'+this.db.photoSets.length+' 套照片');this.persist();this.emit();return this.state();});
@@ -379,7 +409,7 @@ class CommerceEngine{
  async product(plan,client,signal){const data=await boundedRead(requestSignal=>client.product(plan.productId,{signal:requestSignal}),signal),raw=data.product||data,p=normalizeProduct(raw);if(p.id!==plan.productId||p.sku!==plan.sku)throw problem('PRODUCT_MISMATCH','货盘商品编号或 SKU 不一致');if(p.stock===null||p.stock<1)throw problem('NO_STOCK','库存未知或不足，已停止');return p;}
  async listing(job,plan,signal){
   if(plan.activeListingId)throw problem('ACTIVE_LISTING','该商品已有在售记录，禁止重复刊登');
-  const client=this.client(),product=await this.product(plan,client,signal);
+  const client=await this.client(signal);if(signal?.aborted||this.closing)throw stopped();const product=await this.product(plan,client,signal);
   const check=await this.adapter.findListing(plan,{signal});if(check?.exists)throw problem('EXISTING_LISTING','网页已有匹配刊登，请先关联原刊登，不能重复发布');
   let claim=this.db.claims.find(c=>c.profileId===plan.profileId&&c.productId===plan.productId&&(plan.reuseOwnPhotos||!c.listings.length));
   if(!claim){job.step='claim_photos';const result=await this.external(job,'claim',{productId:plan.productId},key=>client.claimPhotos({productId:plan.productId},{idempotencyKey:key,signal}));if(!result.claimId||!result.set?.images?.length)throw problem('CLAIM_UNVERIFIED','照片领取返回内容不完整，请核对原领取',true);claim={id:result.claimId,profileId:plan.profileId,productId:plan.productId,setId:result.set.id,images:result.set.images,listings:[]};this.db.claims.push(claim);job.payload.claimId=claim.id;this.persist();}
@@ -458,7 +488,7 @@ class CommerceEngine{
   job.step='check_offer';const latest=await this.adapter.readOffer(job.payload,{signal});if(latest?.id!==job.payload.id||latest.listingId!==plan.activeListingId||latest.buyerUsername!==job.payload.buyerUsername||latest.buyerMemberId!==job.payload.buyerMemberId||latest.profileId!==job.payload.profileId||latest.memberId!==job.payload.memberId||latest.priceCents!==job.payload.priceCents||latest.currency!=='EUR'||!Number.isSafeInteger(latest.priceCents)||latest.quantity!==1||latest.status!=='pending')throw problem('OFFER_CHANGED','报价所属商品、币种、数量或状态需要核对');
   if(latest.priceCents<plan.minOfferCents){job.result={summary:'报价低于最低接受价，未接受'};return;}
   if(latest.priceCents>plan.listingPriceCents)throw problem('OFFER_PRICE','报价高于刊登价，请核对是否误读了总额或运费');
-  await this.product(plan,this.client(),signal);job.step='accept_offer';const result=await this.external(job,'accept_offer',{id:latest.id,priceCents:latest.priceCents},()=>this.adapter.acceptOffer(latest,{signal}));if(result?.verified!==true||result.priceCents!==latest.priceCents)throw problem('OFFER_UNVERIFIED','接受报价结果不明确，请核对原报价',true);job.result={externalId:latest.id,summary:'已接受报价；等待买家付款，不据此采购'};
+  const client=await this.client(signal);if(signal?.aborted||this.closing)throw stopped();await this.product(plan,client,signal);job.step='accept_offer';const result=await this.external(job,'accept_offer',{id:latest.id,priceCents:latest.priceCents},()=>this.adapter.acceptOffer(latest,{signal}));if(result?.verified!==true||result.priceCents!==latest.priceCents)throw problem('OFFER_UNVERIFIED','接受报价结果不明确，请核对原报价',true);job.result={externalId:latest.id,summary:'已接受报价；等待买家付款，不据此采购'};
  }
  reserve(job,total){
   const settings=this.db.settings,day=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Paris'}).format(new Date());
@@ -469,7 +499,7 @@ class CommerceEngine{
   this.db.reservations.push({jobId:job.id,day,cents:total});this.persist();
  }
  async fulfill(job,plan,signal){
-  const client=this.client(),sale=await this.adapter.readSale(job.payload,{signal});
+  const client=await this.client(signal);if(signal?.aborted||this.closing)throw stopped();const sale=await this.adapter.readSale(job.payload,{signal});
   if(sale?.id!==job.payload.id||sale.listingId!==job.payload.listingId||sale.buyerUsername!==job.payload.buyerUsername||sale.buyerMemberId!==job.payload.buyerMemberId||sale.profileId!==job.payload.profileId||sale.memberId!==job.payload.memberId||sale.verified!==true||sale.paid!==true||sale.cancelled!==false||sale.currency!=='EUR'||sale.priceCents!==job.payload.priceCents||sale.quantity!==1)throw problem('SALE_CHANGED','订单、买家、付款或取消状态发生变化，停止采购');
   job.step='download_label';const label=await this.adapter.shippingLabel(sale,{signal});
   if(label?.verified!==true||label.orderId!==sale.id||label.buyerUsername!==sale.buyerUsername||!label.data||!['application/pdf','image/jpeg','image/png'].includes(label.contentType)||label.data.length>10*1024*1024||label.pages!==1)throw problem('LABEL_UNVERIFIED','运单未能核对订单、买家、格式或页数，不会下单');
@@ -555,7 +585,13 @@ class CommerceEngine{
   }
   else if(action==='reconcile'){
    if(!['uncertain','needs_review'].includes(job.state))throw Error('此任务不需要核对');
-   if(job.type==='fulfillment'&&job.result?.externalId){const response=await this.client().order(job.result.externalId),order=response.order;if(!order||String(order.id)!==String(job.result.externalId))throw Error('货盘返回订单不匹配');if(job.result.wmsOrderId){const r=await this.client().wmsOrder(job.result.wmsOrderId);const status=r.order?.status||r.wmsStatus||r.status;if(status!=='submitted')throw Error('WMS 原订单仍未确认接单，已保持待核对');}else if(this.db.settings.fulfillmentMethod==='wms')throw Error('缺少原 WMS 编号，不能自动认定发货成功');job.state='completed';job.error='原货盘订单已核对';job.mutationPending=false;job.result.verified=true;const plan=this.plan(job.planId);plan.status=plan.completedCount>=plan.targetCount?'target_reached':'ready';}
+   if(job.type==='fulfillment'&&job.result?.externalId)return this.configure(async(signal,guard)=>{
+    const original=JSON.stringify(job),check=()=>{guard();if(this.db.jobs.filter(row=>row.id===id).length!==1||this.db.jobs.find(row=>row.id===id)!==job||JSON.stringify(job)!==original||this.profileBusy(job.profileId))throw stopped();};check();
+    const client=await this.client(signal);check();const response=await boundedRead(s=>client.order(job.result.externalId,{signal:s}),signal);check();const order=response.order;if(!order||String(order.id)!==String(job.result.externalId))throw Error('货盘返回订单不匹配');
+    if(job.result.wmsOrderId){const r=await boundedRead(s=>client.wmsOrder(job.result.wmsOrderId,{signal:s}),signal);check();const status=r.order?.status||r.wmsStatus||r.status;if(status!=='submitted')throw Error('WMS 原订单仍未确认接单，已保持待核对');}else if(this.db.settings.fulfillmentMethod==='wms')throw Error('缺少原 WMS 编号，不能自动认定发货成功');
+    const plan=this.plan(job.planId),statusBefore=plan.status;check();job.state='completed';job.error='原货盘订单已核对';job.mutationPending=false;job.result.verified=true;plan.status=plan.completedCount>=plan.targetCount?'target_reached':'ready';
+    try{this.persist();}catch(error){restoreRow(job,before);plan.status=statusBefore;throw error;}this.emit();return this.state();
+   });
    else throw Error('当前任务需要真实页面或原请求记录核对，不能仅凭手工填写编号恢复。记录已保留。');
   }else throw Error('不支持的核对操作');try{this.persist();}catch(error){restoreRow(job,before);this.db.events=eventsBefore;throw error;}this.emit();if(action==='retry'&&this.running)this.kickRun();return this.state();
  }
@@ -596,4 +632,4 @@ class CommerceEngine{
  }
  async close(){if(this.closePromise)return this.closePromise;this.closing=true;this.running=false;this.runGeneration++;if(this.timer)clearInterval(this.timer);this.timer=null;this.tickController?.abort();this.configController?.abort();for(const c of this.active.values())c.abort();this.closePromise=(async()=>{await Promise.allSettled([this.tickPromise,this.configTail].filter(Boolean));while(this.active.size)await new Promise(r=>setTimeout(r,25));if(!this.faulted)this.persist();})();return this.closePromise;}
 }
-module.exports={CommerceEngine,DEFAULTS,validatePlan,normalizeProduct,normalizeSet,problem,saleCycleComplete};
+module.exports={CommerceEngine,DEFAULTS,validatePlan,normalizeProduct,normalizeSet,problem,saleCycleComplete,SECRET_STORAGE_TIMEOUT_MS};

@@ -8,7 +8,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.22**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.23**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
 - Starting the scheduler automatically opens a closed listing profile in its original persistent session and uses that session directly for the configured listing. It does not require member binding or read the account menu. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
@@ -19,6 +19,16 @@ The current development version is **0.5.3-dev.22**. Listing plans use the selec
 - The original Mac TEST submission and relisting history remain in the original Mac data. Live preparation reached the publication check and stopped before any new publish click because the site had filled an unconfirmed optional material. Clearing that suggestion through the native picker has been checked; live publication and the complete updated automated flow remain unverified.
 
 启动计划后直接使用指定独立窗口的现有登录会话，不再把账号菜单、用户名或会员绑定作为自动上架前置。手动商品与货盘商品共用字段、原图、上传、单次提交和商品回执链路；登录失效或网站要求人工验证时，保留当前任务等待处理。原提交结果未知时仍只核对原请求，不能重新发布。办公室与 Mac 接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
+
+## 货盘密钥异步读取 — 0.5.3-dev.23，2026-10-15
+
+真实 Mac dev.22 在“填写页面”的货盘预检读取已保存 API 密钥时卡住；主线程采样停在同步 Security/钥匙串调用中，用户及桌面检查均没有看到系统授权提示。只确认系统调用正在等待，不能据此断言登录钥匙串被锁定。原 TEST 保持待核对，未新增发布尝试，原照片和记录已在本机私有备份。
+
+货盘连接、同步、字段预检、照片、发布前核对及关联服务现统一等待原生异步密钥接口，读取、比较与保存密钥均有 30 秒上限。超时或取消后不创建客户端、不继续原步骤、不保存迟到密文；等待期间的存储故障同样停止，保存失败回滚原密文和商品资料。真实商品身份、库存及原图的实时检查保持，未改为离线放行。系统钥匙串操作本身不能由此取消，也没有更改访问权限或明文回退。
+
+完整 Node 1217/1217 通过，零失败、零跳过；隔离 Mac 桌面 52/52（货盘工作台 12、表单与材质 24、发布证据及提交 11、完整上架流程 5）通过。另用独立临时资料及 test-only mock keychain 验证原生密钥接口 14/14：旧同步与新异步密文双向兼容，服务不可用时拒绝操作，界面事件循环继续运行。以上 66 项桌面/原生专项不是完整默认 Electron 套件，也不能代替真实钥匙串许可或真实 Vinted 发布。首次 Node 测试有 5 项本地监听被沙箱拒绝，保留日志；允许本地测试服务后完成最终检查。
+
+本次只迁移货盘凭据；账号库、代理及启动 AI 的独立同步密钥路径尚未迁移。系统服务曾拒绝访问时，当前进程可能需要正常重启后再申请许可；保留原密文，不能通过删除密钥或重建任务解决。Electron 对一致签名的说明见 [safeStorage 文档](https://www.electronjs.org/docs/latest/api/safe-storage)。Mac dev.22 的 arm64 包已经完成打包、ad-hoc 签名和压缩包检查；dev.23 将使用同一 macOS 13 起的 Apple Silicon 目标。新版真实页面的自动清空及真实发布仍待验证。
 
 ## 上传后清空未确认的可选材质 — 0.5.3-dev.22
 
@@ -168,7 +178,7 @@ Electron tests require a desktop session; network tests start local servers. The
 npm run package
 ```
 
-The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). The latest 0.5.3-dev.22 source currently lives on `codex/windows-association-v053`, while `main` remains at the earlier checkpoint. Check out the development branch before building the latest version.
+The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). The latest 0.5.3-dev.23 source currently lives on `codex/windows-association-v053`, while `main` remains at the earlier checkpoint. Check out the development branch before building the latest version.
 
 For a local Apple Silicon development build on macOS 13 or later:
 

@@ -163,7 +163,7 @@ async function preparePhotoWork(engine,planId,{setId,callerSignal,validateImage}
     return require('./commerce-local-products.cjs').prepareLocalPhotos(engine,planId,{signal,guard});
    }
    record=findRecord(engine,plan);if(record&&setId!==undefined&&setId!==record.setId)throw failure('PHOTO_CONFLICT','原照片任务已固定套组，不能改成另一套重新领取');
-   const client=engine.client(),me=await bounded(s=>client.me({signal:s}),signal);guard();const accountId=engine.accountIdentity(me);
+   const client=await engine.client(signal);guard();const me=await bounded(s=>client.me({signal:s}),signal);guard();const accountId=engine.accountIdentity(me);
    if(!accountId||!engine.db.supplierAccountId||accountId!==engine.db.supplierAccountId||record&&accountId!==record.supplierAccountId)throw failure('PHOTO_IDENTITY','货盘账号与原连接或照片记录不一致');
    const response=await bounded(s=>client.product(plan.productId,{signal:s}),signal);guard();const product=response?.product??response;
    if(!object(product)||String(product.id)!==plan.productId||product.sku!==plan.sku)throw failure('PHOTO_PRODUCT','货盘商品编号或 SKU 与照片计划不一致');

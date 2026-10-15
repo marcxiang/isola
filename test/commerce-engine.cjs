@@ -1,6 +1,6 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
-const {CommerceEngine,validatePlan,normalizeProduct}=require('../src/commerce-engine.cjs');
+const {CommerceEngine,validatePlan,normalizeProduct,SECRET_STORAGE_TIMEOUT_MS}=require('../src/commerce-engine.cjs');
 
 const profiles=[{id:'profile-1',name:'Test account 1'},{id:'profile-2',name:'Test account 2'}];
 const rawProduct={id:'product-1',sku:'SKU-1',name:'Test garment',stock:12,unitPriceCents:1000,revision:7};
@@ -509,4 +509,146 @@ test('deletion rejects a dedupe-matched job with a different cycle or revision w
 test('deletion rejects a globally duplicated original job ID even when the other row belongs to another profile',async t=>{
  const f=await publishedFixture(t),job=f.engine.enqueue('listing',f.plan,{cycle:0},'listing:'+f.plan.id+':0');job.state='needs_review';f.engine.db.jobs.push({...job,type:'message',profileId:'profile-2',planId:'other-plan',dedupeKey:'other-business-key'});f.engine.persist();const before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db);let writes=0;const persist=f.engine.persist.bind(f.engine);f.engine.persist=()=>{writes++;persist();};
  await assert.rejects(f.engine.confirmDeletedListing(f.plan.id,deletionRequest(f)),{code:'DELETION_JOB_CONFLICT'});assert.equal(writes,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(JSON.stringify(f.engine.db),memory);
+});
+
+test('supplier clients await asynchronous credentials before constructing a client or making a request',async t=>{
+ const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred(),created=[];
+ f.engine.unseal=()=>{throw Error('Synchronous credential access is forbidden');};
+ f.engine.unsealAsync=async encrypted=>{assert.equal(encrypted,f.engine.db.encryptedToken);entered.resolve();return release.promise;};
+ f.engine.clientFactory=config=>{created.push(config);return f.client;};
+ const pending=f.engine.client(new AbortController().signal);await entered.promise;assert.equal(created.length,0);assert.equal(f.calls.length,0);
+ release.resolve('ASYNC-FIXTURE-TOKEN');assert.equal(await pending,f.client);assert.deepEqual(created,[{baseURL:f.engine.db.settings.baseURL,token:'ASYNC-FIXTURE-TOKEN'}]);
+});
+
+test('cancelling a credential wait releases configuration without a supplier request or late client',async t=>{
+ const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred(),before=fs.readFileSync(f.engine.file,'utf8');let created=0;
+ f.engine.unsealAsync=()=>{entered.resolve();return release.promise;};f.engine.clientFactory=()=>{created++;return f.client;};
+ const pending=f.engine.sync(),rejected=assert.rejects(pending,{code:'STOPPED'});await entered.promise;f.engine.configController.abort();await rejected;
+ assert.equal(f.engine.state().configBusy,false);assert.equal(created,0);assert.equal(f.calls.length,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);
+ release.resolve('LATE-FIXTURE-TOKEN');await new Promise(setImmediate);assert.equal(created,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);
+});
+
+test('a credential timeout rejects with a static error and consumes a late native rejection',async t=>{
+ const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred(),before=fs.readFileSync(f.engine.file,'utf8');let created=0;
+ f.engine.unsealAsync=()=>{entered.resolve();return release.promise;};f.engine.clientFactory=()=>{created++;return f.client;};
+ t.mock.timers.enable({apis:['setTimeout']});
+ try{
+  const pending=f.engine.sync(),rejected=assert.rejects(pending,error=>error.code==='SECRET_STORAGE_TIMEOUT'&&!error.message.includes('fixture-secret'));
+  await entered.promise;t.mock.timers.tick(SECRET_STORAGE_TIMEOUT_MS);await rejected;assert.equal(f.engine.state().configBusy,false);assert.equal(created,0);assert.equal(f.calls.length,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);
+  release.reject(Error('fixture-secret in native error'));await new Promise(setImmediate);assert.equal(created,0);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);
+ }finally{t.mock.timers.reset();}
+});
+
+test('resolved credentials cannot construct a client after cancellation or a changed original endpoint or ciphertext',async t=>{
+ for(const change of ['abort','endpoint','ciphertext']){
+  const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred(),controller=new AbortController();let created=0;
+  f.engine.unsealAsync=()=>{entered.resolve();return release.promise;};f.engine.clientFactory=()=>{created++;return f.client;};
+  const pending=f.engine.client(controller.signal),rejected=assert.rejects(pending,{code:'STOPPED'});await entered.promise;
+  if(change==='abort')controller.abort();else if(change==='endpoint')f.engine.db.settings.baseURL='https://changed.example/api/v1';else f.engine.db.encryptedToken='changed-ciphertext';
+  release.resolve('LATE-FIXTURE-TOKEN');await rejected;assert.equal(created,0);assert.equal(f.calls.length,0);
+ }
+});
+
+test('credential failure messages never expose native errors or decrypted values',async t=>{
+ const f=await fixture(t,{plan:false}),encrypted=f.engine.db.encryptedToken;let created=0;
+ f.engine.clientFactory=()=>{created++;return f.client;};
+ for(const unseal of [()=>{throw Error('fixture-secret native failure');},async()=>{throw Error('fixture-secret native rejection');},async()=>null,async()=>'']){
+  f.engine.unsealAsync=unseal;await assert.rejects(f.engine.client(),error=>error.code==='SECRET_STORAGE_UNAVAILABLE'&&!error.message.includes('fixture-secret'));assert.equal(created,0);assert.equal(f.engine.db.encryptedToken,encrypted);
+ }
+});
+
+test('saving settings waits for asynchronous comparison and preserves the original key on cancellation',async t=>{
+ const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred(),before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db);let sealed=0,created=0;
+ f.engine.unsealAsync=()=>{entered.resolve();return release.promise;};f.engine.sealAsync=async()=>{sealed++;return 'new-fixture-ciphertext';};f.engine.clientFactory=()=>{created++;return f.client;};
+ const pending=f.engine.saveSettings({token:'NEW-FIXTURE-TOKEN'}),rejected=assert.rejects(pending,{code:'STOPPED'});await entered.promise;assert.equal(sealed,0);f.engine.configController.abort();await rejected;
+ release.resolve('OLD-FIXTURE-TOKEN');await new Promise(setImmediate);assert.equal(sealed,0);assert.equal(created,0);assert.equal(JSON.stringify(f.engine.db),memory);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.state().configBusy,false);
+});
+
+test('a timed-out settings key comparison preserves the old ciphertext and consumes a late rejection',async t=>{
+ const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred(),before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db);let sealed=0;
+ f.engine.unsealAsync=()=>{entered.resolve();return release.promise;};f.engine.sealAsync=async()=>{sealed++;return 'new-fixture-ciphertext';};
+ t.mock.timers.enable({apis:['setTimeout']});try{
+  const pending=f.engine.saveSettings({token:'NEW-FIXTURE-TOKEN'}),rejected=assert.rejects(pending,{code:'SECRET_STORAGE_TIMEOUT'});await entered.promise;t.mock.timers.tick(SECRET_STORAGE_TIMEOUT_MS);await rejected;
+  release.reject(Error('fixture-secret delayed comparison failure'));await new Promise(setImmediate);assert.equal(sealed,0);assert.equal(JSON.stringify(f.engine.db),memory);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.state().configBusy,false);
+ }finally{t.mock.timers.reset();}
+});
+
+test('asynchronous encryption failure, cancellation and timeout all preserve the original settings and ciphertext',async t=>{
+ for(const kind of ['failure','abort','timeout']){
+  const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred(),before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db);
+  f.engine.unsealAsync=async()=> 'OLD-FIXTURE-TOKEN';f.engine.seal=()=>{throw Error('Synchronous encryption is forbidden');};f.engine.sealAsync=()=>{entered.resolve();return release.promise;};
+  if(kind==='timeout')t.mock.timers.enable({apis:['setTimeout']});
+  try{
+   const pending=f.engine.saveSettings({token:'NEW-FIXTURE-TOKEN',maxConcurrent:3}),rejected=assert.rejects(pending,error=>error.code===(kind==='abort'?'STOPPED':kind==='timeout'?'SECRET_STORAGE_TIMEOUT':'SECRET_STORAGE_UNAVAILABLE')&&!error.message.includes('fixture-secret'));
+   await entered.promise;if(kind==='failure')release.reject(Error('fixture-secret encryption failure'));else if(kind==='abort')f.engine.configController.abort();else t.mock.timers.tick(SECRET_STORAGE_TIMEOUT_MS);await rejected;
+   if(kind!=='failure')release.resolve('late-fixture-ciphertext');await new Promise(setImmediate);assert.equal(JSON.stringify(f.engine.db),memory);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.state().configBusy,false);
+  }finally{if(kind==='timeout')t.mock.timers.reset();}
+ }
+});
+
+test('successful settings encryption uses only the injected async operations',async t=>{
+ const f=await fixture(t,{plan:false}),calls=[];
+ f.engine.unseal=()=>{throw Error('Synchronous decryption is forbidden');};f.engine.seal=()=>{throw Error('Synchronous encryption is forbidden');};
+ f.engine.unsealAsync=async value=>{calls.push('decrypt');assert.equal(value,f.engine.db.encryptedToken);return 'TEST-ONLY-TOKEN';};
+ f.engine.sealAsync=async value=>{calls.push('encrypt');assert.equal(value,'NEW-FIXTURE-TOKEN');return 'ASYNC-FIXTURE-CIPHERTEXT';};
+ await f.engine.saveSettings({token:'NEW-FIXTURE-TOKEN'});assert.deepEqual(calls,['decrypt','encrypt']);assert.equal(f.engine.db.encryptedToken,'ASYNC-FIXTURE-CIPHERTEXT');assert.equal(JSON.parse(fs.readFileSync(f.engine.file,'utf8')).encryptedToken,'ASYNC-FIXTURE-CIPHERTEXT');
+});
+
+test('clearing a saved supplier key never reads or encrypts credentials',async t=>{
+ const f=await fixture(t,{plan:false});let calls=0;const forbidden=()=>{calls++;throw Error('No credential operation is needed to clear the stored key');};
+ f.engine.sealAsync=forbidden;f.engine.unsealAsync=forbidden;await f.engine.saveSettings({clearToken:true,token:'IGNORED-FIXTURE-TOKEN'});assert.equal(calls,0);assert.equal(f.engine.db.encryptedToken,'');
+});
+
+test('a failed settings snapshot restores the original ciphertext and catalog in memory and on disk',async t=>{
+ const f=await fixture(t,{plan:false}),before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db),connection=f.engine.connection,persist=f.engine.persist;
+ f.engine.unsealAsync=async()=> 'TEST-ONLY-TOKEN';f.engine.sealAsync=async()=> 'NEW-FIXTURE-CIPHERTEXT';f.engine.persist=()=>{throw Error('Synthetic storage failure');};
+ try{await assert.rejects(f.engine.saveSettings({token:'NEW-FIXTURE-TOKEN'}),/Synthetic storage failure/);assert.equal(JSON.stringify(f.engine.db),memory);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.connection,connection);assert.equal(f.engine.state().configBusy,false);}
+ finally{f.engine.persist=persist;}
+});
+
+test('cancelling reconciliation while waiting for credentials preserves the original uncertain job',async t=>{
+ const f=await fixture(t),entered=deferred(),release=deferred(),job=f.engine.enqueue('fulfillment',f.plan,{},'fixture-credential-reconciliation');job.state='uncertain';job.mutationPending=true;job.result={externalId:'fixture-order',wmsOrderId:'fixture-wms'};f.engine.persist();
+ const before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db);let created=0,orders=0;
+ f.engine.unsealAsync=()=>{entered.resolve();return release.promise;};f.engine.clientFactory=()=>{created++;return {...f.client,order:async()=>{orders++;return {order:{id:'fixture-order'}};}};};
+ const pending=f.engine.resolve(job.id,'reconcile'),rejected=assert.rejects(pending,{code:'STOPPED'});await entered.promise;f.engine.configController.abort();await rejected;release.resolve('LATE-FIXTURE-TOKEN');await new Promise(setImmediate);
+ assert.equal(created,0);assert.equal(orders,0);assert.equal(JSON.stringify(f.engine.db),memory);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.state().configBusy,false);
+});
+
+test('configuration refuses an existing storage fault before enqueueing work',async t=>{
+ for(const source of ['engine','accounts']){
+  const f=await fixture(t,{plan:false});let entered=0;
+  if(source==='engine')f.engine.faulted=true;else f.engine.accounts={faulted:true,list:()=>[]};
+  await assert.rejects(f.engine.configure(async()=>{entered++;}),{code:'STOPPED'});assert.equal(entered,0);assert.equal(f.engine.configPending,0);assert.equal(f.engine.configController,null);
+ }
+});
+
+test('queued configuration refuses a storage fault that occurs before its turn',async t=>{
+ const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred();f.engine.accounts={faulted:false,list:()=>[]};let queuedEntered=0;
+ const first=f.engine.configure(async(signal,guard)=>{entered.resolve();await release.promise;guard();}),firstRejected=assert.rejects(first,{code:'STOPPED'});await entered.promise;
+ const second=f.engine.configure(async()=>{queuedEntered++;}),secondRejected=assert.rejects(second,{code:'STOPPED'});f.engine.accounts.faulted=true;release.resolve();await firstRejected;await secondRejected;
+ assert.equal(queuedEntered,0);assert.equal(f.engine.configPending,0);assert.equal(f.engine.configController,null);
+});
+
+test('an account storage fault during key comparison prevents client creation, encryption and settings writes',async t=>{
+ const f=await fixture(t),entered=deferred(),release=deferred();f.engine.accounts={faulted:false,list:()=>[]};let clients=0,seals=0;
+ f.engine.db.supplierAccountId='supplier-1';f.engine.persist();const saved=fs.readFileSync(f.engine.file,'utf8'),savedMemory=JSON.stringify(f.engine.db);
+ f.engine.unsealAsync=()=>{entered.resolve();return release.promise;};f.engine.sealAsync=async()=>{seals++;return 'NEW-FIXTURE-CIPHERTEXT';};f.engine.clientFactory=()=>{clients++;return f.client;};
+ const pending=f.engine.saveSettings({token:'NEW-FIXTURE-TOKEN'}),rejected=assert.rejects(pending,{code:'STOPPED'});await entered.promise;f.engine.accounts.faulted=true;release.resolve('OLD-FIXTURE-TOKEN');await rejected;
+ assert.equal(clients,0);assert.equal(seals,0);assert.equal(JSON.stringify(f.engine.db),savedMemory);assert.equal(fs.readFileSync(f.engine.file,'utf8'),saved);assert.equal(f.engine.state().configBusy,false);
+});
+
+test('an account storage fault during encryption preserves the original ciphertext and settings',async t=>{
+ const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred(),before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db);f.engine.accounts={faulted:false,list:()=>[]};
+ f.engine.unsealAsync=async()=> 'OLD-FIXTURE-TOKEN';f.engine.sealAsync=()=>{entered.resolve();return release.promise;};
+ const pending=f.engine.saveSettings({token:'NEW-FIXTURE-TOKEN',maxConcurrent:3}),rejected=assert.rejects(pending,{code:'STOPPED'});await entered.promise;f.engine.accounts.faulted=true;release.resolve('LATE-FIXTURE-CIPHERTEXT');await rejected;
+ assert.equal(JSON.stringify(f.engine.db),memory);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.state().configBusy,false);
+});
+
+test('a connection key wait cannot write an error state after account storage fails',async t=>{
+ for(const settlement of ['resolve','reject']){
+  const f=await fixture(t,{plan:false}),entered=deferred(),release=deferred(),before=fs.readFileSync(f.engine.file,'utf8'),memory=JSON.stringify(f.engine.db),connection=f.engine.connection;f.engine.accounts={faulted:false,list:()=>[]};let clients=0;
+  f.engine.unsealAsync=()=>{entered.resolve();return release.promise;};f.engine.clientFactory=()=>{clients++;return f.client;};
+  const pending=f.engine.connect(),rejected=assert.rejects(pending,{code:'STOPPED'});await entered.promise;f.engine.accounts.faulted=true;if(settlement==='resolve')release.resolve('LATE-FIXTURE-TOKEN');else release.reject(Error('Synthetic native failure'));await rejected;
+  assert.equal(clients,0);assert.equal(f.engine.connection,connection);assert.equal(JSON.stringify(f.engine.db),memory);assert.equal(fs.readFileSync(f.engine.file,'utf8'),before);assert.equal(f.engine.state().configBusy,false);
+ }
 });

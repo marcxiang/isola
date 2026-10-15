@@ -89,8 +89,9 @@ function ensureCommerce(){
   const dir=path.join(app.getPath('userData'),'commerce');
   const seal=value=>{if(!safeStorage.isEncryptionAvailable()||process.platform==='linux'&&safeStorage.getSelectedStorageBackend?.()==='basic_text')throw Error('系统加密不可用，无法保存密钥');return safeStorage.encryptString(value).toString('base64');};
   const unseal=value=>safeStorage.decryptString(Buffer.from(value,'base64'));
+  const {sealAsync,unsealAsync}=require('./safe-storage-async.cjs').createAsyncCipher(safeStorage);
   const accounts=new AccountsStore({dir,profiles:list,seal,unseal,assertMutable:assertAccountMutable,onChange:()=>commerce?.emit()});
-  commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedSalesRuntime({windows,isBusy:id=>{const w=windows.get(id);return commerce?.active.has(id)||!!w?.closingPromise||!!w?.navigationPending&&!ownsAccountReviewClick(id,w);},ensureProfile:ensureSalesProfile,openPage:openSalesPage,validateImage:bytes=>{const image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('照片无法完整解码');return image.getSize();}}),accounts,seal,unseal,onChange:commerceChanged});
+  commerce=new CommerceEngine({dir,profiles:list,clientFactory:config=>new SKUDeskClient({...config,requestGate:skuGate}),adapter:new VintedSalesRuntime({windows,isBusy:id=>{const w=windows.get(id);return commerce?.active.has(id)||!!w?.closingPromise||!!w?.navigationPending&&!ownsAccountReviewClick(id,w);},ensureProfile:ensureSalesProfile,openPage:openSalesPage,validateImage:bytes=>{const image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('照片无法完整解码');return image.getSize();}}),accounts,seal,unseal,sealAsync,unsealAsync,onChange:commerceChanged});
   commerceAccounts=new CommerceAccountService({engine:commerce,store:accounts,openPage:openAccountPage,login:new VintedLogin(commerce.adapter)});
   commerceLoadError=false;
  }

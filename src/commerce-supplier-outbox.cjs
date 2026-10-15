@@ -167,7 +167,7 @@ function createSupplierOutbox({now=Date.now,timeoutMs=30000}={}){
    if(context.reused){await commit({state:'needs_review',reason:'本套照片用于后续刊登；货盘 API 1.8 不支持更换首次关联，原回执已保留，未发送覆盖请求'});return summarizeSupplierSync(current().row);}
    if(context.row.state==='dispatching')await commit({state:'uncertain',reason:'原请求可能已经发送；只核对领取详情，不重复发送'});
    context=current();if(context.plan?.enabled===false)throw fail('SUPPLIER_OUTBOX_STOPPED','销售计划已暂停，未继续货盘关联');
-   const client=engine.client(),me=await request(requestSignal=>client.me({signal:requestSignal}));
+   const client=await engine.client(controller.signal);current();const me=await request(requestSignal=>client.me({signal:requestSignal}));
    const identity=engine.accountIdentity?engine.accountIdentity(me):String(me?.user?.id??me?.account?.id??'');
    ensure(identity===context.request.supplierAccountId,'当前密钥不属于原照片领取账号','SUPPLIER_OUTBOX_ACCOUNT');
    const inspect=async()=>inspectSupplierClaim(await request(requestSignal=>client.claim(context.expected.claimId,{signal:requestSignal})),context.expected,{now:now()});

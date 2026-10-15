@@ -38,7 +38,7 @@ async function collect(engine,planId,signal,guard){
  if(local){
   const photos=require('./commerce-local-products.cjs');product=photos.getLocalProduct(engine,plan);raw=product;localPrepared=photos.readLocalPreparedPhotos(engine,planId);
  }else{
-  const client=engine.client(),response=await bounded(requestSignal=>client.product(plan.productId,{signal:requestSignal}),signal);checkpoint(signal,guard);
+  const client=await engine.client(signal);checkpoint(signal,guard);const response=await bounded(requestSignal=>client.product(plan.productId,{signal:requestSignal}),signal);checkpoint(signal,guard);
   if(!validObject(response))throw Error('货盘商品返回格式需要核对');
   raw=Object.hasOwn(response,'product')?response.product:response;
   if(!validObject(raw))throw Error('货盘商品详情返回格式需要核对');

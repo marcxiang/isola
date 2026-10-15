@@ -19,7 +19,9 @@ async function publicationInput(engine,id,signal,guard,{sessionAuthority}={}){
  const local=plan.source==='local';
  if(local)require('./commerce-local-products.cjs').localClaimBinding(engine.db,plan,claims[0]);
  else if(claims[0].source==='local')throw Error('本地照片不能用于货盘商品刊登');
- const product=local?require('./commerce-local-products.cjs').getLocalProduct(engine,plan):await engine.product(plan,engine.client(),signal);guard();
+ let product;
+ if(local)product=require('./commerce-local-products.cjs').getLocalProduct(engine,plan);
+ else {const client=await engine.client(signal);guard();product=await engine.product(plan,client,signal);}guard();
  return {plan,product,claim:claims[0],expectedAccount,manifest};
 }
 function inspectPublication(engine,id){

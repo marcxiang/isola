@@ -75,7 +75,7 @@ function createProductDisplayService({normalizeImage,fetchImpl=globalThis.fetch,
  async function load(engine,original){
   return schedule(()=>bounded(async signal=>{
    guard(engine,original,signal);const base=new URL(original.baseURL),url=new URL(original.source,base),api=url.origin===base.origin&&(url.pathname===base.pathname||url.pathname.startsWith(base.pathname+'/'));let bytes;
-   if(api){ensure(authenticatedImageRoute(url,base,original.productId));const client=engine.client();ensure(client&&typeof client.download==='function');bytes=await client.download(url.href,{signal,maxBytes:MAX_BYTES});}
+   if(api){ensure(authenticatedImageRoute(url,base,original.productId));const client=await engine.client(signal);guard(engine,original,signal);ensure(client&&typeof client.download==='function');bytes=await client.download(url.href,{signal,maxBytes:MAX_BYTES});}
    else{ensure(url.protocol==='https:'&&!url.username&&!url.password&&!url.hash);const response=await fetchImpl(url.href,{method:'GET',headers:{},credentials:'omit',referrerPolicy:'no-referrer',redirect:'error',signal});try{bytes=await readPublic(response,url.href,signal);}catch(error){await response?.body?.cancel?.().catch(()=>{});throw error;}}
    guard(engine,original,signal);imageInfo(bytes);let converted;
    try{converted=await normalizeImage(bytes,{maxDimension:MAX_DIMENSION,signal});}catch{guard(engine,original,signal);throw failure('PRODUCT_DISPLAY_DECODE_FAILED');}

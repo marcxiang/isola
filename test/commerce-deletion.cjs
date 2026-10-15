@@ -37,26 +37,26 @@ test('another environment may retain the same product photos and job history whi
  await f.engine.close();const restored=f.create();assert.equal(restored.db.plans.length,1);assert.equal(restored.db.plans[0].id,used.id);assert.equal(restored.db.localPhotoPreparations[0].planId,used.id);assert.equal(restored.db.claims[0].id,prepared.manifest.claimId);
 });
 
-test('active, previously sold or relisted plans preserve their original occupancy and cycle evidence',async t=>{
- for(const [name,change,code] of [['in sale',plan=>plan.activeListingId='123456','DELETION_ACTIVE_LISTING'],['sold',plan=>plan.completedCount=1,'DELETION_PLAN_HISTORY'],['relisting revision',plan=>plan.listingRevision=1,'DELETION_PLAN_HISTORY']])await t.test(name,async sub=>{const f=fixture(sub),plan=f.plan();change(plan);f.engine.persist();await rejectsUnchanged(f,()=>deletePlan(f.engine,plan.id),code);});
+test('active or unaccounted sold plans preserve occupancy, while a relisting revision can be archived without erasure',async t=>{
+ for(const [name,change,code] of [['in sale',plan=>plan.activeListingId='123456','DELETION_ACTIVE_LISTING'],['sold without original sale',plan=>plan.completedCount=1,'DELETION_SALE_HISTORY']])await t.test(name,async sub=>{const f=fixture(sub),plan=f.plan();change(plan);f.engine.persist();await rejectsUnchanged(f,()=>deletePlan(f.engine,plan.id),code);});
+ const f=fixture(t),plan=f.plan();plan.listingRevision=1;f.engine.persist();assert.deepEqual(await deletePlan(f.engine,plan.id),{deleted:true,id:plan.id,archived:true});assert.equal(f.engine.db.plans[0].listingRevision,1);assert.equal(f.engine.db.planArchives[0].planId,plan.id);
 });
 
 test('every original publication remains protected, including uncertain, published, closed and cancelled submissions',async t=>{
- for(const state of ['uncertain','published','cancelled','closed'])await t.test(state,async sub=>{const f=fixture(sub),plan=f.plan(),record=publication(plan,state==='closed'?'published':state);if(state==='closed')record.closedWithdrawal={reason:'deleted_not_sold'};f.engine.db.publications.submissions.push(record);f.engine.persist();await rejectsUnchanged(f,()=>deletePlan(f.engine,plan.id),'DELETION_PUBLICATION_HISTORY');});
+ for(const state of ['uncertain','published','cancelled','closed'])await t.test(state,async sub=>{const f=fixture(sub),plan=f.plan(),record=publication(plan,state==='closed'?'published':state);if(state==='closed')record.closedWithdrawal={reason:'deleted_not_sold'};f.engine.db.publications.submissions.push(record);f.engine.persist();if(['uncertain','published'].includes(state))await rejectsUnchanged(f,()=>deletePlan(f.engine,plan.id),'DELETION_PUBLICATION_HISTORY');else{const before=clone(record);assert.equal((await deletePlan(f.engine,plan.id)).archived,true);assert.deepEqual(f.engine.db.publications.submissions,[before]);assert.equal(f.engine.db.plans[0].id,plan.id);}});
 });
 
 test('queued, failed, cancelled and completed jobs cannot be erased with the plan or bypassed by recreating it',async t=>{
- for(const state of ['queued','needs_review','cancelled','completed','uncertain'])await t.test(state,async sub=>{const f=fixture(sub),plan=f.plan();f.engine.db.jobs.push(job(plan,{state}));f.engine.persist();await rejectsUnchanged(f,()=>deletePlan(f.engine,plan.id),'DELETION_JOB_HISTORY');assert.equal(f.engine.db.jobs[0].dedupeKey,'listing:'+plan.id+':0');});
+ for(const state of ['queued','needs_review','cancelled','completed','uncertain'])await t.test(state,async sub=>{const f=fixture(sub),plan=f.plan();f.engine.db.jobs.push(job(plan,{state}));f.engine.persist();if(state==='uncertain')await rejectsUnchanged(f,()=>deletePlan(f.engine,plan.id),'DELETION_JOB_HISTORY');else{const before=clone(f.engine.db.jobs[0]);assert.equal((await deletePlan(f.engine,plan.id)).archived,true);const retained=f.engine.db.jobs[0];assert.equal(retained.state,state==='queued'?'cancelled':state);for(const key of Object.keys(before).filter(key=>state!=='queued'||!['state','retryAt','blockedReason','error','updatedAt'].includes(key)))assert.deepEqual(retained[key],before[key]);assert.equal(f.engine.db.plans[0].id,plan.id);}assert.equal(f.engine.db.jobs[0].dedupeKey,'listing:'+plan.id+':0');});
 });
 
 test('local preparations and original claims require their original plan even when the claim has never been listed',async t=>{
- const f=fixture(t);await f.photos();const plan=f.plan();await preparePhotos(f.engine,plan.id,{validateImage:jpegSize});await rejectsUnchanged(f,()=>deletePlan(f.engine,plan.id),'DELETION_PHOTO_HISTORY');assert.equal(f.engine.db.localPhotoPreparations.length,1);assert.equal(f.engine.db.claims.length,1);
+ const f=fixture(t);await f.photos();const plan=f.plan();await preparePhotos(f.engine,plan.id,{validateImage:jpegSize});const before=clone({preparations:f.engine.db.localPhotoPreparations,claims:f.engine.db.claims});assert.equal((await deletePlan(f.engine,plan.id)).archived,true);assert.deepEqual({preparations:f.engine.db.localPhotoPreparations,claims:f.engine.db.claims},before);assert.equal(f.engine.db.plans[0].id,plan.id);await rejectsUnchanged(f,()=>deleteLocalProduct(f.engine,f.product.id),'DELETION_PRODUCT_PLANS');await f.engine.close();const reopened=f.create();assert.equal(reopened.state().plans[0].archived,true);assert.deepEqual({preparations:reopened.db.localPhotoPreparations,claims:reopened.db.claims},before);
 });
 
 test('supplier preparations, legacy claims, link-only plan references, sales and outbox records give specific protected-history errors',async t=>{
  const scenarios=[
-  ['supplier preparation',(db,plan)=>db.photoPreparations.push({id:'prepared',planId:plan.id,profileId:plan.profileId,productId:plan.productId,assets:[],images:[]}), 'DELETION_PHOTO_HISTORY'],
-  ['legacy same binding claim',(db,plan)=>db.claims.push({id:'old-claim',profileId:plan.profileId,productId:plan.productId,images:[],listings:[]}), 'DELETION_PHOTO_HISTORY'],
+  ['unresolved supplier preparation',(db,plan)=>db.photoPreparations.push({id:'prepared',planId:plan.id,profileId:plan.profileId,productId:plan.productId,state:'uncertain',firstAttemptAt:new Date().toISOString(),assets:[],images:[]}), 'DELETION_PHOTO_HISTORY'],
   ['claim link',(db,plan)=>db.claims.push({id:'old-claim',profileId:'other-profile',productId:'other-product',images:[],listings:[{planId:plan.id,listingId:'123456'}]}), 'DELETION_PHOTO_HISTORY'],
   ['sale',(db,plan)=>db.sales.push({planId:plan.id,jobId:'missing-old-job'}), 'DELETION_SALE_HISTORY'],
   ['supplier outbox',(db,plan)=>db.publicationSupplierSync.push({id:'original-outbox',profileId:plan.profileId,productId:plan.productId,state:'uncertain'}), 'DELETION_SUPPLIER_HISTORY'],
@@ -106,7 +106,7 @@ test('closing and storage faults preserve the draft and reject both deletion met
 });
 
 test('deletion rechecks the live graph when its configuration turn begins',async t=>{
- const f=fixture(t),plan=f.plan(),pending=deletePlan(f.engine,plan.id);f.engine.db.jobs.push(job(plan));f.engine.persist();await assert.rejects(pending,{code:'DELETION_JOB_HISTORY'});assert.equal(f.engine.db.plans[0].id,plan.id);assert.equal(f.engine.db.jobs.length,1);
+ const f=fixture(t),plan=f.plan(),pending=deletePlan(f.engine,plan.id);f.engine.db.jobs.push(job(plan,{state:'uncertain'}));f.engine.persist();await assert.rejects(pending,{code:'DELETION_JOB_HISTORY'});assert.equal(f.engine.db.plans[0].id,plan.id);assert.equal(f.engine.db.jobs.length,1);
 });
 
 test('a failed durable plan deletion rolls back its original arrays and leaves the original file recoverable',async t=>{

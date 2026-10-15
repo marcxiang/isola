@@ -48,7 +48,10 @@ await require(path.join(root,'test/vinted-sales-navigation-smoke.cjs'))(api,chec
 await require(path.join(root,'test/commerce-dashboard-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-environment-workspace-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-product-cards-ui-smoke.cjs'))(api,check);
+await require(path.join(root,'test/commerce-product-display-ui-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-deletion-ui-smoke.cjs'))(api,check);
+await require(path.join(root,'test/commerce-plan-archive-ui-smoke.cjs'))(api,check);
+await require(path.join(root,'test/commerce-plan-archive-main-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-environment-main-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-listing-setup-smoke.cjs'))(api,check);
 await require(path.join(root,'test/commerce-manual-start-ui-smoke.cjs'))(api,check);

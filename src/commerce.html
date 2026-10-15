@@ -18,7 +18,7 @@
     <nav id="workspace-commerce-menu" class="sidebar-submenu" aria-label="账号与运营">
       <button type="button" data-page="overview" class="nav-item active" aria-current="page"><span>▦</span> 商品运营</button>
       <button type="button" data-page="plans" class="nav-item"><span>▤</span> 自动化环境 <b id="nav-account-count" hidden>0</b></button>
-      <button type="button" data-page="inventory" class="nav-item"><span>◇</span> 商品与图片</button>
+      <button type="button" data-page="inventory" class="nav-item"><span>◇</span> 我的商品</button>
       <button type="button" data-page="jobs" class="nav-item"><span>≋</span> 任务记录 <b id="nav-review-count" hidden>0</b></button>
       <button type="button" data-page="settings" class="nav-item"><span>⚙</span> 连接与规则</button>
     </nav>
@@ -51,7 +51,7 @@
     <section id="page-plans" class="page-section" hidden>
       <section id="automation-environment-list">
         <div class="section-tools"><input id="environment-search" type="search" placeholder="搜索自动化环境、设备或账号…" aria-label="搜索自动化环境"><span id="environment-count" class="muted"></span></div>
-        <div id="automation-environments" class="automation-environment-grid"></div>
+        <div class="card table-card automation-environment-table"><table aria-label="自动化环境"><thead><tr><th>序号</th><th>环境名称</th><th>设备</th><th>窗口状态</th><th>Vinted 登录状态</th><th>当前计划</th><th>任务状态</th><th>操作</th></tr></thead><tbody id="automation-environments"></tbody></table><div id="automation-environments-empty" class="empty" hidden></div></div>
       </section>
       <section id="automation-environment-detail" hidden>
         <div class="environment-detail-heading"><button id="environment-back" type="button">← 全部自动化环境</button><div><h2 id="environment-title"></h2><p id="environment-description" class="field-hint"></p></div><span id="environment-state" class="pill neutral"></span></div>
@@ -64,7 +64,7 @@
     </section>
 
     <section id="environment-plans-panel" hidden>
-      <div class="section-tools"><input id="plan-search" type="search" placeholder="搜索此环境的商品或 SKU…" aria-label="搜索当前环境计划"><span id="environment-plan-count" class="muted"></span><div class="spacer"></div><button type="button" class="primary" id="new-plan">＋ 添加商品计划</button></div>
+      <div class="section-tools"><input id="plan-search" type="search" placeholder="搜索此环境的商品或 SKU…" aria-label="搜索当前环境计划"><select id="plan-archive-filter" aria-label="计划列表"><option value="active">当前计划</option><option value="archived">已删除计划</option></select><span id="environment-plan-count" class="muted"></span><div class="spacer"></div><button type="button" class="primary" id="new-plan">＋ 添加商品计划</button></div>
       <div id="plans" class="plan-list"></div>
     </section>
       </section>
@@ -72,7 +72,7 @@
 
     <section id="page-inventory" class="page-section" hidden>
       <div class="section-tools"><input id="product-search" type="search" placeholder="搜索商品名称或 SKU…" aria-label="搜索商品"><span id="inventory-count" class="muted"></span><div class="spacer"></div><button type="button" id="sync">同步货盘</button><button type="button" id="new-manual-product" class="primary">＋ 自己添加商品</button></div>
-      <section class="card inventory-intro"><h2>自己添加，或从货盘同步</h2><p class="field-hint">手动商品可填写资料并选择本地照片，无需货盘连接。新计划会带入商品资料与建议售价，你可以单独调整；修改商品资料不会覆盖已有计划。照片由自动上架流程上传。</p></section>
+      <section class="card inventory-intro"><h2>我的商品</h2><p class="field-hint">自己添加商品，或从货盘同步。货盘商品卡片显示商品展示图；上架所用图片套装由后台管理，执行时领取、核对并记录。可在商品详情中手动复用照片。</p></section>
       <div id="products" class="inventory-product-grid" aria-label="商品列表"></div><div id="inventory-empty" class="empty" hidden></div>
     </section>
 
@@ -134,7 +134,7 @@
     <label class="toggle-row"><span><b>保存后立即开始上架</b><small>只启动这个计划；账号、资料和执行许可缺失时会明确提示，计划保持原状态。</small></span><input name="enabled" type="checkbox"></label><div id="plan-error" class="form-error" role="alert" hidden></div><div class="form-actions end"><button type="button" data-close="plan-dialog">取消</button><button type="submit" class="primary">保存计划</button></div>
   </form></dialog>
 
-  <dialog id="product-detail-dialog" class="product-detail-dialog" aria-labelledby="product-detail-title"><div class="dialog-heading"><div><div class="eyebrow">PRODUCT DETAILS</div><h2 id="product-detail-title">商品详情</h2></div><button type="button" data-close="product-detail-dialog" class="icon-button" aria-label="关闭商品详情">×</button></div><p id="product-detail-source" class="field-hint"></p><div id="product-detail-summary"></div><div id="product-detail-actions" class="product-detail-actions"></div><div id="product-detail-listing"></div><section class="product-detail-photos"><div class="section-heading"><h3 id="photos-heading">图片套装</h3><button type="button" id="clear-photo-filter" class="text-button">返回商品列表</button></div><p id="product-photo-note" class="field-hint"></p><p id="product-detail-error" class="form-error" role="alert" hidden></p><div id="photo-sets" class="photo-grid"></div></section><div class="form-actions end"><button type="button" data-close="product-detail-dialog">关闭</button></div></dialog>
+  <dialog id="product-detail-dialog" class="product-detail-dialog" aria-labelledby="product-detail-title"><div class="dialog-heading"><div><div class="eyebrow">PRODUCT DETAILS</div><h2 id="product-detail-title">商品详情</h2></div><button type="button" data-close="product-detail-dialog" class="icon-button" aria-label="关闭商品详情">×</button></div><p id="product-detail-source" class="field-hint"></p><div id="product-detail-cover" class="product-detail-cover"></div><div id="product-detail-summary"></div><div id="product-detail-actions" class="product-detail-actions"></div><div id="product-detail-listing"></div><details id="product-photo-library" class="product-detail-photos"><summary>上架图片 · 后台管理与手动复用</summary><div class="section-heading"><h3 id="photos-heading">图片套装</h3><button type="button" id="clear-photo-filter" class="text-button">返回商品列表</button></div><p id="product-photo-note" class="field-hint"></p><p id="product-detail-error" class="form-error" role="alert" hidden></p><div id="photo-sets" class="photo-grid"></div></details><div class="form-actions end"><button type="button" data-close="product-detail-dialog">关闭</button></div></dialog>
 
   <dialog id="product-listing-dialog" aria-labelledby="product-listing-title"><form id="product-listing-form"><div class="dialog-heading"><div><div class="eyebrow">PRODUCT / LISTING DETAILS</div><h2 id="product-listing-title">商品上架资料</h2></div><button type="button" data-close="product-listing-dialog" class="icon-button" aria-label="关闭商品资料">×</button></div><input name="productId" type="hidden"><p id="product-listing-source" class="field-hint"></p>
     <div data-manual-product-only hidden><div class="field-grid"><label>商品名称<input name="manualName" maxlength="200" placeholder="本机管理用的商品名称"></label><label>可售数量<input name="manualStock" type="number" min="0" max="1000000" step="1" value="1"></label></div><div class="manual-photo-picker"><button type="button" id="manual-photo-import">选择本地照片</button><span id="manual-photo-count" role="status">尚未选择照片</span></div><p class="field-hint">导入照片副本后核对图片哈希与上传回执。无照片且未启用的草稿可首次补图；已有照片不替换，新照片请新建商品。</p></div>

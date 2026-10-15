@@ -37,7 +37,7 @@ module.exports = async function commerceSmoke(api, check) {
   });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
   const baseURL = `http://127.0.0.1:${server.address().port}/api/v1`;
-  let view, wrongWindow, profile, engine, originalDB, originalConnection, plan;
+  let view, wrongWindow, profile, engine, originalDB, originalConnection, plan, originalThrottle;
   const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
   const waitFor = async (predicate,message) => {
     const deadline = Date.now()+8000;
@@ -56,6 +56,9 @@ module.exports = async function commerceSmoke(api, check) {
 
     await check('commerce view loads isolated renderer and truthful readiness without console errors',async()=>{
       const loading = api.openCommerce();view=api.getCommerceView();
+      // A hidden Windows WebContentsView can defer dialog close/rAF indefinitely.
+      // Only this isolated fixture disables timer throttling; restore it in finally.
+      originalThrottle=view.webContents.getBackgroundThrottling();view.webContents.setBackgroundThrottling(false);
       view.webContents.on('console-message',(event,level,message)=>{
         const details=event.details || event;
         const severity=typeof level==='number'?level:(typeof level==='object'?level.level:details.level);
@@ -99,8 +102,8 @@ module.exports = async function commerceSmoke(api, check) {
       await waitFor(()=>engine.db.products.length===2&&engine.db.photoSets.length===3,'catalog and photo sets sync');await frames();
       const state=await invoke('state');assert.equal(state.connection.account,'QA SKU Desk');assert.equal(state.products[0].priceCents,790);assert.equal(state.products[0].stock,12);assert.equal(state.photoSets[1].claimedByMe,true);
       const table=await view.webContents.executeJavaScript(`({products:document.querySelectorAll('#products [data-product-id]').length,sets:document.querySelectorAll('.photo-set').length})`);assert.equal(table.products,2);assert.equal(table.sets,0,'The inventory landing must not mix photo sets from different products');
-      await view.webContents.executeJavaScript(`document.querySelector('[data-product-detail-id="commerce-product-1"]').click()`);const first=await view.webContents.executeJavaScript(`({open:document.querySelector('#product-detail-dialog').open,sets:Array.from(document.querySelectorAll('#photo-sets [data-photo-set-id]'),row=>row.dataset.photoSetId),text:document.querySelector('#photo-sets').innerText})`);assert.equal(first.open,true);assert.deepEqual(first.sets,['commerce-set-1','commerce-set-2']);assert.match(first.text,/可领取/);assert.match(first.text,/已被你领取/);assert.doesNotMatch(first.text,/QA 法国围巾|QA 其他人领取的图片/);await view.webContents.executeJavaScript(`document.querySelector('#product-detail-dialog').close()`);await waitFor(()=>view.webContents.executeJavaScript('!document.querySelector("#product-detail-dialog").open&&document.querySelectorAll(".photo-set").length===0'),'first product detail to clear after close');
-      await view.webContents.executeJavaScript(`document.querySelector('[data-product-detail-id="commerce-product-2"]').click()`);const second=await view.webContents.executeJavaScript(`({open:document.querySelector('#product-detail-dialog').open,sets:Array.from(document.querySelectorAll('#photo-sets [data-photo-set-id]'),row=>row.dataset.photoSetId),text:document.querySelector('#photo-sets').innerText})`);assert.equal(second.open,true);assert.deepEqual(second.sets,['commerce-set-3']);assert.match(second.text,/已使用/);assert.doesNotMatch(second.text,/QA 法国衬衫|QA 未领取图片|QA 自己领取的图片/);await view.webContents.executeJavaScript(`document.querySelector('#product-detail-dialog').close()`);await waitFor(()=>view.webContents.executeJavaScript('!document.querySelector("#product-detail-dialog").open&&document.querySelectorAll(".photo-set").length===0'),'second product detail to clear after close');
+      await view.webContents.executeJavaScript(`document.querySelector('[data-product-detail-id="commerce-product-1"]').click()`);await waitFor(()=>view.webContents.executeJavaScript('document.querySelector("#product-detail-dialog").open'),'first product detail opens before expanding library');await view.webContents.executeJavaScript(`document.querySelector('#product-photo-library>summary').click()`);const first=await view.webContents.executeJavaScript(`({open:document.querySelector('#product-detail-dialog').open,sets:Array.from(document.querySelectorAll('#photo-sets [data-photo-set-id]'),row=>row.dataset.photoSetId),text:document.querySelector('#photo-sets').innerText})`);assert.equal(first.open,true);assert.deepEqual(first.sets,['commerce-set-1','commerce-set-2']);assert.match(first.text,/可领取/);assert.match(first.text,/已被你领取/);assert.doesNotMatch(first.text,/QA 法国围巾|QA 其他人领取的图片/);await view.webContents.executeJavaScript(`document.querySelector('#product-detail-dialog').close()`);await waitFor(()=>view.webContents.executeJavaScript('!document.querySelector("#product-detail-dialog").open&&document.querySelectorAll(".photo-set").length===0'),'first product detail to clear after close');
+      await view.webContents.executeJavaScript(`document.querySelector('[data-product-detail-id="commerce-product-2"]').click()`);await waitFor(()=>view.webContents.executeJavaScript('document.querySelector("#product-detail-dialog").open'),'second product detail opens before expanding library');await view.webContents.executeJavaScript(`document.querySelector('#product-photo-library>summary').click()`);const second=await view.webContents.executeJavaScript(`({open:document.querySelector('#product-detail-dialog').open,sets:Array.from(document.querySelectorAll('#photo-sets [data-photo-set-id]'),row=>row.dataset.photoSetId),text:document.querySelector('#photo-sets').innerText})`);assert.equal(second.open,true);assert.deepEqual(second.sets,['commerce-set-3']);assert.match(second.text,/已使用/);assert.doesNotMatch(second.text,/QA 法国衬衫|QA 未领取图片|QA 自己领取的图片/);await view.webContents.executeJavaScript(`document.querySelector('#product-detail-dialog').close()`);await waitFor(()=>view.webContents.executeJavaScript('!document.querySelector("#product-detail-dialog").open&&document.querySelectorAll(".photo-set").length===0'),'second product detail to clear after close');
       for(const route of ['/api/v1/me','/api/v1/products','/api/v1/photos/sets'])assert.ok(requests.some(request=>request.path===route&&request.method==='GET'));
       for(const request of requests.filter(request=>request.path!=='/api/v1/me')){assert.equal(request.query.page,'1');assert.equal(request.query.pageSize,'100');}
       return {products:table.products,photoSets:first.sets.length+second.sets.length,productPhotoSetsIsolated:true,readOnlyRequests:requests.length};
@@ -206,6 +209,7 @@ module.exports = async function commerceSmoke(api, check) {
       return {rendererErrors:0,externalWriteRequests:0,backgroundRunning:false};
     });
   } finally {
+    if(view&&!view.webContents.isDestroyed()&&typeof originalThrottle==='boolean')view.webContents.setBackgroundThrottling(originalThrottle);
     if(wrongWindow&&!wrongWindow.isDestroyed())wrongWindow.destroy();
     if(engine){if(engine.running)engine.setRunning(false);if(originalDB){engine.db=originalDB;engine.connection=originalConnection;engine.persist();engine.emit();}}
     await api.showEnvironmentManager();

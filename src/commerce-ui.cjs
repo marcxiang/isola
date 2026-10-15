@@ -22,7 +22,7 @@
   const stepNames = {pending:'检查执行条件',claim_photos:'领取商品图片',prepare_listing:'准备刊登草稿',publish_listing:'提交刊登',record_listing:'记录刊登回执',draft_reply:'准备商品回复',send_reply:'发送回复',check_offer:'核对报价',accept_offer:'接受报价',download_label:'下载并核对运单',check_stock_price:'核对库存与采购价',wms_checkout:'核对可用仓库',create_supplier_order:'提交货盘订单',verified:'核对完成'};
   Object.assign(stateNames,{sale_pending_confirmation:'成交待确认'});
   Object.assign(stepNames,{open_environment:'自动打开账号环境',check_catalog:'核对当前账号衣橱',prepare_photos:'准备并校验原照片',upload_photos:'上传并核对照片',verify_listing:'核对实际刊登结果',publication_reconciled:'已关联原刊登',listing_deleted:'原商品已删除，已安排重新上架',confirm_sale:'核对原成交',sale_confirmed:'成交已核对',sale_confirmation:'核对原成交'});
-  const pageDetails = {overview:['商品运营','查看每个商品在哪个环境销售，以及接下来需要做什么。'],accounts:['自动化环境','选择环境，设置账号和商品上架计划。'],plans:['自动化环境','先选择自动化环境，再管理该环境的账号、商品与上架计划。'],inventory:['商品与图片','自己添加商品和照片，或同步货盘商品。'],jobs:['任务记录','检查每一步的执行状态与外部平台回执。'],settings:['连接与规则','连接货盘，并为后台执行设置明确的范围。']};
+  const pageDetails = {overview:['商品运营','查看每个商品在哪个环境销售，以及接下来需要做什么。'],accounts:['自动化环境','选择环境，设置账号和商品上架计划。'],plans:['自动化环境','先选择自动化环境，再管理该环境的账号、商品与上架计划。'],inventory:['我的商品','查看货盘商品展示图，添加商品并设置上架资料。'],jobs:['任务记录','检查每一步的执行状态与外部平台回执。'],settings:['连接与规则','连接货盘，并为后台执行设置明确的范围。']};
   let state = {settings:{},connection:{status:'not_configured'},profiles:[],accounts:[],products:[],productListings:[],photoSets:[],photoPreparations:[],plans:[],jobs:[],events:[],publications:[],running:false,readiness:{vinted:'unverified'}};
   let currentPage = 'overview', settingsDirty = false, photoProductId = '', selectedJobId = '', selectedPlanId = '', toastTimer;
   let pageReport = null, reportKind = 'preflight', reportError = '';
@@ -31,6 +31,8 @@
   const photoReports = new Map();
   const publicationAttempts = new Map();
   const planAccountReports = new Map();
+  const productCoverRequests = new Map();
+  const productCoverObserver = new IntersectionObserver(entries=>{for(const entry of entries)if(entry.isIntersecting){productCoverObserver.unobserve(entry.target);entry.target.loadProductCover?.();}},{rootMargin:'180px'});
   let accountVerifyPlanId='',manualPhotoToken='',manualPhotoCount=0;
   let publicationReviewedPlan = '';
   let associationPlanId = '', associationReport = null, associationReviewToken = '', associationError = '', associationResult = null;
@@ -44,6 +46,7 @@
   function el(tag, cls, value) { const node = document.createElement(tag); if (cls) node.className = cls; if (value !== undefined && value !== null) node.textContent = String(value); return node; }
   function same(a,b) { return String(a) === String(b); }
   function find(rows,id) { return rows.find(row => same(row.id,id)); }
+  function currentPlans() { return state.plans.filter(plan=>plan.archived!==true); }
   function number(value) { return typeof value === 'number' && Number.isFinite(value) ? value : 0; }
   function currency(cents) { return typeof cents === 'number' && Number.isSafeInteger(cents) ? new Intl.NumberFormat('fr-FR',{style:'currency',currency:'EUR'}).format(cents / 100) : '—'; }
   function moneyInput(cents) { return Number.isSafeInteger(cents) && cents >= 0 ? (cents / 100).toFixed(2) : ''; }
@@ -58,6 +61,7 @@
   }
   function integer(value, min, max, label) { if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value)) || Number(value)<min || Number(value)>max) throw Error(`${label}须为 ${min}–${max} 之间的整数。`); return Number(value); }
   function when(value, compact = false) { if (!value) return '—'; const date = new Date(value); if (!Number.isFinite(date.getTime())) return '—'; return date.toLocaleString('zh-CN', compact ? {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false} : {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}); }
+  function archiveWhen(value){const date=new Date(value);return value&&Number.isFinite(date.getTime())?date.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—';}
   function cleanError(error) { return String(error?.message || error || '操作失败').replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''); }
   function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 7000); }
   async function refresh() { applyState(await api.state()); }
@@ -109,7 +113,7 @@
   }
   function isConnected() { return ['connected','ok','ready','authenticated','success'].includes(state.connection.status); }
   function productEditorBusy() { return pending.has('product-listing')||pending.has('manual-photos')||pending.has('supplier-photo-reuse')||pending.has('record-delete'); }
-  function supplierRequired() { return state.plans.some(plan=>plan.enabled&&plan.source!=='local'&&find(state.products,plan.productId)?.source!=='local')||!state.products.length&&!!state.settings.hasToken; }
+  function supplierRequired() { return currentPlans().some(plan=>plan.enabled&&plan.source!=='local'&&find(state.products,plan.productId)?.source!=='local')||!state.products.length&&!!state.settings.hasToken; }
   function listingMissing(value) { return value?.missingFields || ['title','description','condition','brand','color','parcel','categoryPath'].filter(key=>key==='categoryPath'?!Array.isArray(value?.listing?.[key])||!value.listing[key].length:!value?.listing?.[key]?.trim()); }
   function productListing(product) { return product&&state.productListings.find(row=>same(row.productId,product.id)&&row.sku===product.sku); }
   function formListing(form) { return Object.fromEntries(Object.entries(listingFields).map(([key,field])=>[key,form.elements[field].value.trim()])); }
@@ -120,16 +124,16 @@
   function setupNext() {
     if(supplierRequired()&&(!state.settings.hasToken||!isConnected()))return {page:'settings',label:state.settings.hasToken?'检查货盘连接':'配置货盘连接'};
     if(!state.products.length)return {page:'inventory',label:state.settings.hasToken?'同步或添加商品':'自己添加商品'};
-    if(!state.plans.length&&!state.products.some(product=>{const saved=productListing(product);return saved&&!listingMissing(saved).length;}))return {page:'inventory',label:'填写商品资料'};
-    if(!state.plans.length)return {page:'plans',label:'创建上架计划'};
-    const enabled=state.plans.filter(plan=>plan.enabled),pending=enabled.filter(plan=>!plan.activeListingId&&number(plan.completedCount)<number(plan.targetCount));
+    if(!currentPlans().length&&!state.products.some(product=>{const saved=productListing(product);return saved&&!listingMissing(saved).length;}))return {page:'inventory',label:'填写商品资料'};
+    if(!currentPlans().length)return {page:'plans',label:'创建或恢复上架计划'};
+    const enabled=currentPlans().filter(plan=>plan.enabled),pending=enabled.filter(plan=>!plan.activeListingId&&number(plan.completedCount)<number(plan.targetCount));
     if(pending.some(plan=>!hasBoundAccount(plan.profileId)))return {page:'accounts',label:'绑定并核对账号'};
     if(!enabled.length||pending.some(plan=>listingMissing(plan).length))return {page:'plans',label:'完善并启用计划'};
     if(!state.settings.backgroundEnabled)return {page:'settings',label:'允许后台调度'};
     return {page:state.running?'jobs':'overview',label:state.running?'查看执行进度':'查看上架流程'};
   }
   function renderListingWorkflow() {
-    const products=state.products,templates=products.filter(product=>{const saved=productListing(product);return saved&&!listingMissing(saved).length;}),enabled=state.plans.filter(plan=>plan.enabled),ready=enabled.filter(plan=>!listingMissing(plan).length&&hasBoundAccount(plan.profileId)),review=state.jobs.filter(job=>reviewStates.has(job.state));
+    const products=state.products,templates=products.filter(product=>{const saved=productListing(product);return saved&&!listingMissing(saved).length;}),enabled=currentPlans().filter(plan=>plan.enabled),ready=enabled.filter(plan=>!listingMissing(plan).length&&hasBoundAccount(plan.profileId)),review=state.jobs.filter(job=>reviewStates.has(job.state));
     const rows=[
       {id:'connection',title:'执行规则',complete:!!state.settings.backgroundEnabled&&(!supplierRequired()||isConnected()),text:!state.settings.backgroundEnabled?'先允许后台执行并保存。手动商品无需货盘。':supplierRequired()&&!isConnected()?'使用货盘的计划还需检查连接。':'已允许执行；只有货盘商品需要货盘连接。',label:'设置执行规则',page:'settings'},
       {id:'products',title:'商品信息',complete:templates.length>0,text:!products.length?'自己添加商品和本地照片，也可连接并同步货盘。':`${products.length} 个商品 · ${templates.length} 份基本资料已齐。先保存资料，再分配计划。`,label:products.length?'编辑商品资料':'添加商品',page:'inventory'},
@@ -185,37 +189,38 @@
   function environmentProfiles(){return state.profiles.filter(profile=>profile.windowType==='automation'||state.plans.some(plan=>same(plan.profileId,profile.id))||state.accounts.some(account=>same(account.profileId,profile.id)));}
   function selectPlanEnvironment(id,tab='plans'){
     const profile=find(environmentProfiles(),id);if(!profile)return;
-    selectedPlanProfileId=String(profile.id);environmentTab=tab==='accounts'?'accounts':'plans';$('#plan-search').value='';$('#account-search').value='';$('#account-status').value='';changePage('plans');renderPlans();renderAccounts();renderControls();
+    selectedPlanProfileId=String(profile.id);environmentTab=tab==='accounts'?'accounts':'plans';$('#plan-search').value='';$('#plan-archive-filter').value='active';$('#account-search').value='';$('#account-status').value='';changePage('plans');renderPlans();renderAccounts();renderControls();
     if(pendingPlanCreate&&environmentTab==='plans'&&profile.windowType==='automation'){const productId=pendingPlanProductId;pendingPlanProductId='';pendingPlanCreate=false;editPlan(null,productId);}
   }
   function renderEnvironmentWorkspace(){
     const profiles=environmentProfiles(),selected=find(profiles,selectedPlanProfileId),query=$('#environment-search').value.trim().toLowerCase(),rows=profiles.filter(profile=>[profile.name,profile.deviceModel,state.accounts.find(account=>same(account.profileId,profile.id))?.label,state.accounts.find(account=>same(account.profileId,profile.id))?.login].join(' ').toLowerCase().includes(query)),root=$('#automation-environments');
     if(!selected)selectedPlanProfileId='';$('#automation-environment-list').hidden=!!selected;$('#automation-environment-detail').hidden=!selected;$('#environment-count').textContent=`${rows.length} / ${profiles.length} 个环境`;root.replaceChildren();
-    if(!rows.length)root.append(empty(profiles.length?'没有匹配的自动化环境。':'还没有自动化环境。请在环境管理中新建环境，并将用途选择为自动化。'));
-    for(const profile of rows){
-      const plans=state.plans.filter(plan=>same(plan.profileId,profile.id)),account=state.accounts.find(row=>same(row.profileId,profile.id)),status=account?accountStatus(account):{label:'未添加账号',tone:'neutral'},card=el('article','automation-environment-card'),badges=el('div','environment-card-status'),metrics=el('div','environment-card-metrics'),actions=el('div','environment-card-actions');card.dataset.environmentId=String(profile.id);
-      card.append(el('h3','',profile.name),el('p','environment-card-meta',accountProfileText(profile)));badges.append(badge(profile.windowType==='automation'?'自动化环境':'已有关联环境'),badge(status.label,status.tone));card.append(badges);
-      for(const [label,value]of [['商品计划',plans.length],['已启用',plans.filter(plan=>plan.enabled).length],['待处理任务',state.jobs.filter(job=>same(job.profileId,profile.id)&&!completedStates.has(job.state)&&!cancelledStates.has(job.state)).length]]){const metric=el('div');metric.append(el('span','',label),el('b','',value));metrics.append(metric);}card.append(metrics);
-      if(account)card.append(el('p','field-hint',account.identity?`${account.identity.username} · ${when(account.identity.verifiedAt)}`:'账号已保存，尚待核对当前登录。'));
-      const open=makeButton('商品与上架计划',()=>selectPlanEnvironment(profile.id,'plans'),'primary'),accounts=makeButton('账号与登录',()=>selectPlanEnvironment(profile.id,'accounts'));open.dataset.openEnvironment=String(profile.id);accounts.dataset.openEnvironmentAccount=String(profile.id);actions.append(open,accounts);card.append(actions);root.append(card);
+    const emptyList=$('#automation-environments-empty');emptyList.hidden=!!rows.length;emptyList.textContent=profiles.length?'没有匹配的自动化环境。':'还没有自动化环境。请在环境管理中新建环境，并将用途选择为自动化。';
+    for(const [index,profile] of rows.entries()){
+      const plans=currentPlans().filter(plan=>same(plan.profileId,profile.id)),account=state.accounts.find(row=>same(row.profileId,profile.id)),status=account?accountStatus(account):{label:'未添加账号',tone:'neutral'},row=el('tr'),name=el('td','environment-table-name'),login=el('td'),tasks=el('td'),actions=el('td','environment-table-actions');row.dataset.environmentId=String(profile.id);
+      name.append(el('b','',profile.name),el('small','',profile.windowType==='automation'?'自动化环境':'已有关联环境'));login.append(badge(status.label,status.tone));if(account)login.append(el('small','',account.identity?`${account.identity.username} · ${when(account.identity.verifiedAt,true)}`:account.label||'尚待核对当前登录'));
+      const jobs=state.jobs.filter(job=>same(job.profileId,profile.id)&&!completedStates.has(job.state)&&!cancelledStates.has(job.state)),running=jobs.filter(job=>job.state==='running'),attention=jobs.filter(job=>reviewStates.has(job.state));tasks.append(badge(running.length?`${running.length} 个执行中`:attention.length?`${attention.length} 个需核对`:jobs.length?`${jobs.length} 个待处理`:'暂无任务',attention.length?'warn':running.length?'good':'neutral'));
+      const open=makeButton('商品与上架计划',()=>selectPlanEnvironment(profile.id,'plans'),'primary'),accounts=makeButton('账号与登录',()=>selectPlanEnvironment(profile.id,'accounts'));open.dataset.openEnvironment=String(profile.id);accounts.dataset.openEnvironmentAccount=String(profile.id);actions.append(open,accounts);
+      row.append(el('td','',index+1),name,el('td','',accountProfileText(profile)),el('td','',{closed:'已关闭',running:'已打开',starting:'正在启动'}[profile.status]||'待核对'),login,el('td','',`${plans.length} 个 · ${plans.filter(plan=>plan.enabled).length} 个启用`),tasks,actions);root.append(row);
     }
     $('#page-accounts').hidden=!selected||environmentTab!=='accounts';$('#environment-plans-panel').hidden=!selected||environmentTab!=='plans';
     for(const button of document.querySelectorAll('[data-environment-tab]')){const active=button.dataset.environmentTab===environmentTab;button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active));}
-    if(selected){$('#environment-title').textContent=selected.name;$('#environment-description').textContent=accountProfileText(selected)+(selected.windowType==='automation'?' · 账号、计划与会话固定在此环境':' · 保留原有关联；添加新计划前请将用途改为自动化');$('#environment-state').textContent={closed:'环境已关闭',running:'环境已打开',starting:'环境正在启动'}[selected.status]||'环境状态待核对';$('#environment-plan-count').textContent=state.plans.filter(plan=>same(plan.profileId,selected.id)).length+' 个商品计划';}
+    if(selected){$('#environment-title').textContent=selected.name;$('#environment-description').textContent=accountProfileText(selected)+(selected.windowType==='automation'?' · 账号、计划与会话固定在此环境':' · 保留原有关联；添加新计划前请将用途改为自动化');$('#environment-state').textContent={closed:'环境已关闭',running:'环境已打开',starting:'环境正在启动'}[selected.status]||'环境状态待核对';const archived=$('#plan-archive-filter').value==='archived',query=$('#plan-search').value.trim().toLowerCase();$('#environment-plan-count').textContent=state.plans.filter(plan=>same(plan.profileId,selected.id)&&(plan.archived===true)===archived&&`${plan.name||''} ${plan.sku||''} ${productName(plan.productId)}`.toLowerCase().includes(query)).length+(archived?' 个已删除计划':' 个商品计划');}
     const accountPage=currentPage==='plans'&&!!selected&&environmentTab==='accounts';$('#readiness').hidden=accountPage;$('.header-actions').hidden=accountPage;
   }
   function recordDeleteSignature(kind,row){return JSON.stringify({row,jobs:state.jobs.filter(item=>kind==='plan'?same(item.planId,row.id):same(item.productId,row.id)),plans:kind==='product'?state.plans.filter(item=>same(item.productId,row.id)):undefined,publications:state.publications.filter(item=>kind==='plan'?same(item.planId,row.id):same(item.productId,row.id)),photos:state.photoPreparations.filter(item=>kind==='plan'?same(item.planId,row.id):same(item.productId,row.id))});}
-  function deletionBusy(){return pending.has('record-delete')||productEditorBusy()||pageActionPending()||accountMutationPending()||!!state.running||!!state.configBusy||!!state.faulted;}
+  function deletionBusy(){return pending.has('record-delete')||[...pending].some(key=>key.startsWith('plan-restore-'))||productEditorBusy()||pageActionPending()||accountMutationPending()||!!state.running||!!state.configBusy||!!state.faulted;}
   function confirmRecordDelete(kind,row){
     if(deletionBusy()||recordDeleteDialog.open)return;recordDeleteReview={kind,id:String(row.id),signature:recordDeleteSignature(kind,row)};
     $('#record-delete-title').textContent=kind==='plan'?'删除上架计划':'删除手动商品';const summary=$('#record-delete-summary');summary.replaceChildren();const grid=el('dl','detail-grid');for(const [label,value]of [['名称',row.name||productName(row.productId)],['SKU',row.sku],...(kind==='plan'?[['固定环境',profileName(row.profileId)]]:[])])grid.append(el('dt','',label),el('dd','',value||'—'));summary.append(grid);
-    $('#record-delete-note').textContent=kind==='plan'?'删除本机尚无业务记录的计划。已有任务、照片领取、在售或原提交记录的计划需要停用并保留；平台商品不会在这里删除。':'删除未被计划或业务记录使用的手动商品及资料模板；货盘原商品和原图片使用记录保留。已使用商品需要保留原关联。';$('#record-delete-error').hidden=true;renderDeletionControls();recordDeleteDialog.showModal();
+    $('#record-delete-note').textContent=kind==='plan'?'没有业务记录的草稿直接删除；有普通任务或照片历史的计划移到「已删除计划」，自动停用并取消确定未提交的排队任务，原任务和去重记录保留，可恢复。仍在售、原提交结果未知或有未完成业务时，需先核对后再删除；平台商品和照片不会在这里删除。':'删除未被计划或业务记录使用的手动商品及资料模板；货盘原商品和原图片使用记录保留。已使用商品需要保留原关联。';$('#record-delete-error').hidden=true;renderDeletionControls();recordDeleteDialog.showModal();
   }
   function renderDeletionControls(){
     const review=recordDeleteReview,row=review&&find(review.kind==='plan'?state.plans:state.products,review.id),changed=!!review&&(!row||recordDeleteSignature(review.kind,row)!==review.signature),busy=pending.has('record-delete');
     $('#record-delete-confirm').disabled=!review||deletionBusy()||changed;$('#record-delete-confirm').textContent=busy?'正在删除…':'确认删除';
     if(changed&&!busy){$('#record-delete-error').textContent='记录或关联状态已改变，请关闭后重新核对。';$('#record-delete-error').hidden=false;}
     document.querySelectorAll('[data-delete-plan-id],[data-delete-product-id]').forEach(button=>{button.disabled=deletionBusy()||typeof api[button.dataset.deletePlanId?'deletePlan':'deleteManualProduct']!=='function';});
+    document.querySelectorAll('[data-restore-plan-id]').forEach(button=>{button.disabled=deletionBusy()||typeof api.restorePlan!=='function';button.textContent=pending.has(`plan-restore-${button.dataset.restorePlanId}`)?'正在恢复…':'恢复计划';});
   }
 
   function applyState(incoming) {
@@ -350,7 +355,7 @@
     catch(error){setPlanAccountReport(id,'failed',cleanError(error));}
   }
   function renderSummary() {
-    const active=state.plans.filter(plan=>plan.enabled), attention=state.jobs.filter(job=>reviewStates.has(job.state));
+    const active=currentPlans().filter(plan=>plan.enabled), attention=state.jobs.filter(job=>reviewStates.has(job.state));
     $('#stat-plans').textContent=active.length; $('#stat-profiles').textContent=`覆盖 ${new Set(active.map(plan=>plan.profileId)).size} 个环境`;
     $('#stat-products').textContent=state.products.length; $('#stat-photo-sets').textContent=`${state.photoSets.length} 套图片`;
     $('#stat-complete').textContent=state.jobs.filter(job=>completedStates.has(job.state)).length; $('#stat-review').textContent=attention.length;
@@ -557,14 +562,15 @@
   function showPlanJobs(id) {
     jobProfileFilter='';jobPlanFilter=String(id);$('#job-filter').value='';renderJobs();changePage('jobs');
   }
+  function showArchivedPlan(plan){selectPlanEnvironment(plan.profileId);$('#plan-archive-filter').value='archived';$('#plan-search').value=plan.sku||'';renderPlans();}
   function renderDistribution() {
     const select=$('#distribution-profile'), selected=select.value;
     const profiles=[...state.profiles];
-    for(const plan of state.plans)if(!profiles.some(profile=>same(profile.id,plan.profileId)))profiles.push({id:plan.profileId,name:'环境不可用'});
+    for(const plan of currentPlans())if(!profiles.some(profile=>same(profile.id,plan.profileId)))profiles.push({id:plan.profileId,name:'环境不可用'});
     populateSelect(select,profiles,'全部环境',selected);
     const query=$('#distribution-search').value.trim().toLowerCase(), profileId=select.value, status=$('#distribution-status').value, groups=new Map();
     for(const product of state.products)groups.set(String(product.id),{product,plans:[]});
-    for(const plan of state.plans){const id=String(plan.productId);if(!groups.has(id))groups.set(id,{product:{id:plan.productId,name:plan.name||'货盘中暂无此商品',sku:plan.sku},plans:[]});groups.get(id).plans.push(plan);}
+    for(const plan of currentPlans()){const id=String(plan.productId);if(!groups.has(id))groups.set(id,{product:{id:plan.productId,name:plan.name||'货盘中暂无此商品',sku:plan.sku},plans:[]});groups.get(id).plans.push(plan);}
     const rows=[];
     for(const group of groups.values()){
       if(!`${group.product.name||''} ${group.product.sku||''}`.toLowerCase().includes(query))continue;
@@ -580,8 +586,9 @@
     for(const group of rows.slice(0,distributionLimit)){
       const card=el('article','distribution-product');card.dataset.productId=String(group.product.id);
       const head=el('div','distribution-product-head'), title=el('div');title.append(el('h3','',group.product.name||'未命名商品'),el('p','',`SKU ${group.product.sku||'—'} · ${group.plans.length} 个环境计划`));
-      const add=makeButton(group.plans.length?'添加销售环境':'分配销售环境',()=>editPlan(null,group.product.id));add.disabled=disabled||!find(state.products,group.product.id);head.append(title,add);card.append(head);
-      if(!group.operations.length)card.append(el('p','distribution-unassigned','尚未分配到销售环境。设置售价、底价和累计目标后保存计划。'));
+      const archivedPlan=state.plans.find(plan=>plan.archived===true&&same(plan.productId,group.product.id)),onlyArchived=!group.plans.length&&archivedPlan;
+      const add=makeButton(onlyArchived?'查看已删除计划':group.plans.length?'添加销售环境':'分配销售环境',()=>onlyArchived?showArchivedPlan(archivedPlan):editPlan(null,group.product.id));add.disabled=disabled||!find(state.products,group.product.id);head.append(title,add);card.append(head);
+      if(!group.operations.length)card.append(el('p','distribution-unassigned',onlyArchived?'原计划已删除，任务历史保留。可查看并恢复原计划。':'尚未分配到销售环境。设置售价、底价和累计目标后保存计划。'));
       for(const {plan,operation} of group.operations){
         const row=el('section','distribution-row');row.dataset.planId=String(plan.id);row.dataset.operation=operation.key;
         const heading=el('div','distribution-row-heading'), name=el('div','distribution-environment'), account=find(state.profiles,plan.profileId)?.marketAccount;
@@ -604,14 +611,18 @@
     }
   }
   function renderPlans() {
-    renderEnvironmentWorkspace();const query=$('#plan-search').value.trim().toLowerCase(), rows=state.plans.filter(plan=>same(plan.profileId,selectedPlanProfileId)&&`${plan.name || ''} ${plan.sku || ''} ${productName(plan.productId)}`.toLowerCase().includes(query)), list=$('#plans');
+    renderEnvironmentWorkspace();const query=$('#plan-search').value.trim().toLowerCase(),archived=$('#plan-archive-filter').value==='archived',rows=state.plans.filter(plan=>same(plan.profileId,selectedPlanProfileId)&&(plan.archived===true)===archived&&`${plan.name || ''} ${plan.sku || ''} ${productName(plan.productId)}`.toLowerCase().includes(query)), list=$('#plans');
+    $('#environment-plan-count').textContent=rows.length+(archived?' 个已删除计划':' 个商品计划');
     list.replaceChildren();
     if(!selectedPlanProfileId)return;
-    if (!rows.length) { list.append(empty(state.plans.length?'没有匹配的计划，试试其他商品或环境名称。':'还没有计划。新建一个计划，设置累计销售目标与价格。')); return; }
+    if (!rows.length) { list.append(empty(archived?'此环境没有匹配的已删除计划。':query?'没有匹配的计划，试试其他商品或 SKU。':'还没有当前计划。可添加计划，或在「已删除计划」中恢复原计划。')); return; }
     for (const plan of rows) {
       const card=el('article','plan-card'), head=el('div','plan-head'), heading=el('div'), actions=el('div','plan-actions'), operation=operationState(plan), occupied=publicationOccupied(plan);
       card.dataset.listingPlanId=String(plan.id);
       heading.append(el('div','plan-name',plan.name || productName(plan.productId)),el('div','plan-meta',`${profileName(plan.profileId)} · SKU ${plan.sku || find(state.products,plan.productId)?.sku || '—'} · 法国站 / EUR`));
+      if(archived){
+        card.dataset.archived='true';const restore=makeButton('恢复计划',async()=>{if(deletionBusy())return;await request(`plan-restore-${plan.id}`,async()=>{const result=await api.restorePlan(plan.id);if(result?.restored!==true||!same(result.id,plan.id))throw Error('未收到恢复成功回执，请刷新后核对计划。');return result;},'计划已恢复，保持停用；请核对后手动开始。');});restore.dataset.restorePlanId=String(plan.id);restore.disabled=deletionBusy()||typeof api.restorePlan!=='function';actions.append(badge('已删除 · 已停用'),restore,makeButton('任务记录',()=>showPlanJobs(plan.id)));head.append(heading,actions);card.append(head,el('p','field-hint',`删除时间：${archiveWhen(plan.archivedAt)}。原任务、照片和去重记录保留；恢复后不会自动重复执行。`));list.append(card);continue;
+      }
       const checking=pageActionPending();
       const toggle=makeButton(plan.enabled?'停用':'启用并开始',()=>request(`plan-${plan.id}`,()=>plan.enabled?api.setPlanEnabled(plan.id,false):api.startPlan(plan.id),plan.enabled?'计划已停用':'计划已启用并开始执行'));toggle.disabled=pending.has(`plan-${plan.id}`)||checking||!plan.enabled&&typeof api.startPlan!=='function';
       const started=state.running&&(state.runningPlanIds==null||state.runningPlanIds.some(id=>same(id,plan.id))),start=makeButton(started?'此计划已开始':'开始上架',()=>request(`plan-${plan.id}`,()=>api.startPlan(plan.id),'该计划已开始执行'),'primary');start.disabled=started||pending.has(`plan-${plan.id}`)||checking||typeof api.startPlan!=='function'||!!state.faulted||!!state.configBusy;
@@ -765,11 +776,11 @@
   }
   function renderInventory() {
     const query=$('#product-search').value.trim().toLowerCase(), products=state.products.filter(product=>`${product.name || ''} ${product.sku || ''}`.toLowerCase().includes(query));
-    $('#inventory-count').textContent=`${products.length} 件商品`;const list=$('#products');list.replaceChildren();
+    $('#inventory-count').textContent=`${products.length} 件商品`;const list=$('#products');productCoverObserver.disconnect();list.replaceChildren();
     $('#inventory-empty').hidden=!!products.length;$('#inventory-empty').textContent=state.products.length?'没有找到匹配商品。':'点击“自己添加商品”填写资料并选择本地照片；也可连接并同步货盘。';
     for (const product of products) {
       const card=el('article','inventory-product-card');card.dataset.productId=String(product.id);
-      const media=el('div','product-card-media'),icon=el('span','product-card-icon','▧');icon.setAttribute('aria-hidden','true');media.append(icon,el('span','',productPhotoText(product)),badge(product.source==='local'?'手动商品':'货盘商品'));
+      const media=el('div','product-card-media'),cover=el('div','product-card-cover');renderProductCover(product,cover);media.append(cover,el('span','',product.source==='local'?productPhotoText(product):'货盘商品展示图'),badge(product.source==='local'?'手动商品':'货盘商品'));
       const heading=el('div','product-card-heading');heading.append(el('h3','',product.name||'未命名商品'),el('p','product-card-sku',`SKU ${product.sku||'—'}`));
       const saved=productListing(product),missing=saved?listingMissing(saved):null;heading.append(el('span','product-listing-status',saved?missing.length?`资料草稿 · 缺 ${missing.length} 项`:'基本上架资料已齐':'尚未保存上架资料'));
       const metrics=el('dl','product-card-metrics');for(const [label,value] of [['库存',product.stock??'待核对'],[saved?.listingPriceCents!=null?'建议售价':product.source==='local'?'建议售价':'货盘参考价',currency(saved?.listingPriceCents??product.priceCents)]]){const item=el('div');item.append(el('dt','',label),el('dd','',value));metrics.append(item);}
@@ -783,14 +794,24 @@
     const sets=state.photoSets.filter(set=>same(set.productId,product.id)),known=sets.every(set=>Number.isSafeInteger(set.imageCount)&&set.imageCount>=0);
     return `${sets.length} 套图片${sets.length&&known?` · ${sets.reduce((sum,set)=>sum+set.imageCount,0)} 张`:''}`;
   }
+  function renderProductCover(product,node){
+    node.dataset.productCoverKey='';
+    node.replaceChildren(el('span','product-cover-placeholder',product.source==='local'?'本地商品':product.displayImageUrl?'展示图加载中…':'暂无商品展示图'));
+    if(product.source==='local'||!product.displayImageUrl||typeof api.productCover!=='function')return;
+    const key=JSON.stringify([state.settings.baseURL,state.connection.checkedAt,product.id,product.sku,product.revision,product.displayImageUrl]);
+    node.dataset.productCoverKey=key;node.loadProductCover=()=>{
+      if(!node.isConnected)return;if(!productCoverRequests.has(key)){const pendingCover=Promise.resolve().then(()=>api.productCover(String(product.id))).finally(()=>productCoverRequests.delete(key));productCoverRequests.set(key,pendingCover);}
+      productCoverRequests.get(key).then(result=>{if(!node.isConnected||node.dataset.productCoverKey!==key)return;const latest=find(state.products,product.id);if(!latest||latest.displayImageUrl!==product.displayImageUrl)return;if(!result?.dataURL){node.replaceChildren(el('span','product-cover-placeholder','暂无商品展示图'));return;}if(!same(result.productId,product.id)||typeof result.dataURL!=='string'||result.dataURL.length>3*1024*1024||!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(result.dataURL)||![result.width,result.height].every(n=>Number.isSafeInteger(n)&&n>0&&n<=640))throw Error('展示图回执无效');const image=el('img');image.alt=(product.name||'商品')+' · 商品展示图';image.width=result.width;image.height=result.height;image.src=result.dataURL;image.addEventListener('error',()=>node.replaceChildren(el('span','product-cover-placeholder','展示图暂不可用')),{once:true});node.replaceChildren(image);}).catch(()=>{if(node.isConnected&&node.dataset.productCoverKey===key)node.replaceChildren(el('span','product-cover-placeholder','展示图暂不可用'));});
+    };productCoverObserver.observe(node);
+  }
   function openProductDetail(id){
     if(productEditorBusy()||productListingDialog.open||!find(state.products,id))return;
-    photoProductId=String(id);$('#product-detail-error').hidden=true;renderProductDetail();if(!productDetailDialog.open)productDetailDialog.showModal();
+    const changed=!same(photoProductId,id);photoProductId=String(id);if(changed)$('#product-photo-library').open=false;$('#product-detail-error').hidden=true;renderProductDetail();if(!productDetailDialog.open)productDetailDialog.showModal();
   }
   function renderProductDetail(){
     const product=find(state.products,photoProductId);if(!product){if(productDetailDialog.open)productDetailDialog.close();photoProductId='';$('#photo-sets').replaceChildren();return;}
     productDetailDialog.dataset.productId=String(product.id);$('#product-detail-title').textContent=product.name||'未命名商品';$('#product-detail-source').textContent=`${product.source==='local'?'手动商品':'货盘商品'} · SKU ${product.sku||'—'}`;
-    const saved=productListing(product),summary=$('#product-detail-summary'),grid=el('dl','detail-grid');summary.replaceChildren();for(const [label,value] of [['库存',product.stock??'待核对'],[saved?.listingPriceCents!=null?'建议上架价格':'参考价格',currency(saved?.listingPriceCents??product.priceCents)],['照片',productPhotoText(product)],['资料状态',saved?listingMissing(saved).length?'资料草稿，仍需补充':'基本上架资料已齐':'尚未保存上架资料']])grid.append(el('dt','',label),el('dd','',value));summary.append(grid);
+    renderProductCover(product,$('#product-detail-cover'));const saved=productListing(product),summary=$('#product-detail-summary'),grid=el('dl','detail-grid');summary.replaceChildren();for(const [label,value] of [['库存',product.stock??'待核对'],[saved?.listingPriceCents!=null?'建议上架价格':'参考价格',currency(saved?.listingPriceCents??product.priceCents)],['上架图片',product.source==='local'?productPhotoText(product):'后台图片库管理'],['资料状态',saved?listingMissing(saved).length?'资料草稿，仍需补充':'基本上架资料已齐':'尚未保存上架资料']])grid.append(el('dt','',label),el('dd','',value));summary.append(grid);
     const actions=$('#product-detail-actions'),edit=makeButton(product.source==='local'?'编辑商品与本地照片':'编辑商品资料',()=>{if(productEditorBusy())return;productDetailDialog.close();editProductListing(product);}),plan=makeButton('建计划',()=>{if(productEditorBusy())return;productDetailDialog.close();editPlan(null,product.id);});edit.dataset.productListingId=String(product.id);edit.disabled=productEditorBusy()||typeof api[product.source==='local'?'saveManualProduct':'saveProductListing']!=='function'||!!state.faulted||!!state.configBusy;plan.dataset.productPlanId=plan.dataset.createProductPlan=String(product.id);actions.replaceChildren(edit,plan);
     const details=$('#product-detail-listing');details.replaceChildren();if(saved){const fields=el('dl','detail-grid');for(const [key,label] of Object.entries(listingNames)){const value=saved.listing?.[key];if(Array.isArray(value)?value.length:typeof value==='string'&&value)fields.append(el('dt','',label),el('dd','',Array.isArray(value)?value.join(' / '):value));}details.append(el('h3','','上架资料'),fields);}
     renderPhotos();
@@ -828,10 +849,12 @@
       for(const [key,name] of [['externalId',job.type==='listing'?'刊登编号':job.type==='fulfillment'?'货盘订单编号':'外部回执编号'],['listingId','刊登编号'],['orderId','订单编号'],['wmsStatus','仓库状态'],['status','回执状态'],['message','说明']])if(typeof job.result[key]==='string'||typeof job.result[key]==='number')receipt.append(el('dt','',name),el('dd','',job.result[key]));
       if(receipt.childElementCount)detail.append(el('h3','','执行回执'),receipt);
     }
-    const canReconcile=!salesOnly()&&reviewStates.has(job.state)&&job.type==='fulfillment'&&!!job.result?.externalId;
+    const archived=find(state.plans,job.planId)?.archived===true;
+    const canReconcile=!archived&&!salesOnly()&&reviewStates.has(job.state)&&job.type==='fulfillment'&&!!job.result?.externalId;
     $('#reconcile-form').hidden=!canReconcile;
-    const canRetry=job.canRetry===true&&!(salesOnly()&&purchaseJob(job));$('#retry-form').hidden=!canRetry;
-    if(salesOnly()&&purchaseJob(job))detail.append(el('p','field-hint','这是旧版的历史任务，售卖模式保留原记录，相关操作已停用。'));
+    const canRetry=!archived&&job.canRetry===true&&!(salesOnly()&&purchaseJob(job));$('#retry-form').hidden=!canRetry;
+    if(archived)detail.append(el('p','field-hint','所属计划已删除，原任务记录仅供查看；如需继续，请先恢复计划并核对原记录。'));
+    else if(salesOnly()&&purchaseJob(job))detail.append(el('p','field-hint','这是旧版的历史任务，售卖模式保留原记录，相关操作已停用。'));
     else if(reviewStates.has(job.state)&&!canReconcile&&!canRetry)detail.append(el('p','field-hint','此任务需要核对真实页面或原请求回执。当前版本不会仅凭手工填写编号重新执行，记录会继续保留。'));
   }
 
@@ -898,6 +921,8 @@
   function fillSettings() { const fields=settingsForm.elements, value=state.settings;fields.baseURL.value=value.baseURL || '';fields.backgroundEnabled.checked=!!value.backgroundEnabled;fields.maxConcurrent.value=value.maxConcurrent ?? 1;fields.perOrderLimit.value=moneyInput(value.perOrderLimitCents ?? 0);fields.dailyLimit.value=moneyInput(value.dailyLimitCents ?? 0);fields.fulfillmentMethod.value=value.fulfillmentMethod==='self'?'self':'wms'; }
   function populateSelect(select,rows,label,value) { select.replaceChildren(new Option(label,''));for(const row of rows)select.add(new Option(row.name || row.sku || String(row.id),String(row.id)));select.value=value===undefined||value===null?'':String(value); }
   function editPlan(plan, productId) {
+    if(plan?.archived===true){toast('请先在「已删除计划」中恢复原计划。');return;}
+    const archived=!plan&&productId&&state.plans.find(row=>row.archived===true&&same(row.profileId,selectedPlanProfileId)&&same(row.productId,productId));if(archived){showArchivedPlan(archived);toast('此商品在当前环境已有已删除计划，请恢复原计划后继续。');return;}
     if(!plan&&find(state.profiles,selectedPlanProfileId)?.windowType!=='automation'){pendingPlanProductId=String(productId||'');pendingPlanCreate=true;selectedPlanProfileId='';environmentTab='plans';changePage('plans');renderPlans();toast('请先选择自动化环境，再设置商品上架计划。');return;}
     planForm.reset();$('#plan-error').hidden=true;$('#plan-title').textContent=plan?'编辑上架计划':'新建上架计划';
     const fixedProfileId=plan?.profileId||selectedPlanProfileId,fields=planForm.elements;fields.id.value=plan?.id || '';populateSelect(fields.profileId,state.profiles.filter(profile=>same(profile.id,fixedProfileId)),'当前自动化环境',fixedProfileId);fields.profileId.disabled=true;populateSelect(fields.productId,state.products,'选择商品',plan?.productId ?? productId);fields.targetCount.value=plan?.targetCount ?? 1;fields.listingPrice.value=moneyInput(plan?.listingPriceCents);fields.minOffer.value=moneyInput(plan?.minOfferCents);fields.reuseOwnPhotos.checked=plan?.reuseOwnPhotos!==false;fields.autoReply.checked=!!plan?.autoReply;fields.autoAcceptOffers.checked=!!plan?.autoAcceptOffers;fields.enabled.checked=!!plan?.enabled;fields.replyPolicy.value=plan?.replyPolicy || '';
@@ -905,7 +930,7 @@
     planForm.dataset.sku=plan?.sku||find(state.products,fields.productId.value)?.sku||'';
     updateProductInfo(!plan);renderListingHint(planForm,$('#plan-listing-readiness'));planDialog.showModal();
   }
-  function updateProductInfo(resetPrice=false) {const product=find(state.products,planForm.elements.productId.value),saved=productListing(product),fields=planForm.elements;$('#plan-product-info').textContent=product?product.source==='local'?`手动商品 · 库存 ${product.stock ?? '待核对'} · 本地照片 ${product.localPhotoCount??0} 张`:`SKU ${product.sku || '—'} · 库存 ${product.stock ?? '待核对'} · ${salesOnly()?'货盘价格':'采购价'} ${currency(product.priceCents)} · 可用图片 ${product.photoSetsAvailable ?? '待核对'} 套`:'选择商品后查看库存和图片。';if(resetPrice){planForm.dataset.sku=product?.sku||'';fields.listingPrice.value=moneyInput(saved?.listingPriceCents);fields.minOffer.value=moneyInput(saved?.minOfferCents);fillListing(planForm,saved?.listing);}$('#plan-template-info').textContent=fields.id.value?'这是该计划自己的资料；修改商品资料不会覆盖本计划。':saved?'已带入商品资料与建议价格，可在本计划单独调整。':'尚无商品资料；可以先在「商品与图片」保存，也可在这里填写。';renderListingHint(planForm,$('#plan-listing-readiness')); }
+  function updateProductInfo(resetPrice=false) {const product=find(state.products,planForm.elements.productId.value),saved=productListing(product),fields=planForm.elements;$('#plan-product-info').textContent=product?product.source==='local'?`手动商品 · 库存 ${product.stock ?? '待核对'} · 本地照片 ${product.localPhotoCount??0} 张`:`SKU ${product.sku || '—'} · 库存 ${product.stock ?? '待核对'} · ${salesOnly()?'货盘价格':'采购价'} ${currency(product.priceCents)} · 可用图片 ${product.photoSetsAvailable ?? '待核对'} 套`:'选择商品后查看库存和图片。';if(resetPrice){planForm.dataset.sku=product?.sku||'';fields.listingPrice.value=moneyInput(saved?.listingPriceCents);fields.minOffer.value=moneyInput(saved?.minOfferCents);fillListing(planForm,saved?.listing);}$('#plan-template-info').textContent=fields.id.value?'这是该计划自己的资料；修改商品资料不会覆盖本计划。':saved?'已带入商品资料与建议价格，可在本计划单独调整。':'尚无商品资料；可以先在「我的商品」保存，也可在这里填写。';renderListingHint(planForm,$('#plan-listing-readiness')); }
 
   document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener('click',()=>changePage(button.dataset.page)));
   const workspaceMenu=$('#workspace-commerce-menu'),workspaceToggle=$('#workspace-commerce-toggle');
@@ -925,7 +950,7 @@
   recordDeleteDialog.addEventListener('close',()=>{if(!recordDeleteDialog.open)recordDeleteReview=null;});
   $('#record-delete-confirm').addEventListener('click',()=>{
     if($('#record-delete-confirm').disabled||!recordDeleteReview)return;const review=recordDeleteReview,row=find(review.kind==='plan'?state.plans:state.products,review.id);if(!row||recordDeleteSignature(review.kind,row)!==review.signature){renderDeletionControls();return;}
-    $('#record-delete-error').hidden=true;void request('record-delete',()=>review.kind==='plan'?api.deletePlan(review.id):api.deleteManualProduct(review.id)).then(result=>{if(result?.deleted!==true||!same(result.id,review.id))throw Error('未收到删除成功回执，请刷新后核对记录。');if(recordDeleteReview===review)recordDeleteDialog.close();toast(review.kind==='plan'?'计划已删除。':'手动商品已删除。');}).catch(error=>{if(recordDeleteReview===review){$('#record-delete-error').textContent=cleanError(error);$('#record-delete-error').hidden=false;}});
+    $('#record-delete-error').hidden=true;void request('record-delete',()=>review.kind==='plan'?api.deletePlan(review.id):api.deleteManualProduct(review.id)).then(result=>{if(result?.deleted!==true||!same(result.id,review.id))throw Error('未收到删除成功回执，请刷新后核对记录。');if(recordDeleteReview===review)recordDeleteDialog.close();toast(review.kind==='plan'?result.archived===true?'计划已移到已删除计划，任务历史保留。':'计划已删除。':'手动商品已删除。');}).catch(error=>{if(recordDeleteReview===review){$('#record-delete-error').textContent=cleanError(error);$('#record-delete-error').hidden=false;}});
   });
   accountForm.addEventListener('submit',event=>{
     event.preventDefault();if(pending.has('account-save'))return;$('#account-error').hidden=true;
@@ -984,7 +1009,7 @@
   $('#distribution-reset').addEventListener('click',()=>{for(const id of ['distribution-search','distribution-profile','distribution-status'])$('#'+id).value='';distributionLimit=100;renderDistribution();});
   $('#distribution-more').addEventListener('click',()=>{distributionLimit+=100;renderDistribution();});
   $('#clear-job-plan').addEventListener('click',()=>{jobPlanFilter='';jobProfileFilter='';renderJobs();});
-  $('#plan-search').addEventListener('input',renderPlans);$('#product-search').addEventListener('input',renderInventory);$('#job-filter').addEventListener('change',renderJobs);$('#clear-photo-filter').addEventListener('click',()=>productDetailDialog.close());planForm.elements.productId.addEventListener('change',()=>updateProductInfo(true));
+  $('#plan-search').addEventListener('input',renderPlans);$('#plan-archive-filter').addEventListener('change',renderPlans);$('#product-search').addEventListener('input',renderInventory);$('#job-filter').addEventListener('change',renderJobs);$('#clear-photo-filter').addEventListener('click',()=>productDetailDialog.close());planForm.elements.productId.addEventListener('change',()=>updateProductInfo(true));
   productDetailDialog.addEventListener('close',()=>{if(!productDetailDialog.open){photoProductId='';delete productDetailDialog.dataset.productId;$('#photo-sets').replaceChildren();}});
   settingsForm.addEventListener('input',()=>{settingsDirty=true;});settingsForm.addEventListener('change',()=>{settingsDirty=true;});
   $('#runner-toggle').addEventListener('click',()=>{

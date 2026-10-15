@@ -8,7 +8,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.15**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.16**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
 - Starting the scheduler automatically opens a closed listing profile in its original persistent session, then checks the current account before preparing photos or publishing. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
@@ -27,6 +27,16 @@ dev.10 源码接续检查点（2026-10-15）：最终完整 Node 729/729 通过�
 已定位并修复一处开窗卡住的原因：隐藏的 AI 面板也会读取模型设置并同步解密密钥，等待系统钥匙串时阻塞主线程。现在读取模型元信息和普通设置保存均保留密文，真正启动 AI 时才解密；新密钥加密、清除及更换接口地址的密钥规则保持。新包尚待真实开窗验证；代理和货盘等其他凭据访问仍可能需要钥匙串许可。
 
 本次先保存源码进度，未交付包含全部最新修复的最终 Mac 包。下次办公室先恢复仍等待系统钥匙串的旧应用，再打包最新源码、复测账号菜单关闭诊断和四类 Fait，重跑桌面回归后继续原任务；当前未完成全自动刊登。
+
+## 计划删除恢复、环境表格与我的商品 — 0.5.3-dev.16
+
+有确定未提交任务或已关闭历史的计划可移到「已删除计划」。应用原子停用计划，取消未提交排队任务，保留原计划、任务、照片及去重编号。进入同一环境的「已删除计划」可恢复，恢复后保持停用，不会自动重排或重发。仍在售、提交结果未知、照片领取未明或有待完成成交／履约时，继续显示具体原因并保留当前计划。无业务记录草稿仍可直接删除。
+
+自动化环境改为与环境管理一致的表格，按行显示设备、窗口状态、Vinted 登录状态、当前计划与任务状态，账号与计划仍在同一工作台。商品页更名「我的商品」：卡片和详情显示货盘返回的商品展示图，上架图片库默认收起并由后台流程管理，保留详情中的手动复用入口。仅浏览展示图不领取照片、不产生使用记录，未提供或无法读取展示图时显示占位。升级后同步货盘可获取新的展示图字段。
+
+<!-- dev16-validation -->
+
+dev.16 Windows 专项验证：Node 1068 项通过、零失败、1 项 Windows 不适用检查跳过；工作台与归档/展示图 102/102、账号 43/43、商品与自动上架 32/32。每个 Electron 模块使用独立临时数据及新进程，默认沙箱开启，无自动重跑；旧图片库测试先适配折叠导航，再依据隐藏视图 close 事件未派发的诊断，仅在隔离测试关闭并恢复后台节流，生产计时策略保持。打包 EXE 验证表格、我的商品、受限展示图与折叠库、恢复接口、草稿删除、独立计划快照及加密账号存储；依赖审计为 0。真实 Vinted 核对或发布未在本轮执行，完整桌面回归未宣称通过，新 Mac 包未构建。
 
 ## 自动化环境运营与商品卡片 — 0.5.3-dev.15
 

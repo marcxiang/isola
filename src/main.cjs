@@ -19,6 +19,7 @@ const associationService=require('./commerce-association-service.cjs').createAss
 const {createPhotoService}=require('./commerce-photo-service.cjs');
 const {createLocalProductService}=require('./commerce-local-products.cjs');
 const commerceDeletion=require('./commerce-deletion.cjs');
+const {createProductDisplayService}=require('./commerce-product-display.cjs');
 const { SKUDeskClient } = require('./sku-desk.cjs');
 const { RequestGate } = require('./sku-transport.cjs');
 const {stopDraft,installUnloadGuard,closeContents}=require('./navigation-lifecycle.cjs');
@@ -44,6 +45,7 @@ const localProductService=createLocalProductService({
  selectFiles:async()=>{const result=await dialog.showOpenDialog(manager,{title:'选择自己的商品照片',properties:['openFile','multiSelections'],filters:[{name:'商品照片',extensions:['jpg','jpeg','png','webp']}]});return result.canceled?[]:result.filePaths;},
  normalizeImage:bytes=>{let image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('商品照片无法解码，请选择有效图片');const size=image.getSize();if(!size.width||!size.height)throw Error('商品照片尺寸无效');const scale=Math.min(1,1200/size.width,1200/size.height);if(scale<1)image=image.resize({width:Math.max(1,Math.round(size.width*scale)),height:Math.max(1,Math.round(size.height*scale)),quality:'best'});const normalized=image.getSize(),output=image.toJPEG(90);if(!output.length)throw Error('商品照片无法安全转换');return {bytes:output,width:normalized.width,height:normalized.height};}
 });
+const productDisplayService=createProductDisplayService({normalizeImage:bytes=>{let image=nativeImage.createFromBuffer(bytes);if(image.isEmpty())throw Error('商品展示图无法读取');const size=image.getSize();if(!size.width||!size.height||size.width>16000||size.height>16000||size.width*size.height>40000000)throw Error('商品展示图尺寸无效');const scale=Math.min(1,640/size.width,640/size.height);if(scale<1)image=image.resize({width:Math.max(1,Math.round(size.width*scale)),height:Math.max(1,Math.round(size.height*scale)),quality:'good'});const normalized=image.getSize();return {dataURL:'data:image/jpeg;base64,'+image.toJPEG(80).toString('base64'),width:normalized.width,height:normalized.height};}});
 const hasInstanceLock = app.requestSingleInstanceLock();
 if (!hasInstanceLock) app.quit();
 app.on('second-instance', () => { if (manager && !manager.isDestroyed()) showWorkspaceWindow(manager); else void createManager().then(showWorkspaceWindow).catch(error=>log('主窗口打开失败: '+error.message)); });
@@ -572,6 +574,8 @@ function register() {
   desk('commerce-local-product-save',(c,input)=>localProductService.saveManualProduct(c,input));
   desk('commerce-plan-start',(c,id)=>c.startPlan(id));
   desk('commerce-plan-delete',(c,id)=>commerceDeletion.deletePlan(c,id));
+  desk('commerce-plan-restore',(c,id)=>commerceDeletion.restorePlan(c,id));
+  desk('commerce-product-cover',(c,id)=>productDisplayService.preview(c,id));
   desk('commerce-local-product-delete',(c,id)=>commerceDeletion.deleteLocalProduct(c,id));
   desk('commerce-plan-save-start',(c,input)=>c.saveAndStartPlan(input));
   desk('commerce-account-save',(_c,input)=>commerceAccounts.save(input));desk('commerce-account-delete',(_c,id)=>commerceAccounts.remove(id));

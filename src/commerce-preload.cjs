@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('commerce', {
   saveManualProduct: input => ipcRenderer.invoke('commerce-local-product-save', input),
   deleteManualProduct: productId => ipcRenderer.invoke('commerce-local-product-delete', productId),
   deletePlan: planId => ipcRenderer.invoke('commerce-plan-delete', planId),
+  restorePlan: planId => ipcRenderer.invoke('commerce-plan-restore', planId),
+  productCover: productId => ipcRenderer.invoke('commerce-product-cover', productId),
   savePlan: input => ipcRenderer.invoke('commerce-plan-save', input),
   saveAndStartPlan: input => ipcRenderer.invoke('commerce-plan-save-start', input),
   startPlan: planId => ipcRenderer.invoke('commerce-plan-start', planId),

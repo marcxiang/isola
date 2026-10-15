@@ -1,7 +1,7 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const listing={title:'Fixture draft accessory',description:'Local renderer fixture only.',categoryPath:['Maison','Accessoires'],condition:'Très bon état',brand:'Sans marque',size:'',color:'Noir',parcel:'Moyen'};
-const PLAN_REASON='计划已有任务记录（包括排队、失败或已取消）；不能删除原任务与去重记录，可先取消未提交任务或停用计划';
+const PLAN_REASON='计划仍有运行中、结果未知或尚未核对的业务请求，请先核对原任务再删除';
 const PRODUCT_REASON='商品仍被上架计划使用；请先删除无业务记录的草稿计划，已有业务计划应停用并保留';
 
 // Isolated renderer contract fixture: no production IPC, real data, images,
@@ -67,7 +67,7 @@ module.exports=async function deletionUISmoke(_api,check){
    assert.equal(await js('document.querySelector("#record-delete-dialog").open'),true);assert.equal((await state()).plans.length,2);assert.equal(await js('Array.from(document.querySelectorAll("[data-delete-plan-id],[data-delete-product-id]")).every(button=>button.disabled)'),true);assert.equal(await js('document.querySelector("#new-plan").disabled'),true);
    await js('window.deletionFixture.release()');await until(()=>js('!document.querySelector("#record-delete-dialog").open&&!document.querySelector("#plans [data-delete-plan-id=plan-id]")'),'deleted plan removed');assert.equal(await count('deletePlan'),before+1);assert.deepEqual((await calls()).filter(row=>row.name==='deletePlan').at(-1).args,['plan-id']);assert.equal((await state()).plans[0].id,'history-plan');await assertNoExecution();return {deleteCalls:1,idOnly:true,pendingLocked:true,refreshedAfterSuccess:true};
   });
-  await check('a plan with task history keeps the original backend rejection visible in its open confirmation dialog',async()=>{
+  await check('a plan with unresolved business keeps the original backend rejection visible in its open confirmation dialog',async()=>{
    await reset();await openPlan('history-plan');const before=await count('deletePlan'),snapshot=await state();await confirm();await until(()=>js('!document.querySelector("#record-delete-error").hidden&&!document.querySelector("#record-delete-confirm").disabled'),'history rejection visible');assert.equal(await count('deletePlan'),before+1);assert.equal(await js('document.querySelector("#record-delete-dialog").open'),true);assert.equal(await js('document.querySelector("#record-delete-error").textContent'),PLAN_REASON);assert.deepEqual(await state(),snapshot);await assertNoExecution();return {reasonPreserved:true,dialogRetained:true,historyRemoved:false};
   });
   await check('a transport response without boolean deleted true cannot close confirmation or remove a record',async()=>{

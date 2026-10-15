@@ -1,6 +1,6 @@
 {
   "name": "isola-browser",
-  "version": "0.5.3-dev.21",
+  "version": "0.5.3-dev.22",
   "description": "Local isolated browsing environments",
   "main": "src/main.cjs",
   "scripts": {

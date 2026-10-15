@@ -22,6 +22,7 @@ class FixtureRuntime extends VintedSalesRuntime {
  async prepareFields(profileId,listing,{signal}){this.current(profileId,{signal});await this.stage('fields',{profileId,listing});return this.f.draft;}
  async trustedManifest(manifest){await this.stage('manifest');return manifest;}
  async uploadPhotos(profileId,manifest,{signal}){this.current(profileId,{signal});await this.stage('upload',{profileId});return {...this.f.upload,claimId:manifest.claimId,count:manifest.count};}
+ async clearOptionalMaterial(profileId,{signal}){this.current(profileId,{signal});await this.stage('optional-material',{profileId});return {verified:true,cleared:false};}
  async inspectCurrentAccount(){throw Error('Automatic listing must not inspect account identity');}
  async inspectInitialAccount(){throw Error('Automatic listing must not read a username, menu or Profil');}
  async readPublicationInput(engine,id,signal,guard,sessionAuthority){guard();await this.stage('publication-input');assert.deepEqual(sessionAuthority,{kind:'environment-session',profileId:engine.plan(id).profileId});return {plan:engine.plan(id),product:{id:engine.plan(id).productId,sku:engine.plan(id).sku,stock:2},claim:engine.db.claims.find(row=>row.profileId===engine.plan(id).profileId),expectedAccount:sessionAuthority,manifest:this.f.manifest(engine.plan(id).profileId)};}
@@ -76,6 +77,30 @@ test('first listing runs without a name or binding and prepares form fields befo
  const f=fixture({hooks:{photos:async f=>{const durable=f.writes.at(-1);assert.equal(durable.jobs[0].accountMemberId,undefined);assert.deepEqual(durable.marketAccounts,[]);assert.equal(f.calls.some(row=>row.name==='fields'),true);}}});f.knownAccounts.clear();
  f.runtime.account=()=>{throw Error('Must not require bound member identity');};f.runtime.accountReader=()=>{throw Error('Must not construct account menu reader');};f.runtime.read=async()=>{throw Error('Must not inspect account menu or Profil');};
  await f.run();assert.equal(f.clicks,1);assert.equal(f.context.job.accountMemberId,undefined);assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(f.engine.accountObservations.size,0);assert.deepEqual(f.calls.filter(row=>row.name==='open').map(row=>({url:row.url,role:row.role})),[{url:FORM_URL,role:'listing'}]);assert.ok(f.calls.findIndex(row=>row.name==='fields')<f.calls.findIndex(row=>row.name==='photos'));assert.ok(f.calls.findIndex(row=>row.name==='photos')<f.calls.findIndex(row=>row.name==='upload'));assert.equal(f.calls.some(row=>['identity','account','catalog'].includes(row.name)),false);
+});
+
+test('optional material is checked after the verified upload and before any publication input or submit',async()=>{
+ const f=fixture();await f.run();const names=f.calls.map(row=>row.name);
+ assert.ok(names.indexOf('upload')<names.indexOf('optional-material'));
+ assert.ok(names.indexOf('optional-material')<names.indexOf('publication-input'));
+ assert.equal(f.clicks,1);
+});
+
+test('failed or interrupted optional material cleanup preserves photos and cannot prepare or submit a publication',async()=>{
+ for(const kind of ['failed','cancelled','changed-plan','unverified','upload-cleanup-failed']){
+  const f=fixture({hooks:{'optional-material':async f=>{
+   if(kind==='failed')throw failure('OPTIONAL_MATERIAL_UNVERIFIED');
+   if(kind==='cancelled')f.context.controller.abort();
+   if(kind==='changed-plan')f.context.plan.listingPriceCents++;
+  }}});
+  if(kind==='unverified')f.runtime.clearOptionalMaterial=async()=>({verified:false});
+  if(kind==='upload-cleanup-failed')f.upload.optionalMaterial={verified:false};
+  await assert.rejects(f.run(),error=>['OPTIONAL_MATERIAL_UNVERIFIED','STOPPED','PLAN_CHANGED'].includes(error.code));
+  assert.equal(f.calls.some(row=>row.name==='upload'),true);
+  assert.equal(f.calls.some(row=>['publication-input','submit'].includes(row.name)),false);
+  if(kind==='upload-cleanup-failed')assert.equal(f.calls.some(row=>row.name==='optional-material'),false);
+  assert.equal(f.engine.db.publications.submissions.length,0);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);
+ }
 });
 
 test('changes to unused old account metadata do not interrupt the selected environment session',async()=>{

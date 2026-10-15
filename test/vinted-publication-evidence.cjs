@@ -1,7 +1,7 @@
 'use strict';
 
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),{EventEmitter}=require('node:events'),{createHash}=require('node:crypto');
-const {VintedPublicationEvidence,rememberCategoryTraversal,probePublicationForm,FIELD_SPECS}=require('../src/vinted-publication-evidence.cjs');
+const {VintedPublicationEvidence,rememberCategoryTraversal,probePublicationForm,publicationBlockerDetails,FIELD_SPECS}=require('../src/vinted-publication-evidence.cjs');
 const FORM='https://www.vinted.fr/items/new',START=Date.parse('2026-10-14T10:00:00.000Z');
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const clone=value=>JSON.parse(JSON.stringify(value));
@@ -79,7 +79,21 @@ test('inspect exposes review checks without leaking proof authority or paths',as
 
 test('unknown optional material may be empty, but an automatic suggestion is never adopted',async()=>{
  const empty=fixture(),report=await empty.reader.inspect(empty.input);assert.equal(report.readyForPublication,true);
- const filled=fixture({material:'Plastique'}),blocked=await filled.reader.inspect(filled.input);assert.equal(blocked.readyForPublication,false);assert.ok(blocked.blockers.some(message=>message.includes('Matériau')));assert.equal(filled.actions,0);
+ const filled=fixture({material:'Plastique'}),blocked=await filled.reader.inspect(filled.input);assert.equal(blocked.readyForPublication,false);assert.ok(blocked.blockers.some(message=>message.includes('可选材质已填入但未在计划确认')&&message.includes('请先清空该可选字段')&&message.includes('在计划中确认后重试')));assert.equal(JSON.stringify(blocked).includes('Plastique'),false);assert.equal(filled.material.value,'Plastique');assert.equal(filled.actions,0);
+});
+
+test('shared blocker diagnostics contain only known static field names, flags and counts',()=>{
+ const empty={unknownFields:[],invalidFields:[],alerts:[],dialogs:0};assert.deepEqual(publicationBlockerDetails(empty),[]);
+ const source={unknownFields:[{label:'private-field-label',required:true,invalid:true,populated:true,value:'private-field-value'}],invalidFields:['Titre','private-error-label'],alerts:['private-status-text','private-error-text'],dialogs:2};
+ const before=clone(source),details=publicationBlockerDetails(source),message=details.join('；');
+ assert.match(message,/其他未知字段 1 项（必填 1 项、错误 1 项、已填入 1 项）/);assert.match(message,/字段错误 2 项（标题、其他字段 1 项）/);assert.match(message,/页面状态提示 2 条/);assert.match(message,/页面弹窗 2 个/);assert.equal(message.includes('private-'),false);assert.deepEqual(source,before);
+ const malformed=publicationBlockerDetails({unknownFields:null,invalidFields:null,alerts:null,dialogs:'private-dialog-text'}).join('；');assert.match(malformed,/状态无法核对/);assert.equal(malformed.includes('private-'),false);
+});
+
+test('inspect reports unknown control, field error, status and dialog counts without their private text',async()=>{
+ const f=fixture();Object.assign(f.material,{label:'private-field-label',value:'private-field-value',required:true,attrs:{'aria-invalid':'true'}});f.nodes.title.attrs['aria-invalid']='true';
+ f.form.append(f.make('div',{attrs:{role:'alert'},text:'private-alert-text'}));f.form.append(f.make('div',{attrs:{'aria-live':'polite'},text:'private-status-text'}));f.body.append(f.make('dialog',{attrs:{open:'','aria-modal':'true'},text:'private-dialog-text'}));
+ const report=await f.reader.inspect(f.input),message=report.blockers.join('；');assert.equal(report.readyForPublication,false);assert.match(message,/其他未知字段 1 项/);assert.match(message,/字段错误 2 项（标题、其他字段 1 项）/);assert.match(message,/页面状态提示 2 条/);assert.match(message,/页面弹窗 1 个/);assert.equal(JSON.stringify(report).includes('private-'),false);assert.equal(f.material.value,'private-field-value');assert.equal(f.actions,0);
 });
 
 test('unknown required, invalid, checked and sensitive controls stop; their values never appear in reports',async()=>{

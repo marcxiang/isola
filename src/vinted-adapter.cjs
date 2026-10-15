@@ -3,6 +3,7 @@ const {randomUUID}=require('node:crypto');
 const {problem} = require('./commerce-engine.cjs');
 const {VintedPhotoUpload} = require('./vinted-photo-upload.cjs');
 const {rememberCategoryTraversal}=require('./vinted-publication-evidence.cjs');
+const {clearOptionalMaterial}=require('./vinted-optional-material.cjs');
 
 const ORIGIN = 'https://www.vinted.fr';
 const FORM_URL = ORIGIN + '/items/new';
@@ -100,7 +101,17 @@ class VintedAdapter {
     return {url:page.url,title:page.title,pageType:new URL(page.url).pathname==='/items/new'?'new_listing':'other',controls:page.elements.map(e=>({tag:e.tag,role:e.role,label:e.label,disabled:e.disabled,readOnly:e.readOnly,required:e.required,invalid:e.invalid})),fields,account:{verified:false,profileLinks},verified:false,capabilities:this.readiness().capabilities};
   }
   async inspectPhotoControls(profileId,options={}) {return this.photos.inspect(profileId,options);}
-  async uploadPhotos(profileId,manifest,options={}) {return this.photos.upload(profileId,manifest,options);}
+  async uploadPhotos(profileId,manifest,options={}) {
+    const receipt=await this.photos.upload(profileId,manifest,options);
+    if(receipt.verified!==true||options.recheckOnly===true||!this.drafts.has(profileId))return receipt;
+    try{return {...receipt,optionalMaterial:await this.clearOptionalMaterial(profileId,options)};}
+    catch(error){
+      if(options.signal?.aborted||error?.code==='STOPPED')throw error;
+      const message=error?.code==='OPTIONAL_MATERIAL_UNVERIFIED'?error.message:'可选材质未能完成清空核对，请查看当前页面';
+      return {...receipt,optionalMaterial:{verified:false,code:error?.code||'OPTIONAL_MATERIAL_UNVERIFIED',message},message:'照片已上传；可选材质清空未核对：'+message};
+    }
+  }
+  async clearOptionalMaterial(profileId,options={}) {return clearOptionalMaterial(this,profileId,options);}
   field(page,spec,{readOnly=false}={}) {
     const matches=page.elements.filter(e=>matchesSpec(e,spec));
     if (matches.length!==1) return {error:matches.length?'页面出现多个同名控件，请人工核对':'未找到已核对的输入控件'};

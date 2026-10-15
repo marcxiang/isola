@@ -3,7 +3,7 @@
 const {createHash}=require('node:crypto');
 const {performance:clock}=require('node:perf_hooks');
 const {PublicationJournal,buildPublicationProof,listingRevision,FORM_URL}=require('./vinted-publication.cjs');
-const {VintedPublicationEvidence,FIELD_SPECS,probePublicationForm}=require('./vinted-publication-evidence.cjs');
+const {VintedPublicationEvidence,FIELD_SPECS,probePublicationForm,publicationBlockerDetails}=require('./vinted-publication-evidence.cjs');
 const {projectPublicationReconciliation}=require('./commerce-publication-reconcile.cjs');
 const {probeAccountDOM,memberURL,getClosedAccountEvidence,probeClosedAccountDOM,validateClosedAccountDOM}=require('./vinted-account.cjs');
 const {getDisplayState,assertDisplayVersion,mapPoint}=require('./display-transform.cjs');
@@ -148,7 +148,8 @@ function verifyFinalPublication(state,proof,input,adapter,tab,targetId,closedRec
  }
  if(identity)fail(identity.memberId===proof.facts.account.memberId&&identity.profileURL===proof.facts.account.profileURL,'原生点击前当前登录账号发生变化，未发布');
  const form=state.form;
- fail(form?.url===FORM_URL&&form.documentKey===proof.facts.documentKey&&!form.error&&form.publication?.count===1&&form.publication.enabled&&form.unknownFields?.length===0&&form.invalidFields?.length===0&&form.alerts?.length===0&&form.dialogs===0);
+ const blockers=publicationBlockerDetails(form);
+ fail(form?.url===FORM_URL&&form.documentKey===proof.facts.documentKey&&!form.error&&form.publication?.count===1&&form.publication.enabled&&form.unknownFields?.length===0&&form.invalidFields?.length===0&&form.alerts?.length===0&&form.dialogs===0,blockers.length?'原生点击前发布核对未通过：'+blockers.join('；')+'；未发布':undefined);
  fail(Array.isArray(form.fields));
  const fields=form.fields.filter(field=>!(field.field==='size'&&proof.facts.fields.size===undefined&&field.value===''&&!field.required&&!field.invalid&&!field.disabled));
  const expectedKeys=Object.keys(proof.facts.fields).filter(key=>key!=='parcel').sort();
@@ -177,7 +178,7 @@ function verifyFinalPublication(state,proof,input,adapter,tab,targetId,closedRec
 
 function passEvidence(pass,observedAt){
  ensure(pass&&Array.isArray(pass.fields)&&pass.fields.every(field=>!field.disabled&&!field.invalid),'PUBLICATION_EVIDENCE_BLOCKED','商品字段缺失或不可用，未点击发布');
- ensure(['unknownFields','invalidFields','alerts'].every(key=>Array.isArray(pass[key])&&pass[key].length===0)&&pass.dialogs===0,'PUBLICATION_EVIDENCE_BLOCKED','商品页出现未知内容、错误或弹窗，未点击发布');
+ ensure(['unknownFields','invalidFields','alerts'].every(key=>Array.isArray(pass[key])&&pass[key].length===0)&&pass.dialogs===0,'PUBLICATION_EVIDENCE_BLOCKED','发布前核对未通过：'+publicationBlockerDetails(pass).join('；')+'；未点击发布');
  return {profileId:pass.profileId,tabId:pass.tabId,url:pass.url,documentKey:pass.documentKey,observedAt,challenge:pass.challenge,account:pass.account,
   form:{documentKey:pass.documentKey,complete:true,fields:pass.fields.map(field=>({field:field.field,value:field.value,verified:true})),unknownFields:[],invalidFields:[]},photos:pass.photos,publication:pass.publication};
 }

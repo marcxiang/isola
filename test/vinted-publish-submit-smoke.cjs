@@ -25,7 +25,7 @@ const html=String.raw`<!doctype html><meta charset="utf-8"><title>Local single-p
 <label for="price">Prix</label><input id="price" placeholder="0,00&nbsp;€" value="5,00">
 <div id="parcels"><button type="button"><label><input type="radio" name="parcel">Petit Convient pour un article qui tient dans une grande enveloppe.</label></button><button type="button"><label><input type="radio" name="parcel" checked>Recommandé Moyen Convient pour un article qui tient dans une boîte à chaussures.</label></button><button type="button"><label><input type="radio" name="parcel">Grand Convient pour un article qui tient dans un carton de déménagement.</label></button></div>
 <footer><button type="button">Sauvegarder le brouillon</button><button id="publish" type="submit">Ajouter</button></footer></form></main>
-<script>window.fixture={publishes:0,clicks:[]};document.addEventListener('click',event=>fixture.clicks.push({id:event.target.id,label:event.target.textContent.trim(),trusted:event.isTrusted}));document.querySelector('#listing').onsubmit=event=>{event.preventDefault();fixture.publishes++;history.pushState(null,'','/items/77777-local-test');};</script>`;
+<script>window.fixture={publishes:0,clicks:[],mouseDowns:[]};document.addEventListener('click',event=>fixture.clicks.push({id:event.target.id,label:event.target.textContent.trim(),trusted:event.isTrusted}));document.addEventListener('mousedown',event=>fixture.mouseDowns.push({id:event.target.id,trusted:event.isTrusted}));document.querySelector('#listing').onsubmit=event=>{event.preventDefault();fixture.publishes++;history.pushState(null,'','/items/77777-local-test');};</script>`;
 
 const mobileHeader=String.raw`<header><div style="position:fixed;top:8px;right:8px;z-index:50"><button id="mobile-toggle" type="button" aria-label="Menu ouvert" aria-controls="mobile-account" aria-expanded="false">☰</button></div><div id="mobile-account" aria-labelledby="mobile-toggle" style="display:none;position:fixed;inset:0;background:white;padding:80px 20px;z-index:40"><h2>Mon Compte</h2><a href="/member/123">Mon profil</a><a href="/settings/profile">Paramètres</a><a href="/my_orders">Mes commandes</a><button type="button">Se déconnecter</button></div></header>`;
 const mobileHTML=html.replace(/<header>[\s\S]*?<\/header>/,mobileHeader).replace('</script>',`document.querySelector('#mobile-toggle').onclick=()=>{const button=document.querySelector('#mobile-toggle'),menu=document.querySelector('#mobile-account'),open=button.getAttribute('aria-expanded')!=='true';button.setAttribute('aria-expanded',String(open));button.setAttribute('aria-label',open?'Menu fermé':'Menu ouvert');menu.style.display=open?'block':'none';};</script>`);
@@ -62,20 +62,24 @@ module.exports=async function publishSubmitSmoke(api,check){
    assert.equal(actual.publishes,1);assert.deepEqual(actual.clicks,[{id:'publish',label:'Ajouter',trusted:true}]);assert.equal(result.published,false);assert.equal(result.state,'uncertain');assert.equal(engine.db.publications.submissions[0].attemptCount,1);assert.equal(engine.db.publications.submissions[0].receipt,null);assert.equal(result.navigationCandidate.listingId,'77777');assert.ok(engine.db.publications.submissions[0].navigation.some(item=>item.committed));
    await assert.rejects(service.submit({engine,planId:input.plan.id,input,guard:()=>{}}));assert.equal(await contents.executeJavaScript('fixture.publishes'),1);return {trustedNativeClicks:1,publicationReceipt:false,navigationCandidate:'77777',externalRequestsForwarded:0};
   });
-  await check('guarded publication local runtime rereads values after the visual prompt and blocks a changed price',async()=>{
-   await contents.loadURL(FORM);const {engine,input,service}=setup(),feedback=tab.controlFeedback;
-   tab.controlFeedback=async event=>{await feedback?.(event);if(event.stage==='preparing')await contents.executeJavaScript(`document.querySelector('#price').value='6,00'`);};
-   try{await assert.rejects(service.submit({engine,planId:input.plan.id,input,guard:()=>{}}));const actual=await contents.executeJavaScript('({...fixture})');assert.equal(actual.publishes,0);assert.deepEqual(actual.clicks,[]);assert.equal(engine.db.publications.submissions[0].state,'cancelled');assert.equal(engine.db.publications.submissions[0].attemptCount,0);}
-   finally{tab.controlFeedback=feedback;}
+  await check('guarded publication local runtime rereads values after the visual prompt and blocks a changed price or unconfirmed material',async()=>{
+   const changes=[{script:`document.querySelector('#price').value='6,00'`},{script:`document.querySelector('#material').value='Plastique'`,message:/可选材质已填入但未在计划确认/}];
+   for(const change of changes){
+    await contents.loadURL(FORM);const {engine,input,service}=setup(),feedback=tab.controlFeedback;
+    tab.controlFeedback=async event=>{await feedback?.(event);if(event.stage==='preparing')await contents.executeJavaScript(change.script);};
+    try{await assert.rejects(service.submit({engine,planId:input.plan.id,input,guard:()=>{}}),error=>{if(change.message){assert.match(error.message,change.message);assert.match(error.message,/未点击发布/);assert.ok(!error.message.includes('Plastique'));}return true;});const actual=await contents.executeJavaScript('({...fixture})');assert.equal(actual.publishes,0);assert.deepEqual(actual.clicks,[]);assert.deepEqual(actual.mouseDowns,[]);assert.equal(engine.db.publications.submissions[0].state,'cancelled');assert.equal(engine.db.publications.submissions[0].attemptCount,0);}
+    finally{tab.controlFeedback=feedback;}
+   }
   });
-  await check('guarded publication atomic final DOM read blocks account, photo and Boost changes after the last full proof',async()=>{
-   for(const script of ["document.querySelector('#profile-link').href='/member/999'","document.querySelector('#photo').src='https://fixture.test/replaced.png'","document.querySelector('#boost').checked=true"]){
+  await check('guarded publication atomic final DOM read blocks identity, photo, material and unknown status changes after the last full proof',async()=>{
+   const changes=["document.querySelector('#profile-link').href='/member/999'","document.querySelector('#photo').src='https://fixture.test/replaced.png'","document.querySelector('#boost').checked=true","document.querySelector('#material').value='Plastique'",`document.querySelector('#listing').insertAdjacentHTML('beforeend','<label for="private-field">fixture-private-label</label><input id="private-field" value="fixture-private-value" required aria-invalid="true"><div role="status">fixture-private-status</div><div aria-modal="true">fixture-private-dialog</div>')`];
+   for(const script of changes){
     await contents.loadURL(FORM);const {engine,input,service}=setup(),target=adapter.control.target;
     adapter.control.target=async(...args)=>{const found=await target.apply(adapter.control,args);if(args[3]?.scroll===false)await contents.executeJavaScript(script);return found;};
-    try{await assert.rejects(service.submit({engine,planId:input.plan.id,input,guard:()=>{}}));assert.equal(await contents.executeJavaScript('fixture.publishes'),0);assert.deepEqual(await contents.executeJavaScript('fixture.clicks'),[]);assert.equal(engine.db.publications.submissions[0].state,'uncertain');}
+    try{await assert.rejects(service.submit({engine,planId:input.plan.id,input,guard:()=>{}}),error=>{assert.equal(error.code,'PUBLICATION_UNKNOWN_RESULT');assert.equal(error.ambiguous,true);assert.ok(!error.message.includes('Plastique'));assert.ok(!error.message.includes('fixture-private-'));return true;});assert.equal(await contents.executeJavaScript('fixture.publishes'),0);assert.deepEqual(await contents.executeJavaScript('fixture.clicks'),[]);assert.deepEqual(await contents.executeJavaScript('fixture.mouseDowns'),[]);assert.equal(engine.db.publications.submissions[0].state,'uncertain');assert.equal(engine.db.publications.submissions[0].attemptCount,1);}
     finally{adapter.control.target=target;}
    }
-   return {blockedFinalChanges:3,nativeClicks:0,externalRequestsForwarded:0};
+   return {blockedFinalChanges:5,nativeClicks:0,nativeMouseDowns:0,privatePageTextLeaked:false,externalRequestsForwarded:0};
   });
   await check('mobile drawer is natively verified and closed before one trusted publication click',async()=>{
    fixturePage=mobileHTML;await contents.loadURL(FORM);const {engine,input,service}=setup();input.expectedAccount.username='fixture';

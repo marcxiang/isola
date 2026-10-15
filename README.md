@@ -8,7 +8,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.21**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.22**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
 - Starting the scheduler automatically opens a closed listing profile in its original persistent session and uses that session directly for the configured listing. It does not require member binding or read the account menu. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
@@ -16,9 +16,21 @@ The current development version is **0.5.3-dev.21**. Listing plans use the selec
 - Supplier photo association has a durable outbox. An uncertain request is checked by reading the original claim, never blindly resent. The supplier contract allows only the first listing association; later reuse remains in local history.
 - Messages, offer acceptance and paid-sale browser evidence still require live validation and remain disabled. Factual French reply previews and strict evidence validators are implemented, without sending unverified replies.
 - Purchase controls are hidden in sales-only mode, purchase tasks cannot run, and no purchase budget is required. Existing purchase history remains intact.
-- The earlier Mac TEST submission and relisting history remain in the original Mac data. This source synchronization does not recreate, submit or reconcile that task. Live Vinted publication has not been verified in this release.
+- The original Mac TEST submission and relisting history remain in the original Mac data. Live preparation reached the publication check and stopped before any new publish click because the site had filled an unconfirmed optional material. Clearing that suggestion through the native picker has been checked; live publication and the complete updated automated flow remain unverified.
 
 启动计划后直接使用指定独立窗口的现有登录会话，不再把账号菜单、用户名或会员绑定作为自动上架前置。手动商品与货盘商品共用字段、原图、上传、单次提交和商品回执链路；登录失效或网站要求人工验证时，保留当前任务等待处理。原提交结果未知时仍只核对原请求，不能重新发布。办公室与 Mac 接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
+
+## 上传后清空未确认的可选材质 — 0.5.3-dev.22
+
+Mac dev.21 真实上架准备已核对八项字段、Moyen 包裹和原照片 1/1；发布前因可选「Matériau (recommandé)」出现未经确认的 Plastique 建议值而停止。重新准备时材质为空，上传同一张原照片后网站再次自动填入该建议。用户明确选择清空，不填写材质；该建议值不作为商品事实保存。
+
+本版在上传完成后、发布证据核对前，通过当前应用持有的草稿执行专用可选材质清空：核对唯一可选材质输入和手机选择器，只取消已核对的唯一选中项，原生点击 Fait，再回读原字段为空。其他未知字段、必填材质、多选、重复控件、错误选择器范围或回读失败继续停止。八项字段、照片、价格、包裹及单次提交约束保持。
+
+阻止原因改为具体可处理提示，例如「可选材质已填入但未在计划确认」；其他未知字段、错误、页面状态和弹窗仅显示静态字段名、标志和数量，不写出未知字段值、标签或提示全文。真实页面已通过原生选择器清空建议，原照片和 Moyen 保持；本轮没有点击发布，也尚未认定更新后的完整自动流程通过真实网页验证。
+
+<!-- dev22-validation -->
+
+dev.22 验证：完整 Node 1194/1194 通过，零失败、零跳过；Mac 原生表单 24/24、发布证据与提交 11/11、完整本地上架流程 5/5，共 40 项桌面专项通过，不是完整默认 Electron 套件。手机流程 fixture 在上传后自动填入 Plastique，生产 runtime 通过原生点击取消 Toutes 镜像，等待延迟同步为空并点击 Fait，随后才单次发布；原图、商品回执与重启防重保持。首次材质专项因快照中的字符串 `invalid='false'` 被当作真而停止，已显式解析并保留失败日志；只读重新核对不清空材质，并有单元覆盖。以上使用隔离资料和本地页面，真实网站目前仅验证了原生手动清空，新自动清空方法及真实发布尚待现场验证。Mac 构建目标为 Apple Silicon（arm64）、macOS 13 起；下方 dev.21 的构建与测试结果属于前一版本。
 
 ## macOS 同步 Windows 开发进度 — 0.5.3-dev.21
 
@@ -156,7 +168,7 @@ Electron tests require a desktop session; network tests start local servers. The
 npm run package
 ```
 
-The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). The latest 0.5.3-dev.12 source currently lives on `codex/windows-association-v053`, while `main` remains at the earlier checkpoint. Check out the development branch before building the latest version.
+The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). The latest 0.5.3-dev.22 source currently lives on `codex/windows-association-v053`, while `main` remains at the earlier checkpoint. Check out the development branch before building the latest version.
 
 For a local Apple Silicon development build on macOS 13 or later:
 

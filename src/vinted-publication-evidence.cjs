@@ -24,6 +24,34 @@ function problem(code,message){const error=Error(message);error.code=code;return
 function ensure(ok,code,message){if(!ok)throw problem(code,message);}
 function cents(value){const clean=norm(value).replace(/ ?€$/,'');return /^\d+(?:[,.]\d{1,2})?$/.test(clean)?Math.round(Number(clean.replace(',','.'))*100):null;}
 
+// Diagnostics never supply publication authority. Only known static labels and
+// counts leave this function; unknown labels, field values and status text may
+// contain private page content and must not reach task records or the renderer.
+function publicationBlockerDetails(pass){
+ const details=[],source=pass&&typeof pass==='object'?pass:{};
+ const names=new Map([['Titre','标题'],['Description','描述'],['Catégorie','分类'],['Prix','价格'],['État','成色'],['Marque','品牌'],['Couleur','颜色'],['Taille','尺码'],['Matériau','材质'],['Matériau (recommandé)','材质']]);
+ const flags=rows=>'必填 '+rows.filter(row=>row?.required===true).length+' 项、错误 '+rows.filter(row=>row?.invalid===true).length+' 项、已填入 '+rows.filter(row=>row?.populated===true).length+' 项';
+ if(!Array.isArray(source.unknownFields))details.push('未知字段状态无法核对');
+ else {
+  const material=source.unknownFields.filter(row=>row&&names.get(norm(row.label))==='材质');
+  const optionalMaterial=material.filter(row=>row.required===false&&row.populated===true);
+  if(optionalMaterial.length)details.push('可选材质已填入但未在计划确认'+(optionalMaterial.length>1?'（'+optionalMaterial.length+' 项）':'')+'；请先清空该可选字段，或核实材质并在计划中确认后重试');
+  const otherMaterial=material.filter(row=>!optionalMaterial.includes(row));
+  if(otherMaterial.length)details.push('材质字段需核对 '+otherMaterial.length+' 项（'+flags(otherMaterial)+'）');
+  const other=source.unknownFields.filter(row=>!material.includes(row));
+  if(other.length)details.push('其他未知字段 '+other.length+' 项（'+flags(other)+'）');
+ }
+ if(!Array.isArray(source.invalidFields))details.push('字段错误状态无法核对');
+ else if(source.invalidFields.length){
+  const known=source.invalidFields.map(label=>names.get(norm(label))).filter(Boolean),other=source.invalidFields.length-known.length;
+  details.push('字段错误 '+source.invalidFields.length+' 项（'+[...new Set(known),...(other?['其他字段 '+other+' 项']:[])].join('、')+'）');
+ }
+ if(!Array.isArray(source.alerts))details.push('页面状态提示无法核对');
+ else if(source.alerts.length)details.push('页面状态提示 '+source.alerts.length+' 条（错误或未知状态，需在网页核对）');
+ if(source.dialogs!==0)details.push(Number.isSafeInteger(source.dialogs)&&source.dialogs>0?'页面弹窗 '+source.dialogs+' 个':'页面弹窗状态无法核对');
+ return details;
+}
+
 // Adapter hook: call only after every unique category control was actually
 // clicked and the final native input was read back in this same document.
 // Matching a prefilled leaf does not create a traversal receipt.
@@ -152,7 +180,7 @@ class VintedPublicationEvidence{
    let fieldsOK=true;
    for(const field of second.fields){const expected=field.field==='priceCents'?plan.listingPriceCents:plan.listing[field.field];const matches=equal(field.value,expected)&&!field.disabled&&!field.invalid;check(field.label,matches,matches?'页面值与保存计划一致':'页面值缺失、不可用或与保存计划不一致');fieldsOK=fieldsOK&&matches;}
    const extra=second.unknownFields.length===0&&second.invalidFields.length===0&&second.alerts.length===0&&second.dialogs===0;
-   check('其余字段和错误提示',extra,extra?'未知可选字段为空，未显示字段错误或弹窗':'需核对：'+[...second.unknownFields.map(field=>field.label),...second.invalidFields,...second.alerts,...(second.dialogs?['页面弹窗']:[])].join('；').slice(0,600));
+   check('其余字段和错误提示',extra,extra?'未知可选字段为空，未显示字段错误或弹窗':'需核对：'+publicationBlockerDetails(second).join('；'));
    check('网页照片',true,'已确认同一 document、原上传记录与当前照片回执');
    const publish=second.publication.count===1&&second.publication.enabled&&second.publication.observed;
    check('发布按钮',publish,publish?'唯一 Ajouter 按钮可用':'Ajouter 按钮缺失、重复或不可用');
@@ -173,4 +201,4 @@ class VintedPublicationEvidence{
  }
 }
 
-module.exports={VintedPublicationEvidence,rememberCategoryTraversal,probePublicationForm,FIELD_SPECS};
+module.exports={VintedPublicationEvidence,rememberCategoryTraversal,probePublicationForm,publicationBlockerDetails,FIELD_SPECS};

@@ -40,6 +40,24 @@ test('live dispatch is disabled by default and no proof or journal action starts
  const f=fixture();f.submitter=new VintedPublishSubmit();await assert.rejects(f.submitter.submit({engine:f.engine,planId:f.plan.id,input:f.input}),{code:'PUBLICATION_NOT_ENABLED'});assert.equal(f.events.length,0);assert.equal(f.writes.length,0);
 });
 
+test('unconfirmed optional material explains how to resolve the block without adopting a value or clicking',async()=>{
+ const f=fixture();f.pass.unknownFields.push({label:'Matériau (recommandé)',required:false,invalid:false,populated:true,value:'private-material-value'});
+ await assert.rejects(f.run(),caught=>{assert.equal(caught.code,'PUBLICATION_EVIDENCE_BLOCKED');assert.match(caught.message,/可选材质已填入但未在计划确认/);assert.match(caught.message,/请先清空该可选字段/);assert.match(caught.message,/在计划中确认后重试/);assert.match(caught.message,/未点击发布/);assert.equal(caught.message.includes('private-'),false);return true;});
+ assert.equal(f.events.filter(event=>event.type==='mouseDown').length,0);assert.equal(f.events.length,0);assert.equal(f.writes.length,0);assert.equal(f.engine.db.publications.submissions.length,0);assert.equal(f.pass.unknownFields[0].value,'private-material-value');assert.equal(f.plan.listing.material,undefined);
+});
+
+test('unknown content blocks with safe counts instead of private labels or status text before any publication record',async()=>{
+ const f=fixture();f.pass.unknownFields.push({label:'private-field-label',required:true,invalid:true,populated:true,value:'private-field-value'});f.pass.invalidFields.push('Prix','private-invalid-label');f.pass.alerts.push('private-alert-text','private-status-text');f.pass.dialogs=2;
+ await assert.rejects(f.run(),caught=>{assert.equal(caught.code,'PUBLICATION_EVIDENCE_BLOCKED');assert.match(caught.message,/其他未知字段 1 项（必填 1 项、错误 1 项、已填入 1 项）/);assert.match(caught.message,/字段错误 2 项（价格、其他字段 1 项）/);assert.match(caught.message,/页面状态提示 2 条/);assert.match(caught.message,/页面弹窗 2 个/);assert.equal(caught.message.includes('private-'),false);return true;});
+ assert.equal(f.events.filter(event=>event.type==='mouseDown').length,0);assert.equal(f.events.length,0);assert.equal(f.writes.length,0);assert.equal(f.engine.db.publications.submissions.length,0);
+});
+
+test('an unconfirmed material appearing during visual feedback cancels only the prepared unattempted record',async()=>{
+ const f=fixture({onFeedback:(api,event)=>{if(event.stage==='preparing')api.pass.unknownFields.push({label:'Matériau (recommandé)',required:false,invalid:false,populated:true});}});
+ await assert.rejects(f.run(),caught=>{assert.equal(caught.code,'PUBLICATION_EVIDENCE_BLOCKED');assert.match(caught.message,/可选材质已填入但未在计划确认/);return true;});
+ assert.equal(f.events.filter(event=>event.type==='mouseDown').length,0);assert.equal(f.events.length,0);assert.equal(f.engine.db.publications.submissions.length,1);assert.equal(f.engine.db.publications.submissions[0].state,'cancelled');assert.equal(f.engine.db.publications.submissions[0].attemptCount,0);
+});
+
 test('session submit uses its original capability with no stored account or final menu while clicking only once',async()=>{
  const f=fixture({navigate:'https://www.vinted.fr/items/98765',onAtomic:(_f,state)=>{state.account=null;}}),authority=createEnvironmentSessionAuthority(f.plan.profileId);
  f.input.expectedAccount=authority;f.pass.account={...authority};f.engine.db.marketAccounts=[];

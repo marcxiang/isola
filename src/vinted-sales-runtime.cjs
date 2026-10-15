@@ -124,6 +124,10 @@ class VintedSalesRuntime extends VintedAdapter {
     const manifest=await this.trustedManifest(photos.manifest);accountGuard();
     const upload=await this.uploadPhotos(profileId,manifest,{signal});accountGuard();
     if(upload?.verified!==true||upload.uncertain!==false||upload.claimId!==photos.manifest.claimId||upload.count!==photos.manifest.count)throw fail('PHOTO_UNVERIFIED','原页面照片上传结果待核对，未重复上传',upload?.uncertain===true);
+    this.step(context,'check_optional_fields',expected);
+    if(upload.optionalMaterial?.verified===false)throw fail('OPTIONAL_MATERIAL_UNVERIFIED','照片已上传，可选材质清空未核对；请检查当前页面，未点击发布');
+    const optional=await this.clearOptionalMaterial(profileId,{signal});accountGuard();
+    if(optional?.verified!==true)throw fail('OPTIONAL_MATERIAL_UNVERIFIED','可选材质清空结果未能核对，照片已保留，未点击发布');
     const input=await this.readPublicationInput(engine,plan.id,signal,accountGuard,sessionAuthority);accountGuard();
     this.step(context,'publish_listing',expected);
     const result=await this.submit({engine,planId:plan.id,input,signal,guard:accountGuard});submitted=true;accountGuard();

@@ -96,6 +96,93 @@ function fixture(options={}){
   return api;
 }
 
+function optionalMaterialFixture(options={}){
+  let open=false,material='',documentKey=1,version=0,ids=new Map(),pending=0;
+  const values={title:'',description:'',categoryPath:'',priceCents:'',condition:''},calls=[],world={};
+  const contents=Object.assign(new EventEmitter(),{isDestroyed:()=>false,getURL:()=>FORM}),tab={id:'material-tab',view:{webContents:contents}},w={isDestroyed:()=>false,tabs:[tab],activeTab:tab.id,aiAgent:{state:{running:false}}};
+  const node=(tag,label,extra={})=>Object.defineProperties({tagName:tag.toUpperCase(),label,isConnected:true,children:[],getAttribute(name){return this[name]??null;},contains(other){return this===other;},querySelectorAll:()=>[]},Object.getOwnPropertyDescriptors(extra));
+  const fields=Object.entries({title:'Titre',description:'Description',categoryPath:'Catégorie',priceCents:'Prix',condition:'État'}).map(([key,label])=>node(key==='description'?'textarea':'input',label,{key,type:'text',readOnly:!['title','description','priceCents'].includes(key),get value(){return values[key];}}));
+  const input=node('input','Matériau (recommandé)',{type:'text',readOnly:true,required:options.required===true||options.required==='true',invalid:options.invalid===true||options.invalid==='true',get value(){return material;},placeholder:'Sélectionne un matériau'});
+  const form=node('form','',{contains:other=>fields.includes(other)||other===input,querySelectorAll:()=>[]});for(const field of [...fields,input])field.form=form;
+  const heading=node('span','',{_text:'Matériau (recommandé)'}),allHeading=node('p','',{_text:'Toutes'}),suggestionHeading=node('p','',{_text:'Suggestions'});
+  const all=node('div','',{children:[allHeading],contains:other=>other.group==='all'}),suggestions=node('div','',{children:[suggestionHeading],contains:other=>other.group==='suggestions'});
+  const canonical=node('input','Plastique',{type:'checkbox',role:'checkbox',group:'all',checked:true}),mirror=node('input','Plastique',{type:'checkbox',role:'checkbox',group:'suggestions',checked:true}),other=node('input','Acier',{type:'checkbox',role:'checkbox',group:'suggestions',checked:false});
+  const done=node('button','Fait',{type:'button',get disabled(){return canonical.checked||mirror.checked||options.disabledDone===true;}});
+  const duplicate=node('input','Plastique',{type:'checkbox',role:'checkbox',group:options.unknownGroup?'unknown':'all',checked:true});
+  const chooserNodes=[heading,canonical,mirror,other,done,...(options.duplicate||options.unknownGroup?[duplicate]:[])];
+  const scope=node('div','',{get isConnected(){return open;},get hidden(){return !open;},contains:other=>chooserNodes.includes(other)||[all,suggestions].includes(other),querySelectorAll:selector=>selector==='input,textarea,select,[role=radio]'?chooserNodes.filter(n=>n.tagName==='INPUT'):chooserNodes.filter(n=>n.tagName!=='SPAN')});
+  const api={calls,values,tab,w,setMaterial(value){material=value;},reload(){documentKey++;},canonical,mirror,input,fields};
+  async function snapshot(){
+    version++;ids=new Map();const nodes=[...fields,...(options.absent?[]:[input]),...(open?chooserNodes.filter(n=>n!==heading):[])];
+    if(pending>0&&!options.desync&&--pending===0)mirror.checked=false;
+    const elements=nodes.map(n=>{const id='e'+version+'-'+ids.size;ids.set(id,n);return {id,tag:n.tagName.toLowerCase(),type:n.type,role:n.role,label:n.label,readOnly:n.readOnly,required:n===input?options.required??false:n.required,invalid:n===input?options.invalid??false:n.invalid,disabled:n.disabled,checked:n.checked};});
+    return {url:FORM,title:'Vendre un article',elements};
+  }
+  const control={
+    checkedSnapshot:async()=>{await options.beforeSnapshot?.(api);return snapshot();},
+    isolated:async(_tab,expression)=>{
+      Object.assign(world,{__isolaElements:ids,__isolaDOM:{visible:n=>!n.hidden,disabled:n=>!!n.disabled,label:n=>n.label||'',safeText:n=>n._text||n.label||'',closest:(n,selector)=>selector==='form'?n.form||null:null,parents:n=>[n,...(n.group==='all'?[all]:n.group==='suggestions'?[suggestions]:[]),...(chooserNodes.includes(n)||[all,suggestions].includes(n)?[scope]:[form])]}});
+      return vm.runInNewContext(expression,{globalThis:world,performance:{timeOrigin:documentKey},document:{querySelectorAll:()=>open?[heading,allHeading,suggestionHeading]:[]}});
+    },
+    performAction:async(_tab,args,opts)=>{
+      calls.push(args);await options.beforeAction?.(api,args);await opts.onProgress?.({stage:'acting'});if(opts.signal.aborted)throw Error('stopped');
+      const target=ids.get(args.elementId);assert.ok(target,'material operation uses a fresh semantic id');
+      if(args.action==='type')values[target.key]=args.text;
+      else if(target===input)open=true;
+      else if(target===canonical){canonical.checked=false;pending=options.pendingSnapshots||1;if(options.extraSelected)other.checked=true;}
+      else if(target===done){if(!options.stuckDone){open=false;material='';}}
+      else throw Error('Unexpected optional-material action');
+      await opts.onProgress?.({stage:'verifying'});return {...await snapshot(),observation:{inputMatched:true}};
+    }
+  };
+  api.adapter=new VintedAdapter({windows:new Map([['profile-1',w]]),control,menuWaitMs:options.menuWaitMs??40,pollIntervalMs:10});
+  api.prepare=async()=>{await api.adapter.prepareFields('profile-1',{title:'Owned test'});calls.length=0;};
+  return api;
+}
+
+test('optional material clearing uses the owned canonical checkbox, waits for its suggestion mirror, and confirms empty Fait',async()=>{
+  const f=optionalMaterialFixture({pendingSnapshots:3});await f.prepare();f.setMaterial('Plastique');
+  const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.verified,true);assert.equal(result.cleared,true);assert.equal(result.published,false);assert.equal(f.values.title,'Owned test');assert.equal(f.calls.length,3);assert.ok(f.calls.every(call=>call.action==='click'));
+  const count=f.calls.length;const repeated=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(repeated.unchanged,true);assert.equal(repeated.cleared,false);assert.equal(f.calls.length,count);assert.equal(f.w.vintedDraftController,null);
+});
+
+test('optional material is a no-op when absent or empty but never adopts an unowned draft',async()=>{
+  for(const absent of [false,true]){const f=optionalMaterialFixture({absent});await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),{code:'EXISTING_DRAFT'});await f.prepare();const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,false);assert.equal(f.calls.length,0);}
+});
+
+test('optional material refuses required, invalid, duplicate, unknown, unrelated selected or unsynchronized chooser states',async()=>{
+  for(const options of [{required:true},{required:'true'},{invalid:true},{invalid:'true'},{invalid:'grammar'},{invalid:'spelling'},{invalid:''},{duplicate:true},{unknownGroup:true},{extraSelected:true},{desync:true},{disabledDone:true},{stuckDone:true}]){
+    const f=optionalMaterialFixture({...options,menuWaitMs:0});await f.prepare();f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),{code:'OPTIONAL_MATERIAL_UNVERIFIED'});assert.equal(f.values.title,'Owned test');assert.equal(f.w.vintedDraftController,null);assert.ok(f.calls.length<=3);
+  }
+});
+
+test('optional material accepts explicit string false accessibility states',async()=>{
+  const f=optionalMaterialFixture({required:'false',invalid:'false'});await f.prepare();f.setMaterial('Plastique');const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,true);assert.equal(result.verified,true);assert.equal(f.calls.length,3);
+});
+
+test('optional material stops for document, tab, cancellation or manually changed owned fields',async()=>{
+  const changed=optionalMaterialFixture();await changed.prepare();changed.setMaterial('Plastique');changed.values.title='Manual edit';await assert.rejects(changed.adapter.clearOptionalMaterial('profile-1'),{code:'EXISTING_DRAFT'});assert.equal(changed.calls.length,0);
+  const reloaded=optionalMaterialFixture();await reloaded.prepare();reloaded.setMaterial('Plastique');reloaded.reload();await assert.rejects(reloaded.adapter.clearOptionalMaterial('profile-1'),{code:'PAGE_CHANGED'});assert.equal(reloaded.calls.length,0);
+  for(const mode of ['tab','navigate','edit','invalid','abort']){
+    const controller=new AbortController();let enabled=false;const f=optionalMaterialFixture({beforeAction:(api)=>{if(!enabled)return;enabled=false;if(mode==='tab')api.w.activeTab='another';if(mode==='navigate')api.tab.view.webContents.emit('did-start-navigation',{},FORM,false,true);if(mode==='edit')api.values.title='Concurrent edit';if(mode==='invalid')api.input['aria-invalid']='grammar';if(mode==='abort')controller.abort();}});
+    await f.prepare();f.setMaterial('Plastique');enabled=true;await assert.rejects(f.adapter.clearOptionalMaterial('profile-1',{signal:controller.signal}));assert.equal(f.calls.length,1);assert.equal(f.w.vintedDraftController,null);
+  }
+});
+
+test('photo upload preserves its verified receipt while reporting optional material cleanup separately',async()=>{
+  const f=fixture(),receipt={verified:true,uploadReceipt:'fixture-receipt',uploadedCount:1};let uploads=0,clears=0;
+  f.adapter.photos.upload=async()=>{uploads++;return receipt;};
+  f.adapter.clearOptionalMaterial=async()=>{clears++;return {verified:true,cleared:true};};
+  assert.equal(await f.adapter.uploadPhotos('profile-1',{}),receipt);assert.equal(clears,0);
+  f.adapter.drafts.set('profile-1',{});
+  assert.equal(await f.adapter.uploadPhotos('profile-1',{}, {recheckOnly:true}),receipt);assert.equal(clears,0);
+  const cleaned=await f.adapter.uploadPhotos('profile-1',{});assert.equal(cleaned.verified,true);assert.equal(cleaned.uploadReceipt,receipt.uploadReceipt);assert.equal(cleaned.optionalMaterial.cleared,true);assert.equal(clears,1);
+  f.adapter.clearOptionalMaterial=async()=>{clears++;throw Object.assign(Error('可选材质无法安全清空，已停止后续操作'),{code:'OPTIONAL_MATERIAL_UNVERIFIED'});};
+  const failed=await f.adapter.uploadPhotos('profile-1',{});assert.equal(failed.verified,true);assert.equal(failed.uploadReceipt,receipt.uploadReceipt);assert.equal(failed.optionalMaterial.verified,false);assert.match(failed.message,/照片已上传；可选材质清空未核对/);assert.equal(uploads,4);
+  f.adapter.photos.upload=async()=>({verified:false});await f.adapter.uploadPhotos('profile-1',{});assert.equal(clears,2);
+  f.adapter.photos.upload=async()=>receipt;f.adapter.clearOptionalMaterial=async()=>{throw Object.assign(Error('stopped'),{code:'STOPPED'});};await assert.rejects(f.adapter.uploadPhotos('profile-1',{}),{code:'STOPPED'});
+});
+
 test('readiness distinguishes reversible form preparation from all live business capabilities',async()=>{
   const {adapter}=fixture();const readiness=adapter.readiness();assert.equal(readiness.capabilities.inspect,true);assert.equal(readiness.capabilities.prepareCategory,true);
   for(const capability of ['publish','messages','offers','shippingLabel','procurement'])assert.equal(readiness.capabilities[capability],false);

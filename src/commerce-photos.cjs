@@ -81,14 +81,16 @@ function matchingClaim(engine,record,{required=false}={}){
  if(required&&related.length!==1||related.length>1||related.some(c=>c.id!==record.claimId||c.setId!==record.setId||c.profileId!==record.profileId||c.productId!==record.productId||c.supplierAccountId!==undefined&&c.supplierAccountId!==record.supplierAccountId||!Array.isArray(c.listings)||!Array.isArray(c.images)||JSON.stringify(c.images.map(i=>imageURL(i.url,record.baseURL)))!==JSON.stringify(record.images)))throw failure('PHOTO_CONFLICT','本套照片的本地领取记录、环境或商品不一致，已停止');
  return related[0];
 }
-function privateDirectory(directory){
- if(!fs.existsSync(directory))fs.mkdirSync(directory,{mode:0o700});
- const stat=fs.lstatSync(directory);if(!stat.isDirectory()||stat.isSymbolicLink())throw failure('PHOTO_STORAGE','照片目录不是私有常规目录');fs.chmodSync(directory,0o700);
+function privateDirectory(directory,create){
+ if(create&&!fs.existsSync(directory))fs.mkdirSync(directory,{mode:0o700});
+ const stat=fs.lstatSync(directory);if(!stat.isDirectory()||stat.isSymbolicLink())throw failure('PHOTO_STORAGE','照片目录不是私有常规目录');if(create)fs.chmodSync(directory,0o700);
+ // Keep upload manifests canonical even when a macOS parent is exposed through
+ // /var rather than /private/var; owned cache directories must still be real.
+ const canonical=fs.realpathSync(directory),resolved=fs.lstatSync(canonical);if(!resolved.isDirectory()||resolved.isSymbolicLink()||resolved.dev!==stat.dev||resolved.ino!==stat.ino)throw failure('PHOTO_STORAGE','照片目录已改变');return canonical;
 }
 function cacheDirectory(engine,record,create=false){
- const root=path.join(engine.dir,'prepared-photos'),dir=path.join(root,record.id);
- if(create){privateDirectory(root);privateDirectory(dir);}else for(const entry of [root,dir]){const stat=fs.lstatSync(entry);if(!stat.isDirectory()||stat.isSymbolicLink())throw failure('PHOTO_STORAGE','照片目录已改变');}
- return dir;
+ const root=privateDirectory(path.join(engine.dir,'prepared-photos'),create);
+ return privateDirectory(path.join(root,record.id),create);
 }
 // Windows cannot FlushFileBuffers on a directory handle. The file itself is
 // still fsynced before rename; POSIX additionally flushes the parent directory.

@@ -17,7 +17,13 @@ function assetValid(asset,index){
  ensure(object(asset)&&asset.index===index&&/^[a-f0-9]{64}$/.test(asset.sha256||'')&&asset.imageId==='local-image-'+asset.sha256&&asset.fileName===String(index).padStart(2,'0')+'-'+asset.sha256+'.jpg'&&Number.isSafeInteger(asset.size)&&asset.size>0&&asset.size<=MAX_BYTES&&[asset.width,asset.height].every(value=>Number.isSafeInteger(value)&&value>0&&value<=1200),'本地照片清单无效');
  ensure(Object.keys(asset).every(key=>['index','imageId','sha256','size','width','height','fileName'].includes(key)),'本地照片清单包含未知字段');return asset;
 }
-function privateDir(directory,create=false){if(create&&!fs.existsSync(directory))fs.mkdirSync(directory,{mode:0o700});const info=fs.lstatSync(directory);ensure(info.isDirectory()&&!info.isSymbolicLink(),'本地照片目录无效','LOCAL_PHOTO_STORAGE');if(create)fs.chmodSync(directory,0o700);return directory;}
+function privateDir(directory,create=false){
+ if(create&&!fs.existsSync(directory))fs.mkdirSync(directory,{mode:0o700});const info=fs.lstatSync(directory);ensure(info.isDirectory()&&!info.isSymbolicLink(),'本地照片目录无效','LOCAL_PHOTO_STORAGE');if(create)fs.chmodSync(directory,0o700);
+ // macOS may expose the same parent through /var and /private/var. Return the
+ // canonical owned directory so the upload capability keeps its exact-path
+ // check; an owned directory or photo replaced by a symlink is still invalid.
+ const canonical=fs.realpathSync(directory),resolved=fs.lstatSync(canonical);ensure(resolved.isDirectory()&&!resolved.isSymbolicLink()&&resolved.dev===info.dev&&resolved.ino===info.ino,'本地照片目录已改变','LOCAL_PHOTO_STORAGE');return canonical;
+}
 function directory(engine,setId,create=false){ensure(named(setId,'local-set-'),'本地照片套组编号无效');const root=privateDir(path.join(engine.dir,'local-product-photos'),create);return privateDir(path.join(root,setId),create);}
 function readFile(engine,setId,asset,index){
  assetValid(asset,index);const file=path.join(directory(engine,setId),asset.fileName),before=fs.lstatSync(file);ensure(before.isFile()&&!before.isSymbolicLink(),'本地照片不是常规文件','LOCAL_PHOTO_STORAGE');

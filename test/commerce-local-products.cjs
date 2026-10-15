@@ -13,9 +13,10 @@ const listing={title:'Local accessory',description:'Local fixture description.',
 // Structural JPEG only. Main's native decoder is exercised by the Electron
 // integration fixture; this stub does not claim native decoding coverage.
 function jpeg(tail=0){return Buffer.from([255,216,255,192,0,17,8,0,20,0,10,3,1,17,0,2,17,1,3,17,1,255,218,0,12,3,1,0,2,17,3,17,0,63,0,tail,255,217]);}
-function fixture(t){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'isola-local-product-')),instances=[],calls=[];let selected=[];
- const options={dir,profiles:()=>[{id:'profile-1',name:'Local account'},{id:'profile-2',name:'Other account'}],clientFactory:()=>{calls.push('supplier');throw Error('Local product must not contact a supplier');},adapter:{readiness:()=>({capabilities:{}})},seal:value=>value,unseal:value=>value};
+function fixture(t,{aliasedParent=false}={}){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'isola-local-product-')),instances=[],calls=[];let selected=[],engineDir=dir;
+ if(aliasedParent){fs.mkdirSync(path.join(dir,'storage'));fs.symlinkSync(path.join(dir,'storage'),path.join(dir,'storage-alias'),'dir');engineDir=path.join(dir,'storage-alias','commerce');}
+ const options={dir:engineDir,profiles:()=>[{id:'profile-1',name:'Local account'},{id:'profile-2',name:'Other account'}],clientFactory:()=>{calls.push('supplier');throw Error('Local product must not contact a supplier');},adapter:{readiness:()=>({capabilities:{}})},seal:value=>value,unseal:value=>value};
  const create=()=>{const engine=new CommerceEngine(options);instances.push(engine);return engine;},engine=create();
  const service=createLocalProductService({selectFiles:async()=>{calls.push('native-picker');return selected;},normalizeImage:async bytes=>({bytes,...jpegSize(bytes)})});
  const importPhotos=async({productId,tail=0}={})=>{const file=path.join(dir,'selected-'+tail+'.jpg');fs.writeFileSync(file,jpeg(tail));selected=[file];return service.importPhotos(engine,productId?{productId}:{});};
@@ -34,6 +35,14 @@ test('native imports return one-use opaque tokens and save private copied JPEGs 
  const saved=f.save({photoToken:selected.photoToken});assert.equal(saved.product.localPhotoCount,1);assert.equal(saved.product.source,'local');assert.throws(()=>f.save({photoToken:selected.photoToken}));assert.deepEqual(f.calls,['native-picker']);const raw=f.engine.db.localProducts[0];assert.equal(raw.photos[0].sha256,hash(jpeg()));assert.equal(raw.photos[0].fileName.endsWith('.jpg'),true);assert.equal(Object.hasOwn(raw,'supplierAccountId'),false);
  const plan=f.plan(saved.product),prepared=await preparePhotos(f.engine,plan.id,{validateImage:jpegSize});assert.equal(prepared.summary.source,'local');assert.equal(prepared.summary.permanentClaim,false);assert.notEqual(prepared.manifest.files[0].path,path.join(f.dir,'selected-0.jpg'));assert.equal(fs.readFileSync(prepared.manifest.files[0].path).equals(jpeg()),true);assert.equal(f.engine.db.claims[0].source,'local');assert.equal(f.engine.db.claims[0].supplierAccountId,undefined);assert.equal(f.engine.db.photoPreparations.length,0);assert.equal(f.engine.db.localPhotoPreparations.length,1);
  assert.equal((await createTrustedPhotoManifest(prepared.manifest)).claimId,prepared.manifest.claimId);
+});
+
+test('local photos under an aliased parent produce canonical upload paths without accepting owned symlinks',{skip:process.platform==='win32'?'Creating directory symlinks requires Windows privileges':false},async t=>{
+ const f=fixture(t,{aliasedParent:true}),selection=await f.importPhotos(),saved=f.save({photoToken:selection.photoToken}),plan=f.plan(saved.product),prepared=await preparePhotos(f.engine,plan.id,{validateImage:jpegSize}),photo=prepared.manifest.files[0].path;
+ assert.equal(photo,fs.realpathSync(photo));assert.equal(photo.startsWith(fs.realpathSync(f.engine.dir)+path.sep),true);assert.equal(photo.includes('storage-alias'),false);assert.equal((await createTrustedPhotoManifest(prepared.manifest)).files[0].path,photo);
+ const copied=path.join(f.dir,'replacement.jpg');fs.copyFileSync(photo,copied);fs.unlinkSync(photo);fs.symlinkSync(copied,photo);assert.equal(readLocalPreparedPhotos(f.engine,plan.id).summary.ready,false);await assert.rejects(createTrustedPhotoManifest(prepared.manifest),{code:'PHOTO_MANIFEST_INVALID'});
+ fs.unlinkSync(photo);fs.copyFileSync(copied,photo);fs.chmodSync(photo,0o600);assert.equal(readLocalPreparedPhotos(f.engine,plan.id).summary.ready,true);
+ const owned=path.dirname(photo),moved=owned+'-moved';fs.renameSync(owned,moved);fs.symlinkSync(moved,owned,'dir');assert.equal(readLocalPreparedPhotos(f.engine,plan.id).summary.ready,false);
 });
 
 test('renderer paths, unknown tokens, token transfer and duplicate images cannot create local products',async t=>{

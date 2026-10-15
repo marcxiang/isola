@@ -165,26 +165,31 @@ module.exports = async function commerceSmoke(api, check) {
       return {wrongAccountRejected:true,sourceChangeRejected:true,sameAccountRotationPreservedPlan:true};
     });
 
-    await check('sales runtime opens its original environment and pauses unreadable identity before any photo claim or publication',async()=>{
+    await check('sales runtime opens its original session listing page and pauses a missing form before any identity read, photo claim or publication',async()=>{
       fixtureSession=api.sesFor(profile);
       fixtureSession.protocol.handle('https',request=>{
         const url=new URL(request.url);browserRequests.push({method:request.method,origin:url.origin,path:url.pathname});
-        if(request.method!=='GET'||url.href!=='https://www.vinted.fr/')return new Response('Isolated fixture: no external traffic is forwarded',{status:403});
+        if(request.method!=='GET'||url.href!=='https://www.vinted.fr/items/new')return new Response('Isolated fixture: no external traffic is forwarded',{status:403});
         return new Response('<!doctype html><html lang="fr"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Fixture Vinted non connecté</title></head><body><main><h1>Connecte-toi</h1><p>Local unsigned-in fixture. No account menu, images, or publication controls.</p></main></body></html>',{headers:{'content-type':'text/html; charset=utf-8'}});
       });
       await invoke('savePlan',{...plan,listing:{...plan.listing,brand:'Sans marque',color:'Noir',parcel:'Moyen'}});plan=engine.db.plans.find(row=>row.id===plan.id);
       await invoke('setPlanEnabled',plan.id,true);
       const before=requests.length;
-      await view.webContents.executeJavaScript(`document.querySelector('#run-once').click()`);
-      await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='needs_review'&&job.blockedReason==='ACCOUNT_UNVERIFIED')&&!engine.active.has(profile.id)&&!engine.ticking,'unsigned-in account to pause the original job after native identity read');await frames();
-      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'needs_review');assert.equal(job.blockedReason,'ACCOUNT_UNVERIFIED');assert.match(job.error,/账号|头像|登录/);assert.equal(api.windows.has(profile.id),true);assert.equal(api.windows.get(profile.id).profile.id,profile.id);assert.ok(browserRequests.some(request=>request.method==='GET'&&request.origin==='https://www.vinted.fr'&&request.path==='/'),'The automatic native preflight must read the intercepted homepage');assert.equal(job.accountMemberId,undefined);assert.equal(job.mutationPending,false);assert.equal(job.operation,null);assert.equal(job.result,null);assert.equal(engine.db.marketAccounts.length,0);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.photoPreparations.length,0);assert.equal(engine.db.publications.submissions.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
+      const {VintedAccount}=require('../src/vinted-account.cjs'),originalAccountReaders=new Map();let accountReads=0;
+      for(const name of ['inspectAccount','inspectOwnProfileLink','state']){const original=VintedAccount.prototype[name];originalAccountReaders.set(name,original);VintedAccount.prototype[name]=function(...args){accountReads++;return original.apply(this,args);};}
+      try{
+        await view.webContents.executeJavaScript(`document.querySelector('#run-once').click()`);
+        await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='needs_review'&&job.blockedReason==='LISTING_INCOMPLETE')&&!engine.active.has(profile.id)&&!engine.ticking,'unsigned-in session to pause the original job on its missing listing form');
+      }finally{for(const [name,original] of originalAccountReaders)VintedAccount.prototype[name]=original;}
+      await frames();
+      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'needs_review');assert.equal(job.blockedReason,'LISTING_INCOMPLETE');assert.equal(job.step,'prepare_listing');assert.match(job.error,/^网页商品字段未完成：Titre（未找到已核对的输入控件）/);assert.equal(api.windows.has(profile.id),true);assert.equal(api.windows.get(profile.id).profile.id,profile.id);assert.ok(browserRequests.some(request=>request.method==='GET'&&request.origin==='https://www.vinted.fr'&&request.path==='/items/new'),'The session listing job must read its intercepted listing page');assert.equal(browserRequests.some(request=>request.path==='/'||request.path.startsWith('/member/')||request.path.startsWith('/settings/')),false);assert.ok(browserRequests.every(request=>request.method==='GET'));assert.equal(accountReads,0);assert.equal(engine.accountObservations.has(profile.id),false);assert.equal(job.accountMemberId,undefined);assert.equal(job.mutationPending,false);assert.equal(job.operation,null);assert.equal(job.result,null);assert.equal(engine.db.marketAccounts.length,0);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.photoPreparations.length,0);assert.equal(engine.db.publications.submissions.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
       assert.equal(requests.length,before);assert.equal(requests.filter(request=>request.method!=='GET').length,0);
       await view.webContents.executeJavaScript(`document.querySelector('[data-page="jobs"]').click();document.querySelector('#jobs button').click()`);await frames();
       const receipt=await view.webContents.executeJavaScript(`({text:document.querySelector('#job-detail').innerText,reconcileHidden:document.querySelector('#reconcile-form').hidden})`);
-      assert.match(receipt.text,/需要核对/);assert.match(receipt.text,/账号|头像|登录/);assert.equal(receipt.reconcileHidden,true);
+      assert.match(receipt.text,/需要核对/);assert.match(receipt.text,/网页商品字段未完成/);assert.match(receipt.text,/Titre（未找到已核对的输入控件）/);assert.equal(receipt.reconcileHidden,true);
       await view.webContents.executeJavaScript(`document.querySelector('#job-dialog').close()`);
       const reads=browserRequests.length;await invoke('runOnce');assert.equal(engine.db.jobs.length,1);assert.equal(engine.db.jobs[0].id,job.id);assert.equal(engine.db.jobs[0].dedupeKey,job.dedupeKey);assert.equal(browserRequests.length,reads);assert.equal(requests.length,before);assert.equal(engine.db.publications.submissions.length,0);
-      return {jobState:job.state,automaticOriginalEnvironment:true,unreadableIdentityPaused:true,photoClaims:0,writeRequests:0,publications:0,duplicateJobs:0};
+      return {jobState:job.state,blockedReason:job.blockedReason,automaticOriginalEnvironment:true,missingSessionFormPaused:true,accountReads:0,photoClaims:0,writeRequests:0,publications:0,duplicateJobs:0};
     });
 
     await check('commerce IPC denies identical preload bridges from an unauthorized renderer',async()=>{
@@ -201,7 +206,10 @@ module.exports = async function commerceSmoke(api, check) {
     await check('manual publication IPC accepts only a stored plan ID and cannot use renderer-supplied proofs',async()=>{
       const before=requests.length;
       await assert.rejects(invoke('submitPublication',{planId:plan.id,verified:true,manifest:{path:'/private/fixture.jpg'}}),/编号无效/);
-      await assert.rejects(invoke('submitPublication',plan.id),/先核对.*账号/);
+      // The automatic job's main-process session authority is not available to
+      // manual IPC callers, including extra renderer-supplied authority objects.
+      await assert.rejects(invoke('submitPublication',plan.id),/请先核对该环境的 Vinted 账号/);
+      await assert.rejects(invoke('submitPublication',plan.id,{sessionAuthority:{kind:'environment-session',profileId:profile.id}}),/请先核对该环境的 Vinted 账号/);
       await assert.rejects(invoke('inspectPublishedListing',{planId:plan.id,verified:true}),/编号无效/);
       await assert.rejects(invoke('associatePublishedListing',plan.id,'forged-review-token'),/凭证/);
       await assert.rejects(invoke('inspectPublishedListing',plan.id),/已提交/);

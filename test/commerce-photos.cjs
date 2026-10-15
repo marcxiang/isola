@@ -3,6 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {CommerceEngine}=require('../src/commerce-engine.cjs');
 const {preparePhotos,preparePhotosForJob,readPreparedPhotos,MAX_IMAGE_BYTES,READ_TIMEOUT_MS}=require('../src/commerce-photos.cjs');
+const {createTrustedPhotoManifest}=require('../src/vinted-photo-upload.cjs');
 const baseURL='https://sku.example.test/api/v1';
 const profiles=[{id:'profile-1',name:'First'},{id:'profile-2',name:'Second'}];
 const product={id:'product-1',sku:'SKU TEST',name:'Fixture item',stock:5,unit_price_cents:500};
@@ -13,11 +14,12 @@ const receipt={claimId:'claim-1',set:{id:set.id,product_id:product.id,images:[{i
 function jpeg(width=10,height=20,tail=0){return Buffer.from([255,216,255,192,0,17,8,height>>8,height&255,width>>8,width&255,3,1,17,0,2,17,1,3,17,1,255,218,0,12,3,1,0,2,17,3,17,0,63,0,tail,255,217]);}
 const decode=()=>({width:10,height:20});
 const deferred=()=>{let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j;});return {promise,resolve,reject};};
-async function fixture(t,{client:overrides={},onChange=()=>{}}={}){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'isola-photos-test-')),calls=[];
+async function fixture(t,{client:overrides={},onChange=()=>{},aliasedParent=false}={}){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'isola-photos-test-')),calls=[];let engineDir=dir;
+ if(aliasedParent){fs.mkdirSync(path.join(dir,'storage'));fs.symlinkSync(path.join(dir,'storage'),path.join(dir,'storage-alias'),'dir');engineDir=path.join(dir,'storage-alias','commerce');}
  const client={me:async()=>({user:{id:'supplier-1'}}),product:async()=>({product}),photoSets:async()=>({sets:[set],total:1}),photoSet:async()=>({set}),claimPhotos:async()=>structuredClone(receipt),download:async()=>jpeg(),...overrides};
  for(const name of Object.keys(client)){const method=client[name];client[name]=async(...args)=>{calls.push({name,args});return method(...args);};}
- const options={dir,profiles:()=>profiles,clientFactory:()=>client,adapter:{readiness:()=>({capabilities:{publish:false}})},seal:s=>s,unseal:s=>s,onChange};
+ const options={dir:engineDir,profiles:()=>profiles,clientFactory:()=>client,adapter:{readiness:()=>({capabilities:{publish:false}})},seal:s=>s,unseal:s=>s,onChange};
  let engine=new CommerceEngine(options);engine.db.settings.baseURL=baseURL;engine.db.encryptedToken='fixture-token';engine.db.supplierAccountId='supplier-1';engine.db.products=[{...product,priceCents:500}];engine.persist();
  const plan=engine.savePlan({profileId:'profile-1',productId:product.id,targetCount:2,listingPriceCents:500,minOfferCents:200,reuseOwnPhotos:true,enabled:false});
  t.after(async()=>{await engine.close();fs.rmSync(dir,{recursive:true,force:true});});
@@ -48,6 +50,13 @@ test('preparation persists exact request before claiming, saves private JPEGs, a
  for(const file of result.manifest.files){if(process.platform!=='win32'){assert.equal(fs.statSync(file.path).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(file.path)).mode&0o777,0o700);}assert.equal(file.width,10);assert.equal(file.height,20);assert.match(file.sha256,/^[a-f0-9]{64}$/);}
  const publicJSON=JSON.stringify([result.summary,f.engine.state().photoPreparations]);for(const secret of ['fixture-token',baseURL,'/photos/images/','prepared-photos','idempotencyKey','payload','receipt','fileName'])assert.equal(publicJSON.includes(secret),false);
  assert.ok(f.calls.filter(c=>c.name==='download').every(c=>c.args[1].maxBytes===MAX_IMAGE_BYTES));assert.deepEqual(readPreparedPhotos(f.engine,f.plan.id),result);
+});
+
+test('supplier photos under an aliased parent keep canonical trusted paths across restart and reject owned directory links',{skip:process.platform==='win32'?'Creating directory symlinks requires Windows privileges':false},async t=>{
+ const f=await fixture(t,{aliasedParent:true,client:{download:async url=>jpeg(10,20,url.endsWith('image-2')?1:0)}}),result=await f.prepare();
+ for(const file of result.manifest.files){assert.equal(file.path,fs.realpathSync(file.path));assert.equal(file.path.startsWith(fs.realpathSync(f.engine.dir)+path.sep),true);assert.equal(file.path.includes('storage-alias'),false);}
+ assert.equal((await createTrustedPhotoManifest(result.manifest)).count,2);await f.restart();assert.deepEqual(readPreparedPhotos(f.engine,f.plan.id).manifest,result.manifest);assert.equal((await f.prepare()).summary.ready,true);assert.equal(f.calls.filter(call=>call.name==='claimPhotos').length,1);assert.equal(f.calls.filter(call=>call.name==='download').length,2);
+ const owned=path.dirname(result.manifest.files[0].path),moved=owned+'-moved';fs.renameSync(owned,moved);fs.symlinkSync(moved,owned,'dir');assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});await assert.rejects(createTrustedPhotoManifest(result.manifest),{code:'PHOTO_MANIFEST_INVALID'});assert.equal(f.calls.filter(call=>call.name==='claimPhotos').length,1);
 });
 
 test('repeated and concurrent preparation reuses one fixed claim and ordered files through configure serialization',async t=>{

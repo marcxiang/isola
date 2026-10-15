@@ -99,6 +99,12 @@
     return {label:'当前页上传待核对',tone:'neutral'};
   }
   function canCheckPhotos(id) { const report=photoReports.get(String(id));return report?.upload?.canCheck===true||report?.page?.canCheck===true; }
+  function optionalMaterialPhotoStatus(material) {
+    if(!material)return null;
+    if(material.verified===true&&material.cleared===true&&material.unchanged!==true)return {className:'field-hint',message:'已清空可选材质；发布前仍会核对。'};
+    if(material.verified===true&&material.unchanged===true&&material.cleared!==true)return {className:'field-hint',message:'本次观察暂未发现已填材质；发布前仍会核对。'};
+    return {className:'photo-result-warning',message:material.verified===false?'可选材质尚未确认清空，请检查当前页面；照片回执已核对不代表材质核对完成。发布前仍会核对。':'可选材质状态待核对；发布前仍会核对。'};
+  }
   function canUploadPhotos(id) { const report=photoReports.get(String(id));return photoSummary(id)?.ready===true&&(canCheckPhotos(id)||!report?.uploadError&&report?.page?.canUpload===true); }
   function photoDiagnostic(value,depth=0) {
     if(depth>12)return null;
@@ -707,6 +713,8 @@
       detail.append(el('div',`report-status ${verified?'good':'warn'}`,verified?'已核对这次上传的页面回执。商品尚未保存或发布。':upload.uncertain?'上传结果尚不明确，请核对原回执。':'未确认上传完成，请处理下方说明后再核对。'));
       if(typeof upload.message==='string')detail.append(el('p','photo-result-message',upload.message));
       if(upload.unchanged===true)detail.append(el('p','field-hint','本次只核对原上传记录，没有再次选择文件。'));
+      const materialStatus=optionalMaterialPhotoStatus(upload.optionalMaterial);
+      if(materialStatus)detail.append(el('p',materialStatus.className,materialStatus.message));
       const grid=el('dl','detail-grid');
       for(const [label,value] of [['领取编号',upload.claimId],['本次图片数量',upload.count],['页面缩略图',upload.receipt?.thumbnailCount],['已保存图片回执',upload.receipt?.serverStoredCount],['页面错误数',upload.receipt?.errorCount]])if(typeof value==='string'||Number.isSafeInteger(value))grid.append(el('dt','',label),el('dd','',value));
       detail.append(grid,el('p','field-hint','回执对应检查时的页面；切换或重载网页后须重新检查照片控件。'));

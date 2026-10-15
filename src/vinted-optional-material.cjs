@@ -1,4 +1,5 @@
 const {randomUUID}=require('node:crypto');
+const {performance}=require('node:perf_hooks');
 const {problem}=require('./commerce-engine.cjs');
 
 const LABELS=['Matériau (recommandé)','Matériau(recommandé)'];
@@ -21,7 +22,8 @@ function changedField(key){const error=problem('EXISTING_DRAFT','商品'+(FIELD_
 
 // This is a narrow, reversible operation authorized by the seller. It never
 // grants ownership of an existing form and never writes an input or React state.
-async function clearOptionalMaterial(adapter,profileId,{signal}={}) {
+async function clearOptionalMaterial(adapter,profileId,{signal,settleEmptyMs=0}={}) {
+  if(!Number.isSafeInteger(settleEmptyMs)||settleEmptyMs<0||settleEmptyMs>5000)throw fail('可选材质等待设置无效，未修改页面');
   const controller=new AbortController(),cancel=()=>controller.abort(),token=randomUUID();
   if(signal?.aborted)throw problem('STOPPED','页面准备已停止');
   signal?.addEventListener('abort',cancel,{once:true});
@@ -37,25 +39,46 @@ async function clearOptionalMaterial(adapter,profileId,{signal}={}) {
     w.vintedDraftController=controller;context.tab=tab;contents=tab.view.webContents;
     contents.on?.('did-start-navigation',onChanged);contents.on?.('render-process-gone',onDestroyed);contents.on?.('destroyed',onDestroyed);
     const current=()=>adapter.current(profileId,context),options=adapter.options(controller.signal,current);
-    if(Object.hasOwn(ownership.fields,'parcel')){
+    const checkParcel=async()=>{if(Object.hasOwn(ownership.fields,'parcel')){
       const parcel=await adapter.parcelOptions(profileId,context);current();
       if(parcel.documentKey!==ownership.documentKey)throw problem('PAGE_CHANGED','商品页已重新加载，可选材质清理已停止');
       const selected=parcel.options?.filter(option=>option.checked===true||option.checked==='true');
       if(parcel.error||selected?.length!==1||selected[0].name!==ownership.fields.parcel)throw problem('EXISTING_DRAFT','包裹规格已改变，未清空可选材质');
+    }};
+    await checkParcel();
+    let page,state,material,materialValue;
+    const readOwned=async()=>{
+      current();page=await adapter.read(profileId,context);current();state=await adapter.values(tab,page);current();
+      if(state.documentKey!==ownership.documentKey)throw problem('PAGE_CHANGED','商品页已重新加载，可选材质清理已停止');
+      const materials=page.elements.filter(isMaterial);
+      if(materials.length>1)throw fail('页面出现多个可选材质控件，未猜测清理目标');
+      for(const entry of state.values){
+        const descriptor=page.elements.find(element=>element.id===entry.id),key=fieldKey(descriptor);
+        if(isMaterial(descriptor))continue;
+        if(entry.value!==''&&(!key||!sameOwnedValue(key,entry.value,ownership.fields[key]))||key&&Object.hasOwn(ownership.fields,key)&&!sameOwnedValue(key,entry.value,ownership.fields[key]))throw changedField(key);
+      }
+      for(const key of Object.keys(ownership.fields).filter(key=>key!=='parcel'))if(!state.values.some(entry=>fieldKey(page.elements.find(element=>element.id===entry.id))===key&&sameOwnedValue(key,entry.value,ownership.fields[key])))throw changedField(key);
+      material=materials[0];materialValue=material?state.values.find(entry=>entry.id===material.id)?.value:undefined;
+      if(material&&(material.disabled||material.sensitive||material.required===true||material.required==='true'||isInvalid(material.invalid)||material.readOnly!==true||typeof materialValue!=='string'))throw fail('材质控件不是已核对的可选选择器，未修改');
+    };
+    await readOwned();
+    if(!material)return {verified:true,cleared:false,unchanged:true,published:false,saved:false};
+    if(materialValue===''&&settleEmptyMs){
+      const until=performance.now()+settleEmptyMs;
+      const pause=ms=>new Promise((resolve,reject)=>{
+        let timer;const finish=(callback,value)=>{clearTimeout(timer);controller.signal.removeEventListener('abort',onAbort);callback(value);},onAbort=()=>finish(reject,problem('STOPPED','页面准备已停止'));
+        if(controller.signal.aborted)return onAbort();
+        controller.signal.addEventListener('abort',onAbort,{once:true});timer=setTimeout(()=>finish(resolve),ms);
+      });
+      do{
+        await pause(Math.min(100,Math.max(0,until-performance.now())));current();await readOwned();
+        if(!material)throw fail('等待建议期间材质控件已改变，未修改页面');
+      }while(materialValue===''&&performance.now()<until);
+      // A photo suggestion can arrive after the photo receipt. Recheck the
+      // original parcel and all values before returning or installing guards.
+      await checkParcel();await readOwned();
+      if(!material)throw fail('等待建议期间材质控件已改变，未修改页面');
     }
-    let page=await adapter.read(profileId,context),state=await adapter.values(tab,page);current();
-    if(state.documentKey!==ownership.documentKey)throw problem('PAGE_CHANGED','商品页已重新加载，可选材质清理已停止');
-    const materials=page.elements.filter(isMaterial);
-    if(materials.length>1)throw fail('页面出现多个可选材质控件，未猜测清理目标');
-    for(const entry of state.values){
-      const descriptor=page.elements.find(element=>element.id===entry.id),key=fieldKey(descriptor);
-      if(isMaterial(descriptor))continue;
-      if(entry.value!==''&&(!key||!sameOwnedValue(key,entry.value,ownership.fields[key]))||key&&Object.hasOwn(ownership.fields,key)&&!sameOwnedValue(key,entry.value,ownership.fields[key]))throw changedField(key);
-    }
-    for(const key of Object.keys(ownership.fields).filter(key=>key!=='parcel'))if(!state.values.some(entry=>fieldKey(page.elements.find(element=>element.id===entry.id))===key&&sameOwnedValue(key,entry.value,ownership.fields[key])))throw changedField(key);
-    if(!materials.length)return {verified:true,cleared:false,unchanged:true,published:false,saved:false};
-    const material=materials[0],materialValue=state.values.find(entry=>entry.id===material.id)?.value;
-    if(material.disabled||material.sensitive||material.required===true||material.required==='true'||isInvalid(material.invalid)||material.readOnly!==true||typeof materialValue!=='string')throw fail('材质控件不是已核对的可选选择器，未修改');
     if(materialValue==='')return {verified:true,cleared:false,unchanged:true,published:false,saved:false};
     const watched=state.values.filter(entry=>entry.id!==material.id);
     const created=await adapter.control.isolated(tab,`(() => {

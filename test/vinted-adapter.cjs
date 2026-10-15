@@ -1,7 +1,8 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const vm=require('node:vm');
-const {EventEmitter}=require('node:events');
+const {EventEmitter,getEventListeners}=require('node:events');
+const {performance}=require('node:perf_hooks');
 const {VintedAdapter}=require('../src/vinted-adapter.cjs');
 const FORM='https://www.vinted.fr/items/new';
 const parcelDescriptions={Petit:'Petit Convient pour un article qui tient dans une grande enveloppe.',Moyen:'Recommandé Moyen Convient pour un article qui tient dans une boîte à chaussures. Voir les détails des dimensions et indemnisations',Grand:'Grand Convient pour un article qui tient dans un carton de déménagement.'};
@@ -113,7 +114,7 @@ function optionalMaterialFixture(options={}){
   const scope=node('div','',{get isConnected(){return open;},get hidden(){return !open;},contains:other=>chooserNodes.includes(other)||[all,suggestions].includes(other),querySelectorAll:selector=>selector==='input,textarea,select,[role=radio]'?chooserNodes.filter(n=>n.tagName==='INPUT'):chooserNodes.filter(n=>n.tagName!=='SPAN')});
   const api={calls,values,tab,w,setMaterial(value){material=value;},reload(){documentKey++;},canonical,mirror,input,fields};
   async function snapshot(){
-    version++;ids=new Map();const nodes=[...fields,...(options.absent?[]:[input]),...(open?chooserNodes.filter(n=>n!==heading):[])];
+    version++;ids=new Map();const nodes=[...fields,...(options.absent?[]:[input,...(options.duplicateMaterial?[input]:[])]),...(open?chooserNodes.filter(n=>n!==heading):[])];
     if(pending>0&&!options.desync&&--pending===0)mirror.checked=false;
     const elements=nodes.map(n=>{const id='e'+version+'-'+ids.size;ids.set(id,n);return {id,tag:n.tagName.toLowerCase(),type:n.type,role:n.role,label:n.label,readOnly:n.readOnly,required:n===input?options.required??false:n.required,invalid:n===input?options.invalid??false:n.invalid,disabled:n.disabled,checked:n.checked};});
     return {url:FORM,title:'Vendre un article',elements};
@@ -183,6 +184,61 @@ test('equivalent initial price formatting never relaxes other fields or changes 
   }
 });
 
+test('optional material observes a delayed photo suggestion before using the original clearing sequence',async()=>{
+  let enabled=false,reads=0;const f=optionalMaterialFixture({beforeSnapshot(api){if(enabled&&++reads===2)api.setMaterial('Plastique');}});await f.prepare();enabled=true;
+  const result=await f.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs:30});assert.equal(result.verified,true);assert.equal(result.cleared,true);assert.ok(reads>=3);assert.equal(f.calls.length,3);assert.equal(f.w.vintedDraftController,null);
+});
+
+test('an empty optional material has a five-second monotonic deadline and no remaining observers',async t=>{
+  const f=optionalMaterialFixture(),controller=new AbortController();await f.prepare();let monotonic=0,finished=false,wall=100000;
+  t.mock.method(performance,'now',()=>monotonic);t.mock.method(Date,'now',()=>wall);t.mock.timers.enable({apis:['setTimeout']});
+  try{
+    const pending=f.adapter.clearOptionalMaterial('profile-1',{signal:controller.signal,settleEmptyMs:5000}).then(result=>{finished=true;return result;});await new Promise(setImmediate);assert.equal(finished,false);
+    monotonic=4999;wall=-100000;t.mock.timers.tick(4999);await new Promise(setImmediate);assert.equal(finished,false);
+    monotonic=5000;wall=10000000;t.mock.timers.tick(1);const result=await pending;assert.equal(result.unchanged,true);assert.equal(result.cleared,false);assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);
+    assert.equal(getEventListeners(controller.signal,'abort').length,0);for(const event of ['did-start-navigation','render-process-gone','destroyed'])assert.equal(f.tab.view.webContents.listenerCount(event),0);
+  }finally{t.mock.timers.reset();}
+});
+
+test('empty-material waiting cancels promptly and consumes its timer without later reads or clicks',async t=>{
+  let reads=0,enabled=false;const f=optionalMaterialFixture({beforeSnapshot(){if(enabled)reads++;}}),controller=new AbortController();await f.prepare();enabled=true;t.mock.timers.enable({apis:['setTimeout']});
+  try{
+    const pending=f.adapter.clearOptionalMaterial('profile-1',{signal:controller.signal,settleEmptyMs:5000}),rejected=assert.rejects(pending,{code:'STOPPED'});await new Promise(setImmediate);assert.ok(reads>0);controller.abort();await rejected;const stoppedReads=reads;
+    t.mock.timers.tick(5000);await new Promise(setImmediate);assert.equal(reads,stoppedReads);assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);assert.equal(getEventListeners(controller.signal,'abort').length,0);assert.equal(f.tab.view.webContents.listenerCount('did-start-navigation'),0);
+  }finally{t.mock.timers.reset();}
+});
+
+test('waiting for a material suggestion rechecks owned fields, unique optional controls and page authority before clicking',async()=>{
+  const variants=[
+    {code:'EXISTING_DRAFT',change(api){api.values.title='private changed title';}},
+    {code:'EXISTING_DRAFT',change(api){api.values.priceCents='5,01 €';}},
+    {code:'EXISTING_DRAFT',change(api){api.fields.push({...api.fields[0],key:'unknown',label:'private unknown label',value:'private unknown value'});}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api,options){options.required='true';}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api,options){options.invalid='grammar';}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api,options){options.duplicateMaterial=true;}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api,options){options.absent=true;}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api){api.input.disabled=true;}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api){api.input.readOnly=false;}},
+    {code:'PAGE_CHANGED',change(api){api.reload();}},
+    {code:'TAB_CHANGED',change(api){api.w.tabs.push({...api.tab,id:'other-tab'});api.w.activeTab='other-tab';}},
+    {code:'STOPPED',change(api){api.tab.view.webContents.emit('did-start-navigation',{},FORM,false,true);}}
+  ];
+  for(const variant of variants){let enabled=false,reads=0;const options={beforeSnapshot(api){if(enabled&&++reads===2)variant.change(api,options);}},f=optionalMaterialFixture(options);await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});f.calls.length=0;enabled=true;
+    await assert.rejects(f.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs:15}),error=>error.code===variant.code&&!error.message.includes('private'));assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);assert.equal(f.tab.view.webContents.listenerCount('did-start-navigation'),0);
+  }
+});
+
+test('empty-material observation rechecks the originally owned parcel before returning or clearing',async()=>{
+  for(const suggested of [false,true]){let enabled=false,reads=0,parcel='Moyen',parcelReads=0;const f=optionalMaterialFixture({beforeSnapshot(api){if(enabled&&++reads===2){parcel='Grand';if(suggested)api.setMaterial('Plastique');}}});await f.prepare();const owned=f.adapter.drafts.get('profile-1');owned.fields.parcel='Moyen';f.adapter.parcelOptions=async()=>{parcelReads++;return {documentKey:owned.documentKey,options:[{name:parcel,checked:true}]};};enabled=true;
+    await assert.rejects(f.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs:15}),{code:'EXISTING_DRAFT'});assert.equal(parcelReads,2);assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);
+  }
+});
+
+test('missing optional material remains immediate and invalid observation durations never modify the page',async()=>{
+  const absent=optionalMaterialFixture({absent:true});await absent.prepare();assert.equal((await absent.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs:5000})).unchanged,true);assert.equal(absent.calls.length,0);
+  for(const settleEmptyMs of [-1,5001,Infinity,1.5,'5000']){const f=optionalMaterialFixture();await f.prepare();await assert.rejects(f.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs}),{code:'OPTIONAL_MATERIAL_UNVERIFIED'});assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);}
+});
+
 test('optional material stops for document, tab, cancellation or manually changed owned fields',async()=>{
   const changed=optionalMaterialFixture();await changed.prepare();changed.setMaterial('Plastique');changed.values.title='Manual edit';await assert.rejects(changed.adapter.clearOptionalMaterial('profile-1'),{code:'EXISTING_DRAFT'});assert.equal(changed.calls.length,0);
   const reloaded=optionalMaterialFixture();await reloaded.prepare();reloaded.setMaterial('Plastique');reloaded.reload();await assert.rejects(reloaded.adapter.clearOptionalMaterial('profile-1'),{code:'PAGE_CHANGED'});assert.equal(reloaded.calls.length,0);
@@ -195,7 +251,7 @@ test('optional material stops for document, tab, cancellation or manually change
 test('photo upload preserves its verified receipt while reporting optional material cleanup separately',async()=>{
   const f=fixture(),receipt={verified:true,uploadReceipt:'fixture-receipt',uploadedCount:1};let uploads=0,clears=0;
   f.adapter.photos.upload=async()=>{uploads++;return receipt;};
-  f.adapter.clearOptionalMaterial=async()=>{clears++;return {verified:true,cleared:true};};
+  f.adapter.clearOptionalMaterial=async(_id,options)=>{clears++;assert.equal(options.settleEmptyMs,5000);return {verified:true,cleared:true};};
   assert.equal(await f.adapter.uploadPhotos('profile-1',{}),receipt);assert.equal(clears,0);
   f.adapter.drafts.set('profile-1',{});
   assert.equal(await f.adapter.uploadPhotos('profile-1',{}, {recheckOnly:true}),receipt);assert.equal(clears,0);

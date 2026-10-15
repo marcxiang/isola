@@ -8,7 +8,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.24**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.25**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
 - Starting the scheduler automatically opens a closed listing profile in its original persistent session and uses that session directly for the configured listing. It does not require member binding or read the account menu. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
@@ -20,13 +20,23 @@ The current development version is **0.5.3-dev.24**. Listing plans use the selec
 
 启动计划后直接使用指定独立窗口的现有登录会话，不再把账号菜单、用户名或会员绑定作为自动上架前置。手动商品与货盘商品共用字段、原图、上传、单次提交和商品回执链路；登录失效或网站要求人工验证时，保留当前任务等待处理。原提交结果未知时仍只核对原请求，不能重新发布。办公室与 Mac 接续请看 [HANDOFF.md](HANDOFF.md)，Windows 使用见 [WINDOWS.md](WINDOWS.md)。
 
+## 上传后的延迟材质建议与独立回执 — 0.5.3-dev.25，2026-10-15
+
+真实 dev.24 已完成原密钥读取、八项字段填写和原照片 1/1 上传，但照片回执成功后页面仍出现 Plastique。照片上传完成不能代表推荐字段也已完成更新；原面板没有独立材质回执，无法把“已清空”和“初读为空”区分开。原任务保持待核对、调度暂停，本轮未保存草稿或点击发布。
+
+首次上传成功后，只有当前应用持有的唯一可选材质输入为空时，才使用单调时钟有界观察最多 5 秒；每次重新读取原文档、字段和材质控件，发现建议即执行原生清空。取消、换页、字段改变、重复/必填/无效材质均停止，观察结束再次核对包裹与字段。直接清理的默认行为不变；重新核对上传仍只读，不清空或再次上传。5 秒观察不是保证网站此后不再变化，原发布前核对保持，晚到的不一致仍阻止发布。
+
+照片 IPC 仅增加 verified/cleared/unchanged 三个显式布尔材质结果；面板分别显示已清空、暂未发现、失败或待核对，照片成功不再被当成材质完成。未知字段、路径和原始材质错误不传给面板。
+
+完整 Node 1233/1233 通过，零失败、零跳过；本轮 4 项相关原生专项通过（保留先通过 1 项，续跑失败及未完成 3 项，未重跑其余 21 项）。新增 fixture 在原图已加载、照片回执成功且 helper 首读材质为空后，约 902ms 才注入建议，生产 wrapper 自动清空，价格、Moyen、其他字段与原图保持，发布次数 0；只读重新核对不清空、点击或重传。两次新 fixture 的函数序列化失败记录保留，修正夹具后通过，未放宽生产检查。以上为隔离测试，真实现场仍待验证。dev.24 的 25 项原生表单及 dev.23 的其他专项为历史检查点，不重复计数。
+
 ## 同额欧元格式与材质清空 — 0.5.3-dev.24，2026-10-15
 
 Mac dev.23 已在真实页面成功读取原货盘密钥、填写八项商品字段并上传原照片 1/1，没有再次卡在钥匙串；调度保持暂停，未保存草稿或点击发布。真实清空仍在操作前被阻止，随后用实际 prepareFields 复现：价格所有权回执为「5,00」，网页失焦后显示「5,00 €」，逐字符串比较错误地抛出 EXISTING_DRAFT。
 
 现在仅在清空前核对价格时，允许严格解析为相同正整数欧分的逗号、点及可选欧元符号格式；不能接受改价、其他币种、非法金额或模糊小数。原所有权记录不改，进入清理后原节点和值仍逐字符串锁定，其他字段及包裹核验保持。出错提示显示静态字段名称，不输出页面值或未知标签。
 
-完整 Node 1220/1220 已通过，零失败、零跳过。原生表单回归正在验证真实输入、trusted blur 自动加欧元符号、原图上传后建议材质及生产 wrapper 的清空；本节后续 checkpoint 记录最终结果。真实新版自动清空及发布仍待验证；dev.23 的 66 项隔离专项属于上一检查点，不替代当前现场。
+完整 Node 1220/1220 通过，零失败、零跳过；Mac 原生表单 25/25 通过。新增用例实际填写价格并保持原所有权回执，原生失焦后补上欧元符号，再经生产原图上传及材质清空，保留准确金额、其他字段、Moyen 与已加载原图，发布次数为 0。首次新增 fixture 因照片说明缺少法语撇号而未满足严格照片回执，已修正夹具并保留首次失败记录；未改生产回执规则。以上为隔离资料和本地页面；真实新版自动清空及发布仍待验证。dev.23 的 66 项隔离专项属于上一检查点，不重复计入本轮。
 
 ## 货盘密钥异步读取 — 0.5.3-dev.23，2026-10-15
 
@@ -186,7 +196,7 @@ Electron tests require a desktop session; network tests start local servers. The
 npm run package
 ```
 
-The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). The latest 0.5.3-dev.24 source currently lives on `codex/windows-association-v053`, while `main` remains at the earlier checkpoint. Check out the development branch before building the latest version.
+The packaging script targets the current OS (macOS defaults to Apple Silicon; Windows defaults to x64). The latest 0.5.3-dev.25 source currently lives on `codex/windows-association-v053`, while `main` remains at the earlier checkpoint. Check out the development branch before building the latest version.
 
 For a local Apple Silicon development build on macOS 13 or later:
 

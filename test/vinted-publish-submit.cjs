@@ -4,6 +4,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),{EventEmitt
 const {createHash}=require('node:crypto');
 const {VintedPublishSubmit,publicationJournal,commitPublicationDeletion}=require('../src/vinted-publish-submit.cjs');
 const {createDisplayController}=require('../src/display-transform.cjs');
+const {createEnvironmentSessionAuthority}=require('../src/commerce-session-authority.cjs');
 const FORM='https://www.vinted.fr/items/new',clone=value=>JSON.parse(JSON.stringify(value));
 const hash=value=>createHash('sha256').update(value).digest('hex'),photoSource='https://images.vinted.test/original.jpg';
 
@@ -37,6 +38,21 @@ function fixture(options={}){
 
 test('live dispatch is disabled by default and no proof or journal action starts',async()=>{
  const f=fixture();f.submitter=new VintedPublishSubmit();await assert.rejects(f.submitter.submit({engine:f.engine,planId:f.plan.id,input:f.input}),{code:'PUBLICATION_NOT_ENABLED'});assert.equal(f.events.length,0);assert.equal(f.writes.length,0);
+});
+
+test('session submit uses its original capability with no stored account or final menu while clicking only once',async()=>{
+ const f=fixture({navigate:'https://www.vinted.fr/items/98765',onAtomic:(_f,state)=>{state.account=null;}}),authority=createEnvironmentSessionAuthority(f.plan.profileId);
+ f.input.expectedAccount=authority;f.pass.account={...authority};f.engine.db.marketAccounts=[];
+ const result=await f.run();assert.equal(result.clickIssued,true);assert.equal(result.state,'uncertain');assert.equal(result.navigationCandidate.listingId,'98765');assert.equal(f.events.filter(row=>row.type==='mouseDown').length,1);
+ assert.deepEqual(f.engine.db.publications.submissions[0].proof.facts.account,{kind:'environment-session',profileId:f.plan.profileId});
+ await assert.rejects(f.run());assert.equal(f.events.filter(row=>row.type==='mouseDown').length,1);
+});
+
+test('session flag copies are rejected and final field changes still stop publication',async()=>{
+ const forged=fixture();forged.input.expectedAccount={kind:'environment-session',profileId:forged.plan.profileId};forged.pass.account={...forged.input.expectedAccount};forged.engine.db.marketAccounts=[];
+ await assert.rejects(forged.run(),{code:'PUBLICATION_SESSION_UNTRUSTED'});assert.equal(forged.events.length,0);assert.equal(forged.writes.length,0);
+ const changed=fixture({onAtomic:(_f,state)=>{state.account=null;state.form.fields.find(row=>row.field==='title').value='Different product';}});changed.input.expectedAccount=createEnvironmentSessionAuthority(changed.plan.profileId);changed.pass.account={...changed.input.expectedAccount};changed.engine.db.marketAccounts=[];
+ await assert.rejects(changed.run(),{code:'PUBLICATION_UNKNOWN_RESULT'});assert.equal(changed.events.filter(row=>row.type==='mouseDown').length,0);
 });
 
 test('one durable submission produces exactly one native click after visual feedback and fresh full proof',async()=>{

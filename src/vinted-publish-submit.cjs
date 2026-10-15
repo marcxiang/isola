@@ -7,6 +7,7 @@ const {VintedPublicationEvidence,FIELD_SPECS,probePublicationForm}=require('./vi
 const {projectPublicationReconciliation}=require('./commerce-publication-reconcile.cjs');
 const {probeAccountDOM,memberURL,getClosedAccountEvidence,probeClosedAccountDOM,validateClosedAccountDOM}=require('./vinted-account.cjs');
 const {getDisplayState,assertDisplayVersion,mapPoint}=require('./display-transform.cjs');
+const {isEnvironmentSessionAccount,assertEnvironmentSessionAuthority}=require('./commerce-session-authority.cjs');
 const journals=new WeakMap();
 const clone=value=>JSON.parse(JSON.stringify(value));
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
@@ -103,14 +104,14 @@ function resolvePublishTarget(specs,expectedDocument){
 // evaluation the renderer cannot run page tasks between the account, fields,
 // photo nodes and hit-point reads. Raw sources return only to this main-process
 // caller for synchronous hashing; never persist them or send them to the UI.
-function probeFinalPublicationDOM(specs,expectedDocument,probeForm,probeAccount,resolveTarget,closedReceipt=null,probeClosedAccount=null){
+function probeFinalPublicationDOM(specs,expectedDocument,probeForm,probeAccount,resolveTarget,closedReceipt=null,probeClosedAccount=null,sessionMode=false){
  const d=globalThis.__isolaDOM,map=globalThis.__isolaElements,clean=value=>String(value||'').replace(/\s+/g,' ').trim();
  const failure=reason=>({error:reason});
  if(location.href!=='https://www.vinted.fr/items/new'||String(performance.timeOrigin)!==expectedDocument||!d||!map)return failure('page-changed');
  const entries=[...map],menuLabels=['Mon profil','Paramètres','Mes commandes','Se déconnecter'];
  const buttonIds=entries.filter(([,node])=>node?.tagName==='BUTTON'&&!d.disabled(node)).map(([id])=>id);
  const menuIds=entries.filter(([,node])=>['A','BUTTON'].includes(node?.tagName)&&menuLabels.includes(clean(d.label(node)))).map(([id,node])=>({id,label:clean(d.label(node))}));
- const account=closedReceipt?null:probeAccount(buttonIds,menuIds),closedAccount=closedReceipt&&probeClosedAccount?probeClosedAccount(closedReceipt):null,form=probeForm(specs);
+ const account=sessionMode||closedReceipt?null:probeAccount(buttonIds,menuIds),closedAccount=!sessionMode&&closedReceipt&&probeClosedAccount?probeClosedAccount(closedReceipt):null,form=probeForm(specs);
  const outside=e=>!!d.closest(e,'header,nav,[role=navigation],[role=tablist]');
  const inputs=[...document.querySelectorAll('input[type=file]')].filter(e=>!outside(e));
  if(inputs.length!==1||inputs[0].getAttribute('data-testid')!=='add-photos-input')return failure('photo-input-changed');
@@ -132,7 +133,10 @@ function verifyFinalPublication(state,proof,input,adapter,tab,targetId,closedRec
  const fail=(ok,message)=>ensure(ok,'PUBLICATION_EVIDENCE_CHANGED',message||'原生点击前商品、账号或照片发生变化，未发布');
  fail(state&&!state.error&&state.documentKey===proof.facts.documentKey&&state.url===FORM_URL&&state.challenge===false);
  let identity;
- if(closedReceipt){
+ if(isEnvironmentSessionAccount(proof.facts.account,input.plan.profileId)){
+  assertEnvironmentSessionAuthority(input.expectedAccount,input.plan.profileId);
+  fail(equal(input.expectedAccount,proof.facts.account),'原自动化环境会话绑定发生变化，未发布');
+ }else if(closedReceipt){
   // A DOM flag never supplies authority. The same unexpired main-process
   // receipt must still belong to this adapter/tab/document after the final
   // synchronous page read, and its native closed toggle must remain intact.
@@ -142,7 +146,7 @@ function verifyFinalPublication(state,proof,input,adapter,tab,targetId,closedRec
   const account=state.account;fail(account?.documentKey===proof.facts.documentKey&&account.buttons?.length===1&&account.menus?.length===1&&account.menus[0].valid,'原生点击前当前账号菜单无法唯一核对，未发布');
   try{identity=memberURL(account.menus[0].href);}catch{fail(false,'原生点击前当前账号地址发生变化，未发布');}
  }
- fail(identity.memberId===proof.facts.account.memberId&&identity.profileURL===proof.facts.account.profileURL,'原生点击前当前登录账号发生变化，未发布');
+ if(identity)fail(identity.memberId===proof.facts.account.memberId&&identity.profileURL===proof.facts.account.profileURL,'原生点击前当前登录账号发生变化，未发布');
  const form=state.form;
  fail(form?.url===FORM_URL&&form.documentKey===proof.facts.documentKey&&!form.error&&form.publication?.count===1&&form.publication.enabled&&form.unknownFields?.length===0&&form.invalidFields?.length===0&&form.alerts?.length===0&&form.dialogs===0);
  fail(Array.isArray(form.fields));
@@ -218,7 +222,8 @@ class VintedPublishSubmit{
  async submit({engine,planId,input,signal,guard=()=>{}}){
   ensure(this.enabled,'PUBLICATION_NOT_ENABLED','真实发布步骤尚未启用');
   ensure(engine?.adapter&&engine.db&&typeof engine.persist==='function'&&typeof engine.plan==='function'&&input?.plan?.id===planId,'PUBLICATION_INPUT_INVALID','发布必须使用主进程保存的销售计划及页面证据');
-  const saved=clone(input),profileId=saved.plan.profileId,adapter=engine.adapter,reader=this.evidenceFactory(adapter),journal=publicationJournal(engine);
+  const saved=clone(input),profileId=saved.plan.profileId,adapter=engine.adapter,reader=this.evidenceFactory(adapter),journal=publicationJournal(engine),sessionAccount=isEnvironmentSessionAccount(input.expectedAccount,profileId);
+  if(sessionAccount)saved.expectedAccount=assertEnvironmentSessionAuthority(input.expectedAccount,profileId);
   ensure(saved.manifest?.claimId===saved.claim?.id&&saved.manifest?.profileId===profileId&&saved.manifest?.productId===saved.plan.productId&&saved.manifest?.setId===saved.claim?.setId&&Array.isArray(saved.manifest.files)&&saved.manifest.files.length===saved.manifest.count&&saved.manifest.files.every(file=>/^[a-f0-9]{64}$/.test(file.sha256||'')),'PUBLICATION_INPUT_INVALID','照片清单无法与原计划和认领记录核对');
   const controller=new AbortController(),cancel=()=>controller.abort(),context={controller,signal:controller.signal,form:true};let w,contents,timer,dispatchTimer,dispatchDeadline=null,record,clickIssued=false,timedOut=false,postClick=false;
   const captures=new Set();let navigationResolve,latestNavigation=null,navigationClosed=false,captureError=null;
@@ -227,8 +232,8 @@ class VintedPublishSubmit{
    if(dispatchDeadline!==null&&clock.now()>=dispatchDeadline){timedOut=true;controller.abort();}
    guard();ensure(!engine.faulted&&!engine.closing,'PUBLICATION_STOPPED','运营存储或窗口已停止');ensure(!controller.signal.aborted,'STOPPED','刊登提交已停止');
    ensure(equal(planBinding(engine.plan(planId)),planBinding(saved.plan)),'PUBLICATION_PLAN_CHANGED','销售计划已改变，未继续提交');
-   const accounts=engine.db.marketAccounts?.filter(account=>account.profileId===profileId)||[];
-   ensure(accounts.length===1&&accounts[0].memberId===saved.expectedAccount.memberId&&accounts[0].profileURL===saved.expectedAccount.profileURL,'PUBLICATION_ACCOUNT_CHANGED','环境绑定账号已改变，未继续提交');
+   if(sessionAccount)assertEnvironmentSessionAuthority(saved.expectedAccount,profileId);
+   else {const accounts=engine.db.marketAccounts?.filter(account=>account.profileId===profileId)||[];ensure(accounts.length===1&&accounts[0].memberId===saved.expectedAccount.memberId&&accounts[0].profileURL===saved.expectedAccount.profileURL,'PUBLICATION_ACCOUNT_CHANGED','环境绑定账号已改变，未继续提交');}
   };
   context.guard=()=>{checkEngine();if(postClick){ensure(w&&!w.isDestroyed()&&w.tabs.find(tab=>tab.id===w.activeTab)===context.tab&&!contents.isDestroyed(),'PUBLICATION_PAGE_CHANGED','原发布窗口已改变');ensure(!w.aiAgent?.state?.running,'PAGE_BUSY','当前窗口已有其他控制任务');}else{adapter.current(profileId,context);if(contents){assertDisplayVersion(contents,context.displayVersion);ensure(context.tab.isInputVisible?.()!==false,'INPUT_SURFACE_UNAVAILABLE','请先显示原发布窗口并切换到当前标签页');}}};
   const capture=(kind,url,mainFrame=true)=>{
@@ -261,8 +266,8 @@ class VintedPublishSubmit{
     context.guard();const finalProof=await this.proof(saved,reader,context);ensure(finalProof.fingerprint===intent.fingerprint,'PUBLICATION_EVIDENCE_CHANGED','提交前最后核对发生变化，未点击发布');
     target=await this.target(adapter,profileId,finalProof,context,{scroll:false});context.guard();
     context.guard();contents.focus();context.guard();
-    const closedReceipt=getClosedAccountEvidence(adapter,{profileId,tab:context.tab,documentKey:finalProof.facts.documentKey});
-    const finalState=await this.wait(()=>adapter.control.isolated(context.tab,'('+probeFinalPublicationDOM.toString()+')('+JSON.stringify(FIELD_SPECS)+','+JSON.stringify(finalProof.facts.documentKey)+','+probePublicationForm.toString()+','+probeAccountDOM.toString()+','+resolvePublishTarget.toString()+','+JSON.stringify(closedReceipt)+','+probeClosedAccountDOM.toString()+')'),context);
+    const closedReceipt=sessionAccount?null:getClosedAccountEvidence(adapter,{profileId,tab:context.tab,documentKey:finalProof.facts.documentKey});
+    const finalState=await this.wait(()=>adapter.control.isolated(context.tab,'('+probeFinalPublicationDOM.toString()+')('+JSON.stringify(FIELD_SPECS)+','+JSON.stringify(finalProof.facts.documentKey)+','+probePublicationForm.toString()+','+probeAccountDOM.toString()+','+resolvePublishTarget.toString()+','+JSON.stringify(closedReceipt)+','+probeClosedAccountDOM.toString()+','+JSON.stringify(sessionAccount)+')'),context);
     // No awaits, snapshot refreshes, target lookups, focus or visual callbacks
     // after this single final read: verify synchronously and dispatch input.
     const point=verifyFinalPublication(finalState,finalProof,saved,adapter,context.tab,target.elementId,closedReceipt);context.guard();

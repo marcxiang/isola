@@ -165,3 +165,41 @@ test('changed withdrawn-association history during a supplier read prevents the 
  const f=replacementAfterWithdrawal(),claim=f.client.claim;f.client.claim=async id=>{const receipt=await claim(id);f.engine.db.publicationSupplierSync[0].state='needs_review';return receipt;};
  await assert.rejects(f.run({allowDispatch:true}),{code:'SUPPLIER_OUTBOX_CHANGED'});assert.equal(f.marks().length,0);
 });
+
+function sessionFixture(){
+ const f=fixture(),record=f.engine.db.publications.submissions[0],authority={kind:'environment-session',profileId:'profile-1'};
+ record.proof.facts.account=clone(authority);record.receipt={...record.receipt,verified:true,profileId:'profile-1',account:clone(authority)};
+ delete f.engine.db.marketAccounts;
+ return f;
+}
+
+test('a session-scoped published item syncs its original supplier claim without a member binding',async()=>{
+ const f=sessionFixture(),publications=clone(f.engine.db.publications),result=await f.run({allowDispatch:true});
+ assert.equal(result.state,'synced');assert.equal(result.attemptCount,1);assert.equal(f.marks().length,1);
+ assert.equal(f.engine.db.marketAccounts,undefined);assert.deepEqual(f.engine.db.publications,publications);
+ assert.deepEqual(f.engine.db.publications.submissions[0].receipt.account,{kind:'environment-session',profileId:'profile-1'});
+ assert.equal(f.engine.db.publications.submissions[0].receipt.memberId,undefined);
+});
+
+test('session supplier sync ignores unrelated saved member records and keeps the fixed environment authority',async()=>{
+ const f=sessionFixture();f.engine.db.marketAccounts=[{profileId:'profile-1',memberId:'old-unverified'},{profileId:'another-profile',memberId:'old-unverified'}];
+ const claim=f.client.claim;f.client.claim=async id=>{const data=await claim(id);f.engine.db.marketAccounts=[];return data;};
+ assert.equal((await f.run({allowDispatch:true})).state,'synced');assert.equal(f.marks().length,1);
+});
+
+test('session supplier sync still requires the original item, product, photos, plan and truthful session receipt',async()=>{
+ const changes=[
+  db=>db.claims[0].setId='another-set',db=>db.claims[0].profileId='another-profile',db=>db.plans[0].sku='another-sku',
+  db=>db.publications.submissions[0].state='uncertain',db=>db.publications.submissions[0].receipt.url='https://www.vinted.fr/items/999',
+  db=>db.publications.submissions[0].receipt.profileId='another-profile',db=>db.publications.submissions[0].receipt.verified=false,
+  db=>delete db.publications.submissions[0].receipt.account,db=>db.publications.submissions[0].receipt.account.profileId='another-profile',
+  db=>db.publications.submissions[0].receipt.memberId='123',db=>db.publications.submissions[0].proof.facts.account.memberId='123'
+ ];
+ for(const change of changes){const f=sessionFixture();change(f.engine.db);await assert.rejects(f.run({allowDispatch:true}),String(change));assert.equal(f.calls.length,0);assert.equal(f.marks().length,0);}
+});
+
+test('changing the session receipt during supplier reads prevents a stale supplier write',async()=>{
+ const f=sessionFixture(),claim=f.client.claim;
+ f.client.claim=async id=>{const data=await claim(id);f.engine.db.publications.submissions[0].receipt.account.profileId='another-profile';return data;};
+ await assert.rejects(f.run({allowDispatch:true}));assert.equal(f.marks().length,0);
+});

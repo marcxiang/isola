@@ -8,7 +8,7 @@ Isola 是一个基于 Electron 的 macOS / Windows 浏览器项目，支持独�
 
 本次开发版在 [`codex/windows-association-v053`](https://github.com/marcxiang/isola/tree/codex/windows-association-v053) 分支与 [草稿 PR #1](https://github.com/marcxiang/isola/pull/1)，尚未合并到 main。接续这版源码请使用该分支。
 
-The current development version is **0.5.3-dev.19**. The production runtime now connects background listing preparation to the existing guarded single-submit publisher. It checks account and catalog identity, prepares the original photos, fills confirmed fields, uploads, submits at most once, and only completes after an attributed item receipt is verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
+The current development version is **0.5.3-dev.20**. Listing plans use the selected environment's current signed-in session directly, without account-menu reads, username evidence or member binding. The runtime fills the configured fields, prepares original photos, uploads, submits at most once, and only completes after the original navigation and item receipt are verified. Unknown outcomes stop for reconciliation. This is a **sales-only development build**, not a verified unattended end-to-end marketplace system.
 
 - Starting the scheduler automatically opens a closed listing profile in its original persistent session, then checks the current account before preparing photos or publishing. Saved homepages are skipped. Closing or stopping that environment holds all its product plans until the interrupted task is reviewed and retried or cancelled.
 - Multi-account plans, durable task leases, visible click/scroll feedback and serialized browser actions are integrated. A running AI and the sales runtime cannot control the same account together.
@@ -27,6 +27,14 @@ dev.10 源码接续检查点（2026-10-15）：最终完整 Node 729/729 通过�
 已定位并修复一处开窗卡住的原因：隐藏的 AI 面板也会读取模型设置并同步解密密钥，等待系统钥匙串时阻塞主线程。现在读取模型元信息和普通设置保存均保留密文，真正启动 AI 时才解密；新密钥加密、清除及更换接口地址的密钥规则保持。新包尚待真实开窗验证；代理和货盘等其他凭据访问仍可能需要钥匙串许可。
 
 本次先保存源码进度，未交付包含全部最新修复的最终 Mac 包。下次办公室先恢复仍等待系统钥匙串的旧应用，再打包最新源码、复测账号菜单关闭诊断和四类 Fait，重跑桌面回归后继续原任务；当前未完成全自动刊登。
+
+## 自动上架直接使用环境会话 — 0.5.3-dev.20
+
+按用户要求取消自动上架中的账号核对前置。开启计划直接使用指定独立环境的现有登录会话，进入 `/items/new`，填写商品、准备原图、上传、发布并读取原提交的商品回执。自动链路完全不打开账号菜单或 Profil，不读取用户名，不要求会员绑定，也不会创建假的会员身份。环境列表显示「使用当前窗口会话」。若网站要求登录或人工验证，留在当前窗口处理。
+
+旧账号核对失败的确定未提交任务可以直接继续，保持原任务、去重编号、照片和资料。商品字段先于照片领取处理，失败显示具体字段原因。单次提交、原页面/环境/计划约束、提交结果未知停止与重启去重保留；回执关联固定到原提交跳转、商品、价格、原图摘要和本人管理控件。新会话记录可核对原刊登结果或确认已删除，不重新要求账号绑定；历史会员证明保持兼容。
+
+验证：Node 1178 项通过、零失败、1 项 Windows 不适用检查跳过；隔离 Electron 完整上架 5/5。Pixel 7 测试页面没有账号菜单、用户名或会员链接，所有账号读取方法强制报错，仍完成字段、原图上传、一次发布、DOM 回执和重启防重；账号读取 0 次、Profil 点击 0 次、未创建账号绑定。打包 Windows EXE 检查通过，确认 sessionListing 开启且不要求 autoBindAccount，依赖审计为 0。首次 Node 检查的两个新删除夹具补齐原持久跳转证据后通过，保留初次失败日志。以上是本地测试；真实 Vinted 发布、完整桌面回归和新 Mac 包未在本轮验证。
 
 ## 修复手机上架前中断与重复开页 — 0.5.3-dev.19
 

@@ -3,6 +3,7 @@
 const {createHash}=require('node:crypto');
 const {VintedAccount,memberURL}=require('./vinted-account.cjs');
 const {buildPublicationProof,FORM_URL}=require('./vinted-publication.cjs');
+const {isEnvironmentSessionAccount,assertEnvironmentSessionAuthority}=require('./commerce-session-authority.cjs');
 
 const traversals=new WeakMap();
 const FIELD_SPECS=Object.freeze([
@@ -101,13 +102,15 @@ class VintedPublicationEvidence{
  }
  async readPass(input,context){
   const {plan,claim,manifest}=input,profileId=plan.profileId,guard=()=>this.adapter.current(profileId,context);
-  const account=await this.wait(()=>this.account.state(profileId,context),context);guard();
-  ensure(account.account,'PUBLICATION_ACCOUNT_UNVERIFIED','请先核对当前账号菜单；关闭菜单后也必须有同一页面的有效核验记录，不能仅凭普通个人主页链接判断账号');
+  const sessionAccount=isEnvironmentSessionAccount(input.expectedAccount,profileId);
+  if(sessionAccount)assertEnvironmentSessionAuthority(input.expectedAccount,profileId);
+  const account=sessionAccount?null:await this.wait(()=>this.account.state(profileId,context),context);guard();
+  if(!sessionAccount)ensure(account.account,'PUBLICATION_ACCOUNT_UNVERIFIED','请先核对当前账号菜单；关闭菜单后也必须有同一页面的有效核验记录，不能仅凭普通个人主页链接判断账号');
   await this.wait(()=>this.adapter.read(profileId,context),context);guard();
   const form=await this.wait(()=>this.adapter.control.isolated(context.tab,'('+probePublicationForm.toString()+')('+JSON.stringify(FIELD_SPECS)+')'),context);guard();
   ensure(form&&form.url===FORM_URL&&typeof form.documentKey==='string','PUBLICATION_PAGE_CHANGED','刊登表单页面已改变');
   ensure(!form.error,'PUBLICATION_FORM_UNVERIFIED',form.error||'刊登表单无法核对');
-  ensure(account.documentKey===form.documentKey,'PUBLICATION_PAGE_CHANGED','账号与商品表单不属于同一次页面');
+  if(!sessionAccount)ensure(account.documentKey===form.documentKey,'PUBLICATION_PAGE_CHANGED','账号与商品表单不属于同一次页面');
   const photoState=await this.wait(()=>this.adapter.photos.read(profileId,context),context);guard();
   ensure(photoState.documentKey===form.documentKey,'PUBLICATION_PAGE_CHANGED','照片与商品字段不属于同一次页面');
   const record=this.adapter.photos.claims.get(profileId+'\0'+context.tab.id+'\0'+form.documentKey);
@@ -123,10 +126,10 @@ class VintedPublicationEvidence{
   const parcel=form.parcel.filter(option=>option.checked);
   const parcelComplete=['Petit','Moyen','Grand'].every(name=>form.parcel.filter(option=>option.name===name).length===1)&&form.parcel.length===3&&parcel.length===1&&!parcel[0].disabled&&!parcel[0].invalid;
   fields.push({field:'parcel',label:'包裹规格',value:parcelComplete?parcel[0].name:null,disabled:!parcelComplete,invalid:!parcelComplete});
-  const finalAccount=await this.wait(()=>this.account.state(profileId,context),context);guard();
-  ensure(finalAccount.documentKey===form.documentKey&&equal(finalAccount.account,account.account),'PUBLICATION_EVIDENCE_CHANGED','读取商品字段期间当前账号发生变化，请重新核对');
+  if(!sessionAccount){const finalAccount=await this.wait(()=>this.account.state(profileId,context),context);guard();ensure(finalAccount.documentKey===form.documentKey&&equal(finalAccount.account,account.account),'PUBLICATION_EVIDENCE_CHANGED','读取商品字段期间当前账号发生变化，请重新核对');}
+  else {assertEnvironmentSessionAuthority(input.expectedAccount,profileId);guard();}
   return {profileId,tabId:context.tab.id,url:FORM_URL,documentKey:form.documentKey,challenge:photoState.challenge,
-   account:{profileId,verified:true,...account.account},fields,unknownFields:form.unknownFields,invalidFields:form.invalidFields,alerts:form.alerts,dialogs:form.dialogs,
+   account:sessionAccount?{kind:'environment-session',profileId}:{profileId,verified:true,...account.account},fields,unknownFields:form.unknownFields,invalidFields:form.invalidFields,alerts:form.alerts,dialogs:form.dialogs,
    publication:form.publication,photos:{profileId,claimId:claim.id,productId:claim.productId,setId:claim.setId,count:manifest.count,documentKey:form.documentKey,signature:receipt.signature,verified:true,busy:false,errorCount:0}};
  }
  async collect(input,{signal}={},report={checks:[]}){
@@ -144,8 +147,8 @@ class VintedPublicationEvidence{
    timer=setTimeout(()=>{timedOut=true;controller.abort();},this.timeoutMs);const observedAt=new Date(this.now()).toISOString();
    const first=await this.readPass(input,context),second=await this.readPass(input,context);this.adapter.current(plan.profileId,context);
    ensure(check('连续两次页面核对',equal(first,second),equal(first,second)?'账号、商品字段、照片和发布控件保持一致':'两次读取之间页面内容发生变化'),'PUBLICATION_EVIDENCE_CHANGED','连续两次刊登证据不一致，请重新读取');
-   const expectedIdentity=memberURL(input.expectedAccount.profileURL),identity=second.account.memberId===input.expectedAccount.memberId&&second.account.memberId===expectedIdentity.memberId&&second.account.profileURL===expectedIdentity.profileURL;
-   check('当前登录账号',identity,identity?'当前菜单账号与该环境绑定一致':'当前登录账号与该环境绑定不一致');
+   const sessionAccount=isEnvironmentSessionAccount(input.expectedAccount,plan.profileId),expectedIdentity=sessionAccount?null:memberURL(input.expectedAccount.profileURL),identity=sessionAccount?isEnvironmentSessionAccount(second.account,plan.profileId):second.account.memberId===input.expectedAccount.memberId&&second.account.memberId===expectedIdentity.memberId&&second.account.profileURL===expectedIdentity.profileURL;
+   check(sessionAccount?'当前自动化环境':'当前登录账号',identity,sessionAccount?'沿用当前独立环境的登录会话；未要求用户名或账号绑定':identity?'当前菜单账号与该环境绑定一致':'当前登录账号与该环境绑定不一致');
    let fieldsOK=true;
    for(const field of second.fields){const expected=field.field==='priceCents'?plan.listingPriceCents:plan.listing[field.field];const matches=equal(field.value,expected)&&!field.disabled&&!field.invalid;check(field.label,matches,matches?'页面值与保存计划一致':'页面值缺失、不可用或与保存计划不一致');fieldsOK=fieldsOK&&matches;}
    const extra=second.unknownFields.length===0&&second.invalidFields.length===0&&second.alerts.length===0&&second.dialogs===0;

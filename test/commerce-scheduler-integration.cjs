@@ -100,6 +100,43 @@ test('runtime receives the task scope and completes against the current database
  await f.engine.runOnce();assert.equal(executeScope.signal,readyScope.signal);assert.equal(f.engine.db.jobs.find(row=>row.id===job.id).state,'completed');assert.equal(f.engine.db.jobs.find(row=>row.id===job.id).result.externalId,'runtime-reply');assert.equal(f.calls.sends,0);assert.equal(f.engine.active.size,0);
 });
 
+test('session listing schedules and executes with no account binding or identity observation',async t=>{
+ const f=fixture(t);f.plan.activeListingId=null;f.adapter.readiness=()=>({capabilities:{publish:true,sessionListing:true,autoOpenProfile:true}});
+ const job=f.engine.enqueue('listing',f.plan,{cycle:0},'listing:session-first');let executions=0;
+ f.adapter.executeJob=async({job,plan})=>{executions++;assert.equal(plan.profileId,'profile-1');assert.equal(job.accountMemberId,undefined);assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(f.engine.accountObservations.size,0);job.result={verified:true,externalId:'session-listing-fixture'};};
+ const scheduled=f.engine.state().jobs.find(row=>row.id===job.id);assert.equal(scheduled.scheduling.reasonCode,'SESSION_LISTING_READY');assert.equal(scheduled.scheduling.state,'ready');
+ await f.engine.runOnce();assert.equal(job.state,'completed');assert.equal(executions,1);assert.equal(f.calls.ready,1);assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(f.engine.accountObservations.size,0);assert.equal(job.accountMemberId,undefined);assert.equal(f.calls.sends,0);
+});
+
+test('session listing leaves legacy conflicting identity records intact instead of gating execution',async t=>{
+ for(const accounts of [
+  [{platform:'vinted-fr',profileId:'profile-1',memberId:'123',username:'old_seller',profileURL:'https://www.vinted.fr/member/123'}],
+  [{platform:'vinted-fr',profileId:'profile-1',memberId:'123'},{platform:'vinted-fr',profileId:'profile-1',memberId:'456'}],
+  [{platform:'vinted-fr',profileId:'profile-1',memberId:'123'},{platform:'vinted-fr',profileId:'profile-2',memberId:'123'}]
+ ]){
+  const f=fixture(t);f.plan.activeListingId=null;f.adapter.readiness=()=>({capabilities:{publish:true,sessionListing:true,autoOpenProfile:true}});f.engine.db.marketAccounts=accounts;
+  f.engine.accountObservations.set('profile-1',{profileId:'profile-1',memberId:'999',verified:true,documentKey:'old-document',checkedAt:'2020-01-01T00:00:00Z'});
+  const job=f.engine.enqueue('listing',f.plan,{cycle:0},'listing:session-existing');job.accountMemberId='777';const before=JSON.stringify(f.engine.db.marketAccounts),observedBefore=JSON.stringify([...f.engine.accountObservations]);let executions=0;
+  f.adapter.executeJob=async({job})=>{executions++;job.result={verified:true,externalId:'session-fixture'};};
+  assert.equal(f.engine.state().jobs.find(row=>row.id===job.id).scheduling.reasonCode,'SESSION_LISTING_READY');await f.engine.runOnce();assert.equal(job.state,'completed');assert.equal(executions,1);assert.equal(f.calls.ready,1);assert.equal(JSON.stringify(f.engine.db.marketAccounts),before);assert.equal(JSON.stringify([...f.engine.accountObservations]),observedBefore);assert.equal(job.accountMemberId,'777');
+ }
+});
+
+test('starting session listing resumes the original unsubmitted identity failure without binding',async t=>{
+ const f=fixture(t);f.engine.kickRun=()=>{};f.engine.ensureRunnerTimer=()=>{};f.engine.db.settings.backgroundEnabled=true;f.engine.db.encryptedToken='fixture-not-a-real-token';f.engine.db.supplierAccountId='fixture-supplier';
+ f.plan.activeListingId=null;f.plan.listing={title:'Fixture own product',description:'Fixture description',categoryPath:['Maison','Accessoires'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'};f.adapter.readiness=()=>({salesOnly:true,capabilities:{publish:true,sessionListing:true,autoOpenProfile:true}});
+ f.engine.seed();const job=f.engine.db.jobs[0];Object.assign(job,{state:'needs_review',step:'check_catalog',accountMemberId:'123',blockedReason:'ACCOUNT_USERNAME_UNVERIFIED',error:'Fixture old username prerequisite',attempts:2});f.engine.persist();
+ const id=job.id,key=job.dedupeKey,payload=JSON.stringify(job.payload),started=f.engine.startPlan(f.plan.id);
+ assert.equal(started.started,true);assert.deepEqual(started.resumedJobIds,[id]);assert.equal(f.engine.db.jobs.length,1);assert.equal(f.engine.db.jobs[0],job);assert.equal(job.id,id);assert.equal(job.dedupeKey,key);assert.equal(JSON.stringify(job.payload),payload);assert.equal(job.accountMemberId,'123');assert.equal(job.state,'queued');assert.equal(job.step,'pending');assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(f.engine.accountObservations.size,0);
+ f.adapter.executeJob=async({job})=>{job.result={verified:true,externalId:'resumed-session-fixture'};};await f.engine.runOnce();assert.equal(job.state,'completed');assert.equal(job.id,id);assert.equal(job.dedupeKey,key);assert.equal(f.engine.db.jobs.length,1);assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(job.accountMemberId,'123');
+ const disk=JSON.parse(fs.readFileSync(f.engine.file,'utf8'));assert.equal(disk.jobs.length,1);assert.equal(disk.jobs[0].id,id);assert.equal(disk.jobs[0].dedupeKey,key);assert.deepEqual(disk.marketAccounts,[]);
+});
+
+test('session listing capability does not bypass legacy identity gates for message operations',async t=>{
+ const f=fixture(t),job=f.enqueue();f.adapter.readiness=()=>({capabilities:{publish:true,sessionListing:true,messages:true}});f.engine.db.marketAccounts=[{platform:'vinted-fr',profileId:'profile-1',memberId:'123'},{platform:'vinted-fr',profileId:'profile-1',memberId:'456'}];
+ await assert.rejects(f.engine.runJob(job),{code:'ACCOUNT_CONFLICT'});assert.equal(job.state,'queued');assert.equal(f.calls.ready,0);assert.equal(f.calls.sends,0);
+});
+
 test('an unimplemented capability remains queued without burning retries or invoking the runtime',async t=>{
  const f=fixture(t),job=f.enqueue();f.adapter.readiness=()=>({capabilities:{messages:false}});let calls=0;f.adapter.executeJob=async()=>{calls++;};
  assert.equal(await f.engine.runJob(job),false);await f.engine.runOnce();await f.engine.runOnce();assert.equal(job.state,'queued');assert.equal(job.attempts,undefined);assert.equal(f.calls.ready,0);assert.equal(calls,0);assert.equal(f.engine.state().jobs[0].scheduling.reasonCode,'CAPABILITY_UNVERIFIED');

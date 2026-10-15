@@ -1,7 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {VintedSalesRuntime}=require('../src/vinted-sales-runtime.cjs');
-const {CommerceEngine}=require('../src/commerce-engine.cjs');
 const {ProfileOperationLeases}=require('../src/commerce-scheduler.cjs');
 const {buildPublicationProof,FORM_URL}=require('../src/vinted-publication.cjs');
 const {projectPublicationReconciliation}=require('../src/commerce-publication-reconcile.cjs');
@@ -18,17 +17,17 @@ function associationRecord(f,{id='association',plan=f.context.plan,state='pendin
 // Thus a fake "published" flag cannot complete the queue or change its receipt.
 class FixtureRuntime extends VintedSalesRuntime {
  async stage(name,extra={}){this.f.calls.push({name,...extra});await this.f.hooks[name]?.(this.f,extra);}
- async inspectCatalog(profileId,options){this.current(profileId,{signal:options.signal});await this.stage('catalog',{profileId});return this.f.catalog;}
+ async inspectCatalog(){throw Error('Automatic listing must not inspect a member catalog');}
  async prepareJobPhotos(engine,job,signal){await this.stage('photos',{profileId:job.profileId});return {summary:{ready:true},manifest:this.f.manifest(job.profileId)};}
  async prepareFields(profileId,listing,{signal}){this.current(profileId,{signal});await this.stage('fields',{profileId,listing});return this.f.draft;}
  async trustedManifest(manifest){await this.stage('manifest');return manifest;}
  async uploadPhotos(profileId,manifest,{signal}){this.current(profileId,{signal});await this.stage('upload',{profileId});return {...this.f.upload,claimId:manifest.claimId,count:manifest.count};}
- async inspectCurrentAccount(profileId,{signal}){this.current(profileId,{signal});await this.stage('account',{profileId});return {...this.f.engine.db.marketAccounts.find(row=>row.profileId===profileId),verified:true,documentKey:'form-document',...this.f.accountPatch};}
- async inspectInitialAccount(profileId,{signal,guard}){this.current(profileId,{signal});await this.stage('identity',{profileId});guard();return {...this.f.knownAccounts.get(profileId),verified:true,documentKey:'identity-document',...this.f.initialAccountPatch};}
- async readPublicationInput(engine,id,signal,guard){guard();await this.stage('publication-input');return {plan:engine.plan(id),product:{id:engine.plan(id).productId,sku:engine.plan(id).sku,stock:2},claim:engine.db.claims.find(row=>row.profileId===engine.plan(id).profileId),expectedAccount:engine.db.marketAccounts.find(row=>row.profileId===engine.plan(id).profileId),manifest:this.f.manifest(engine.plan(id).profileId)};}
+ async inspectCurrentAccount(){throw Error('Automatic listing must not inspect account identity');}
+ async inspectInitialAccount(){throw Error('Automatic listing must not read a username, menu or Profil');}
+ async readPublicationInput(engine,id,signal,guard,sessionAuthority){guard();await this.stage('publication-input');assert.deepEqual(sessionAuthority,{kind:'environment-session',profileId:engine.plan(id).profileId});return {plan:engine.plan(id),product:{id:engine.plan(id).productId,sku:engine.plan(id).sku,stock:2},claim:engine.db.claims.find(row=>row.profileId===engine.plan(id).profileId),expectedAccount:sessionAuthority,manifest:this.f.manifest(engine.plan(id).profileId)};}
  async submit({engine,input,signal,guard}){
   guard();await this.stage('submit',{profileId:input.plan.profileId});const at=new Date().toISOString(),{plan,claim,expectedAccount}=input,profileId=plan.profileId,documentKey='form-document',tab=this.f.tabs.get(profileId);
-  const evidence={profileId,tabId:tab.id,documentKey,url:FORM_URL,observedAt:at,challenge:false,account:{...expectedAccount,verified:true},form:{documentKey,complete:true,invalidFields:[],unknownFields:[],fields:Object.entries({...plan.listing,priceCents:plan.listingPriceCents}).map(([field,value])=>({field,value,verified:true}))},photos:{documentKey,profileId,productId:plan.productId,claimId:claim.id,setId:claim.setId,count:1,signature:'a'.repeat(64),verified:true,busy:false,errorCount:0},publication:{documentKey,count:1,observed:true,label:'Ajouter',enabled:true}};
+  const evidence={profileId,tabId:tab.id,documentKey,url:FORM_URL,observedAt:at,challenge:false,account:{...expectedAccount},form:{documentKey,complete:true,invalidFields:[],unknownFields:[],fields:Object.entries({...plan.listing,priceCents:plan.listingPriceCents}).map(([field,value])=>({field,value,verified:true}))},photos:{documentKey,profileId,productId:plan.productId,claimId:claim.id,setId:claim.setId,count:1,signature:'a'.repeat(64),verified:true,busy:false,errorCount:0},publication:{documentKey,count:1,observed:true,label:'Ajouter',enabled:true}};
   const proof=buildPublicationProof({...input,evidence}),journal=this.journal(engine),record=await journal.prepare(proof);
   await journal.dispatchOnce(record.id,proof,async()=>{this.f.clicks++;},{signal});
   const candidate={kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:documentKey,profileId,tabId:tab.id,listingId:profileId==='profile-1'?'98765':'98766',url:'https://www.vinted.fr/items/'+(profileId==='profile-1'?'98765':'98766'),observedAt:new Date().toISOString(),event:'did-navigate',committed:true};
@@ -38,20 +37,20 @@ class FixtureRuntime extends VintedSalesRuntime {
  }
  async collectReceipt({record,expectedAccount},{signal,withEvidence}){
   await this.stage('receipt',{record});if(this.f.receiptResult)return this.f.receiptResult;
-  const facts=record.proof.facts,listingId=record.navigation[0].listingId,evidence={verified:true,mappingVerified:true,publicationStatus:'published',observedAt:new Date().toISOString(),profileId:facts.profileId,account:{...expectedAccount,verified:true},seller:{...expectedAccount,verified:true},ownedByCurrentAccount:true,listingId,url:'https://www.vinted.fr/items/'+listingId,priceKind:'item',priceCents:facts.fields.priceCents,currency:'EUR',title:facts.fields.title,photos:{verified:true,count:1,signature:'a'.repeat(64)},...this.f.receiptPatch};
+  const facts=record.proof.facts,listingId=record.navigation[0].listingId,evidence={verified:true,mappingVerified:true,publicationStatus:'published',observedAt:new Date().toISOString(),profileId:facts.profileId,account:{...expectedAccount},ownedByCurrentAccount:true,listingId,url:'https://www.vinted.fr/items/'+listingId,priceKind:'item',priceCents:facts.fields.priceCents,currency:'EUR',title:facts.fields.title,photos:{verified:true,count:1,signature:'a'.repeat(64)},...this.f.receiptPatch};
   const guard=()=>{if(signal.aborted)throw failure('STOPPED');};return withEvidence({evidence,binding:{tabId:this.f.tabs.get(facts.profileId).id}},guard);
  }
 }
 
 function fixture(options={}){
- const f={calls:[],hooks:options.hooks||{},clicks:0,urls:new Map(),tabs:new Map(),windows:new Map(),knownAccounts:new Map(),initialAccountPatch:options.initialAccountPatch||{},catalog:{complete:true,duplicate:false,...options.catalog},draft:options.draft||{missing:[],unresolved:[]},upload:{verified:true,uncertain:false,...options.upload},navigation:options.navigation===undefined?{}:options.navigation,accountPatch:options.accountPatch||{},receiptPatch:options.receiptPatch||{},receiptResult:options.receiptResult,writes:[],events:[]};
+ const f={calls:[],hooks:options.hooks||{},clicks:0,urls:new Map(),tabs:new Map(),windows:new Map(),knownAccounts:new Map(),draft:options.draft||{missing:[],unresolved:[]},upload:{verified:true,uncertain:false,...options.upload},navigation:options.navigation===undefined?{}:options.navigation,receiptPatch:options.receiptPatch||{},receiptResult:options.receiptResult,writes:[],events:[]};
  const engine={db:{version:1,plans:[],jobs:[],claims:[],sales:[],marketAccounts:[],publications:{version:1,submissions:[]},publicationSupplierSync:[]},active:new Map(),leases:new ProfileOperationLeases(),accountObservations:new Map(),configPending:0,faulted:false,closing:false,persist(){f.writes.push(clone(this.db));},emit(){},event(kind,text){f.events.push({kind,text});},plan(id){const row=this.db.plans.find(row=>row.id===id);if(!row)throw Error('No fixture plan');return row;},client(){throw Error('Procurement and supplier access are forbidden in browser fixtures');}};f.engine=engine;
- engine.validateMarketAccount=CommerceEngine.prototype.validateMarketAccount;engine.bindJobAccount=CommerceEngine.prototype.bindJobAccount;
+ engine.bindJobAccount=()=>{throw Error('Automatic listing must not bind an account');};
  f.add=(index=1)=>{
   const profileId='profile-'+index,planId='plan-'+index,jobId='job-'+index,memberId=String(100+index),at=new Date().toISOString(),plan={id:planId,profileId,productId:'product-'+index,sku:'FIXTURE-'+index,enabled:true,completedCount:0,targetCount:2,activeListingId:null,status:'ready',currency:'EUR',listingPriceCents:500,minOfferCents:400,reuseOwnPhotos:true,listing:{title:'Fixture accessory '+index,description:'Fixture description.',categoryPath:['Maison','Accessoires'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'}};
   const job={id:jobId,type:'listing',planId,profileId,productId:plan.productId,dedupeKey:'listing:'+planId+':0',payload:{cycle:0},state:'running',step:'pending',operation:null,mutationPending:false,result:null,createdAt:at,updatedAt:at},controller=new AbortController();
-  engine.db.plans.push(plan);engine.db.jobs.push(job);engine.db.marketAccounts.push({profileId,memberId,profileURL:'https://www.vinted.fr/member/'+memberId,username:'fixture_'+index});engine.db.claims.push({id:'claim-'+index,setId:'set-'+index,profileId,productId:plan.productId,images:[{id:'image-'+index}],listings:[]});
-  f.knownAccounts.set(profileId,clone(engine.db.marketAccounts.at(-1)));
+  engine.db.plans.push(plan);engine.db.jobs.push(job);engine.db.claims.push({id:'claim-'+index,setId:'set-'+index,profileId,productId:plan.productId,images:[{id:'image-'+index}],listings:[]});
+  f.knownAccounts.set(profileId,{profileId,memberId,profileURL:'https://www.vinted.fr/member/'+memberId,username:'fixture_'+index});
   const lease=engine.leases.acquire(profileId,jobId);engine.active.set(profileId,controller);f.urls.set(profileId,'https://www.vinted.fr');const tab={id:'tab-'+index,view:{webContents:{isDestroyed:()=>false,getURL:()=>f.urls.get(profileId)}}},window={tabs:[tab],activeTab:tab.id,isDestroyed:()=>false,aiAgent:{state:{running:false}},vintedDraftController:null};f.tabs.set(profileId,tab);f.windows.set(profileId,window);
   return {engine,job,plan,signal:controller.signal,controller,lease};
  };
@@ -60,7 +59,7 @@ function fixture(options={}){
 }
 
 test('sales runtime only enables implemented listing and emits no synthetic sales or procurement events',async()=>{
- const f=fixture(),state=f.runtime.readiness();assert.equal(state.salesOnly,true);assert.equal(state.capabilities.publish,true);for(const key of ['messages','offers','saleConfirmation','shippingLabel','procurement'])assert.equal(state.capabilities[key],false);assert.deepEqual(await f.runtime.poll(),[]);f.runtime.validateImage=null;assert.equal(f.runtime.readiness().capabilities.publish,false);
+ const f=fixture(),state=f.runtime.readiness();assert.equal(state.salesOnly,true);assert.equal(state.capabilities.publish,true);assert.equal(state.capabilities.sessionListing,true);assert.equal(state.capabilities.autoBindAccount,undefined);for(const key of ['messages','offers','saleConfirmation','shippingLabel','procurement'])assert.equal(state.capabilities[key],false);assert.deepEqual(await f.runtime.poll(),[]);f.runtime.validateImage=null;assert.equal(f.runtime.readiness().capabilities.publish,false);assert.equal(f.runtime.readiness().capabilities.sessionListing,false);
 });
 
 test('listing execution needs its exact live controller, unique task and matching profile lease',async()=>{
@@ -68,17 +67,20 @@ test('listing execution needs its exact live controller, unique task and matchin
  for(const change of changes){const f=fixture();change(f);await assert.rejects(f.run(),{code:'STOPPED'},String(change));assert.equal(f.calls.length,0);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);}
 });
 
-test('conflicting prior account identity releases the global UI owner before any page opens',async()=>{
- const f=fixture();f.engine.db.marketAccounts.push({...f.engine.db.marketAccounts[0],profileId:'other-profile'});await assert.rejects(f.run(),{code:'ACCOUNT_CONFLICT'});assert.equal(f.runtime.uiOwner,null);assert.equal(f.calls.length,0);
+test('old conflicting account metadata neither blocks session listing nor becomes its authority',async()=>{
+ const f=fixture();f.engine.db.marketAccounts=[{...f.knownAccounts.get('profile-1')},{...f.knownAccounts.get('profile-1'),profileId:'other-profile'},{profileId:'profile-1',memberId:'999',username:'old_other'}];f.context.job.accountMemberId='777';const before=clone(f.engine.db.marketAccounts);
+ await f.run();assert.equal(f.clicks,1);assert.deepEqual(f.engine.db.marketAccounts,before);assert.equal(f.engine.db.jobs[0].accountMemberId,'777');assert.deepEqual(f.engine.db.jobs[0].publicationAccount,{kind:'environment-session',profileId:'profile-1'});assert.deepEqual(f.engine.db.publications.submissions[0].proof.facts.account,{kind:'environment-session',profileId:'profile-1'});assert.equal(f.runtime.uiOwner,null);
 });
 
-test('a first listing reads native identity and durably binds the original job before claiming photos',async()=>{
- const f=fixture({hooks:{photos:async f=>{const durable=f.writes.at(-1);assert.equal(durable.jobs[0].accountMemberId,'101');assert.equal(durable.marketAccounts[0].memberId,'101');}}});f.engine.db.marketAccounts=[];
- await f.run();assert.equal(f.clicks,1);assert.equal(f.context.job.accountMemberId,'101');assert.equal(f.engine.db.marketAccounts[0].memberId,'101');assert.equal(f.calls.filter(row=>row.role==='identity').length,1);assert.ok(f.calls.findIndex(row=>row.name==='identity')<f.calls.findIndex(row=>row.name==='photos'));
+test('first listing runs without a name or binding and prepares form fields before claiming photos',async()=>{
+ const f=fixture({hooks:{photos:async f=>{const durable=f.writes.at(-1);assert.equal(durable.jobs[0].accountMemberId,undefined);assert.deepEqual(durable.marketAccounts,[]);assert.equal(f.calls.some(row=>row.name==='fields'),true);}}});f.knownAccounts.clear();
+ f.runtime.account=()=>{throw Error('Must not require bound member identity');};f.runtime.accountReader=()=>{throw Error('Must not construct account menu reader');};f.runtime.read=async()=>{throw Error('Must not inspect account menu or Profil');};
+ await f.run();assert.equal(f.clicks,1);assert.equal(f.context.job.accountMemberId,undefined);assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(f.engine.accountObservations.size,0);assert.deepEqual(f.calls.filter(row=>row.name==='open').map(row=>({url:row.url,role:row.role})),[{url:FORM_URL,role:'listing'}]);assert.ok(f.calls.findIndex(row=>row.name==='fields')<f.calls.findIndex(row=>row.name==='photos'));assert.ok(f.calls.findIndex(row=>row.name==='photos')<f.calls.findIndex(row=>row.name==='upload'));assert.equal(f.calls.some(row=>['identity','account','catalog'].includes(row.name)),false);
 });
 
-test('unverified or changed initial identity cannot bind or claim photos',async()=>{
- for(const initialAccountPatch of [{verified:false},{memberId:'999',profileURL:'https://www.vinted.fr/member/999'}]){const f=fixture({initialAccountPatch});f.engine.db.marketAccounts=[];f.context.job.accountMemberId='101';await assert.rejects(f.run());assert.equal(f.engine.db.marketAccounts.length,0);assert.equal(f.context.job.accountMemberId,'101');assert.equal(f.calls.some(row=>row.name==='photos'),false);assert.equal(f.clicks,0);}
+test('changes to unused old account metadata do not interrupt the selected environment session',async()=>{
+ const f=fixture({hooks:{fields:async f=>{f.engine.db.marketAccounts.push({profileId:'profile-1',memberId:'999',username:'old_metadata'});}}});f.context.job.accountMemberId='101';
+ await f.run();assert.equal(f.clicks,1);assert.deepEqual(f.engine.db.marketAccounts,[{profileId:'profile-1',memberId:'999',username:'old_metadata'}]);assert.equal(f.engine.db.jobs[0].accountMemberId,'101');assert.deepEqual(f.engine.db.jobs[0].publicationAccount,{kind:'environment-session',profileId:'profile-1'});
 });
 
 test('mobile first-owner discovery follows the native candidate link and requires own-profile heading before binding',async()=>{
@@ -86,7 +88,7 @@ test('mobile first-owner discovery follows the native candidate link and require
  f.runtime.read=async()=>({elements:[{tag:'button',label:'Menu ouvert'}]});
  f.runtime.accountReader=()=>({inspectOwnProfileLink:async()=>{calls.push('candidate');return candidate;},clickOwnProfileLink:async(_id,value)=>{assert.equal(value,candidate);calls.push('native-click');f.urls.set('profile-1',candidate.profileHref);return {profileId:'profile-1',tabId:tab.id,url:candidate.profileHref};}});
  f.runtime.inspectCurrentAccount=async(_id,options)=>{calls.push('verified-heading');assert.equal(options.requireOwnProfileHeading,true);assert.equal(options.closeMenu,true);assert.equal(options.expectedAccount,undefined);assert.equal(f.calls.at(-1).role,'identity-ready');return {...account,verified:true};};
- const observed=await VintedSalesRuntime.prototype.inspectInitialAccount.call(f.runtime,'profile-1',{signal:f.context.signal,guard:()=>{},tab});assert.equal(observed.memberId,'101');assert.deepEqual(calls,['candidate','native-click','verified-heading']);assert.equal(f.calls[0].url,candidate.profileHref);assert.equal(f.calls[0].role,'identity-ready');assert.equal(f.engine.db.marketAccounts.length,1);assert.equal(f.context.job.accountMemberId,undefined);
+ const observed=await VintedSalesRuntime.prototype.inspectInitialAccount.call(f.runtime,'profile-1',{signal:f.context.signal,guard:()=>{},tab});assert.equal(observed.memberId,'101');assert.deepEqual(calls,['candidate','native-click','verified-heading']);assert.equal(f.calls[0].url,candidate.profileHref);assert.equal(f.calls[0].role,'identity-ready');assert.equal(f.engine.db.marketAccounts.length,0);assert.equal(f.context.job.accountMemberId,undefined);
 });
 
 test('mobile discovery never promotes a candidate to a binding when its current owner or original tab changes',async()=>{
@@ -111,7 +113,7 @@ test('a native mobile candidate interruption pauses before another tab, photo cl
 });
 
 test('simultaneous different profiles cannot both acquire visible browser control',async()=>{
- const entered=deferred(),release=deferred(),f=fixture({hooks:{catalog:async(_f,{profileId})=>{if(profileId==='profile-1'){entered.resolve();await release.promise;}}}}),second=f.add(2);
+ const entered=deferred(),release=deferred(),f=fixture({hooks:{fields:async(_f,{profileId})=>{if(profileId==='profile-1'){entered.resolve();await release.promise;}}}}),second=f.add(2);
  const first=f.run(),other=f.runtime.executeJob(second).then(()=>null,error=>error);await entered.promise;const blocked=await other;assert.equal(blocked?.code,'WORKSPACE_BUSY');assert.equal(f.calls.some(row=>row.profileId==='profile-2'),false);release.resolve();await first;assert.equal(f.clicks,1);assert.equal(f.runtime.uiOwner,null);
 });
 
@@ -121,17 +123,17 @@ test('verified listing completion preserves the canonical journal projection and
  await assert.rejects(f.run(),{code:'PUBLICATION_EXISTS'});assert.equal(f.clicks,1);
 });
 
-test('incomplete or duplicate catalog evidence stops before photos and form actions',async()=>{
- for(const catalog of [{complete:false,duplicate:false},{complete:true,duplicate:true},{complete:true}]){const f=fixture({catalog});if(!Object.hasOwn(catalog,'duplicate'))delete f.catalog.duplicate;await assert.rejects(f.run());assert.equal(f.calls.some(row=>row.name==='photos'),false);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);}
+test('login or challenge encountered on the listing form stops before claiming or uploading photos',async()=>{
+ for(const code of ['LOGIN_REQUIRED','CHALLENGE']){const f=fixture({hooks:{fields:async()=>{throw failure(code);}}});await assert.rejects(f.run(),{code});assert.deepEqual(f.calls.filter(row=>row.name==='open').map(row=>row.role),['listing']);assert.equal(f.calls.some(row=>['photos','upload','submit'].includes(row.name)),false);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);}
 });
 
-test('stopping, plan changes and changed account or tab after photo preparation cannot reach publication',async()=>{
- const changes=[f=>f.context.controller.abort(),f=>f.engine.db.plans[0].listing.title='Changed product',f=>{Object.assign(f.engine.db.marketAccounts[0],{memberId:'999',profileURL:'https://www.vinted.fr/member/999'});},f=>f.windows.get('profile-1').activeTab='another-tab'];
+test('stopping, plan changes and changed tab after photo preparation cannot reach publication',async()=>{
+ const changes=[f=>f.context.controller.abort(),f=>f.engine.db.plans[0].listing.title='Changed product',f=>f.windows.get('profile-1').activeTab='another-tab'];
  for(const change of changes){const f=fixture({hooks:{photos:async f=>change(f)}});await assert.rejects(f.run());assert.equal(f.calls.some(row=>row.name==='submit'),false);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);}
 });
 
-test('field ambiguity, uncertain photos and a different observed account never authorize a publish click',async()=>{
- const cases=[{draft:{missing:[{field:'size',label:'Taille'}],unresolved:[]}},{upload:{verified:false}},{upload:{uncertain:true}},{accountPatch:{memberId:'999',profileURL:'https://www.vinted.fr/member/999'}}];
+test('field ambiguity and uncertain photos never authorize a publish click',async()=>{
+ const cases=[{draft:{missing:[{field:'size',label:'Taille'}],unresolved:[]}},{draft:{missing:[],unresolved:[{field:'categoryPath',label:'Catégorie'}]}},{upload:{verified:false}},{upload:{uncertain:true}}];
  for(const options of cases){const f=fixture(options);await assert.rejects(f.run());assert.equal(f.clicks,0);assert.equal(f.calls.some(row=>row.name==='submit'),false);assert.equal(f.runtime.uiOwner,null);}
 });
 
@@ -178,7 +180,7 @@ test('maintenance guard refuses an outbox mutation after its exact supplier leas
  await f.runtime.maintenance({engine:f.engine,signal:controller.signal});assert.equal(mutation,false);assert.equal(f.engine.active.size,0);assert.equal(f.engine.leases.activeProfileIds().length,0);
 });
 
-test('closed listing profiles open once under the current UI owner before catalog and photo work',async()=>{
+test('closed listing profiles open once under the current UI owner before form and photo work',async()=>{
  const f=fixture(),w=f.windows.get('profile-1');f.windows.delete('profile-1');let opens=0;
  f.runtime.ensureProfile=async(profileId,{guard,signal,jobId})=>{guard();assert.equal(f.runtime.uiOwner.jobId,jobId);assert.equal(signal,f.context.signal);assert.equal(f.context.job.step,'open_environment');assert.equal(f.calls.length,0);opens++;f.windows.set(profileId,w);};
  assert.equal(f.runtime.readiness().capabilities.autoOpenProfile,true);
@@ -197,8 +199,8 @@ test('invalid plan fields cannot trigger automatic profile launch',async()=>{
  }
 });
 
-test('cancelled startup and changed plan or account cannot proceed to catalog or permanent photo claim',async()=>{
- for(const change of [f=>f.context.controller.abort(),f=>f.context.plan.listing.title='Changed during startup',f=>{f.engine.db.marketAccounts[0].memberId='999';f.engine.db.marketAccounts[0].profileURL='https://www.vinted.fr/member/999';}]){
+test('cancelled startup and changed plan cannot proceed to the form or permanent photo claim',async()=>{
+ for(const change of [f=>f.context.controller.abort(),f=>f.context.plan.listing.title='Changed during startup']){
   const f=fixture(),w=f.windows.get('profile-1');f.windows.clear();f.runtime.ensureProfile=async(id,options)=>{options.guard();change(f);f.windows.set(id,w);options.guard();};
   await assert.rejects(f.run());assert.equal(f.calls.length,0);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);
  }
@@ -210,21 +212,21 @@ test('automatic launch holds the global UI owner across asynchronous startup',as
  const first=f.run();await entered.promise;await assert.rejects(f.runtime.executeJob(second),{code:'WORKSPACE_BUSY'});assert.equal(f.calls.length,0);release.resolve();await first;assert.equal(f.clicks,1);assert.equal(f.runtime.uiOwner,null);
 });
 
-test('a closed profile that fails to open never starts catalog or photo work',async()=>{
+test('a closed profile that fails to open never starts form or photo work',async()=>{
  const f=fixture();f.windows.clear();f.runtime.ensureProfile=async()=>{};
  await assert.rejects(f.run(),{code:'PAGE_BUSY'});assert.equal(f.calls.length,0);assert.equal(f.clicks,0);assert.equal(f.runtime.uiOwner,null);
 });
 
 test('an archived withdrawal cannot make a later revision failure look like another uncertain publication',async()=>{
- const f=fixture({hooks:{catalog:async()=>{throw failure('READ_TIMEOUT','Catalog read timed out');}}}),plan=f.context.plan,job=f.context.job;
+ const f=fixture({hooks:{fields:async()=>{throw failure('READ_TIMEOUT','Listing form read timed out');}}}),plan=f.context.plan,job=f.context.job;
  plan.listingRevision=1;job.payload.listingRevision=1;job.dedupeKey='listing:'+plan.id+':0:r1';
  f.engine.db.publications.submissions.push({id:'old-submission',state:'uncertain',attemptCount:1,proof:{facts:{planId:plan.id,cycle:0,listingRevision:0}},closedWithdrawal:{kind:'operator_confirmed_deletion'}});
- await assert.rejects(f.run(),error=>error.code==='READ_TIMEOUT'&&error.ambiguous!==true);assert.equal(f.calls.some(row=>row.name==='catalog'),true);assert.equal(f.calls.some(row=>row.name==='photos'),false);assert.equal(f.clicks,0);
+ await assert.rejects(f.run(),error=>error.code==='READ_TIMEOUT'&&error.ambiguous!==true);assert.equal(f.calls.some(row=>row.name==='fields'),true);assert.equal(f.calls.some(row=>row.name==='photos'),false);assert.equal(f.clicks,0);
 });
 
 test('listing guards bind the saved product source while preserving legacy supplier defaults',async()=>{
- const changed=fixture({hooks:{catalog:async f=>{f.context.plan.source='local';}}});await assert.rejects(changed.run(),{code:'PLAN_CHANGED'});assert.equal(changed.calls.some(row=>row.name==='photos'),false);assert.equal(changed.clicks,0);assert.equal(changed.runtime.uiOwner,null);
- const legacy=fixture({hooks:{catalog:async f=>{f.context.plan.source='supplier';}}});await legacy.run();assert.equal(legacy.clicks,1);assert.equal(legacy.engine.db.jobs[0].state,'completed');
+ const changed=fixture({hooks:{fields:async f=>{f.context.plan.source='local';}}});await assert.rejects(changed.run(),{code:'PLAN_CHANGED'});assert.equal(changed.calls.some(row=>row.name==='photos'),false);assert.equal(changed.clicks,0);assert.equal(changed.runtime.uiOwner,null);
+ const legacy=fixture({hooks:{fields:async f=>{f.context.plan.source='supplier';}}});await legacy.run();assert.equal(legacy.clicks,1);assert.equal(legacy.engine.db.jobs[0].state,'completed');
 });
 
 test('scoped maintenance executes only the matching original publication and leaves other plan outboxes untouched',async()=>{

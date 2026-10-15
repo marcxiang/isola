@@ -11,7 +11,7 @@ const {VintedListingReceipt,listingURL}=require('./vinted-listing-receipt.cjs');
 const {createSupplierOutbox}=require('./commerce-supplier-outbox.cjs');
 const {FORM_URL,listingRevision,isPublicationOpen}=require('./vinted-publication.cjs');
 const {missingListingFields}=require('./listing-config.cjs');
-const {accountExpectation}=require('./commerce-account-binding.cjs');
+const {createEnvironmentSessionAuthority}=require('./commerce-session-authority.cjs');
 const clone=value=>JSON.parse(JSON.stringify(value));
 const fail=(code,message,ambiguous=false)=>Object.assign(Error(message),{code,ambiguous});
 const binding=plan=>JSON.stringify([plan.id,plan.profileId,plan.productId,plan.source||'supplier',plan.sku,plan.enabled,plan.completedCount,listingRevision(plan.listingRevision),plan.targetCount,plan.listingPriceCents,plan.minOfferCents,plan.reuseOwnPhotos,plan.listing]);
@@ -30,7 +30,7 @@ class VintedSalesRuntime extends VintedAdapter {
   this.scope=scope;this.openPage=openPage;this.ensureProfile=ensureProfile;this.validateImage=validateImage;this.uiOwner=null;this.outbox=createSupplierOutbox();this.maintenanceAfter=new Map();
  }
  readiness(){
-  const base=super.readiness(),publish=typeof this.openPage==='function'&&typeof this.validateImage==='function';return {...base,vinted:'partial',salesOnly:true,capabilities:{...base.capabilities,publish,autoBindAccount:publish,autoOpenProfile:publish&&typeof this.ensureProfile==='function',messages:false,offers:false,saleConfirmation:false,shippingLabel:false,procurement:false},message:'启动后台后会自动打开计划对应环境，沿用原登录会话，读取本人身份并保留固定账号绑定，再准备照片、填写商品和单次发布。无需先手动核对账号；登录失效、身份变化或结果不明确会暂停。消息、报价和成交页面仍待真实联调；采购不在此模式中执行。'};
+  const base=super.readiness(),publish=typeof this.openPage==='function'&&typeof this.validateImage==='function';return {...base,vinted:'partial',salesOnly:true,capabilities:{...base.capabilities,publish,sessionListing:publish,autoOpenProfile:publish&&typeof this.ensureProfile==='function',messages:false,offers:false,saleConfirmation:false,shippingLabel:false,procurement:false},message:'开启计划后自动打开指定环境，直接使用该环境当前登录会话进入刊登页、填写商品、上传照片并单次发布。不读取账号菜单、Profil 或用户名，不要求绑定账号；页面要求登录或人工验证时在当前窗口处理。消息、报价和成交页面仍待真实联调；采购不在此模式中执行。'};
  }
  assertOwned({engine,job,signal},expected){
   const rows=engine.db.jobs.filter(row=>row.id===job.id),current=rows[0],plans=engine.db.plans.filter(row=>row.id===job.planId),plan=plans[0];
@@ -81,7 +81,7 @@ class VintedSalesRuntime extends VintedAdapter {
  }
  async prepareJobPhotos(engine,job,signal){return preparePhotosForJob(engine,job,{signal,validateImage:this.validateImage});}
  async trustedManifest(manifest){return createTrustedPhotoManifest(manifest);}
- async readPublicationInput(engine,id,signal,guard){return publicationInput(engine,id,signal,guard);}
+ async readPublicationInput(engine,id,signal,guard,sessionAuthority){return publicationInput(engine,id,signal,guard,{sessionAuthority});}
  async submit(input){return new VintedPublishSubmit({enabled:true}).submit(input);}
  async collectReceipt(input,options){return new VintedListingReceipt(this).collect(input,options);}
  journal(engine){return publicationJournal(engine);}
@@ -91,59 +91,40 @@ class VintedSalesRuntime extends VintedAdapter {
   const {engine,signal}=context,job=clone(context.job),plan=clone(context.plan),expected=binding(plan),profileId=job.profileId,owner={engine,jobId:job.id,profileId,signal};
   this.uiOwner=owner;
   return this.scope.run(owner,async()=>{
-   let submitted=false,ownedTab=null;
+   let submitted=false,ownedTab=null,ownedWindow=null;
    const guard=()=>this.assertOwned({...context,job},expected);
-   let account,initialIdentity;const identityGuard=()=>{
-    guard();const latest=accountExpectation(engine,profileId);
-    if(account){const current=this.account(engine,profileId);if(current.memberId!==account.memberId||current.profileURL!==account.profileURL||latest.memberId!==account.memberId||context.job.accountMemberId!==undefined&&context.job.accountMemberId!==account.memberId)throw fail('ACCOUNT_CHANGED','环境或原任务登录绑定已改变');}
-    else if(latest.memberId!==initialIdentity.memberId)throw fail('ACCOUNT_CHANGED','确认登录期间原账号绑定已改变');
-   };
+   const sessionAuthority=createEnvironmentSessionAuthority(profileId);
    const accountGuard=()=>{
-    identityGuard();
+    guard();
     const w=this.windows.get(profileId);if(!w||w.isDestroyed()||w.aiAgent?.state?.running||w.closingPromise)throw fail('PAGE_BUSY','当前窗口正在被使用，已停止后台操作');
+    if(ownedWindow&&w!==ownedWindow)throw fail('WINDOW_CLOSED','原环境窗口已改变，已停止后续操作');
     if(ownedTab&&(w.activeTab!==ownedTab.id||ownedTab.view.webContents.isDestroyed()))throw fail('TAB_CHANGED','当前标签已切换，保留原页面等待核对');
    };
    const go=async(url,role)=>{accountGuard();ownedTab=null;const opened=await this.openPage(profileId,url,{signal,guard:accountGuard,jobId:job.id,role});ownedTab=opened?.tab;if(!ownedTab)throw fail('PAGE_CHANGED','后台页面没有返回原标签回执');accountGuard();};
    try{
-    initialIdentity=accountExpectation(engine,profileId);account=engine.db.marketAccounts.some(row=>row.profileId===profileId)?this.account(engine,profileId):null;
-    identityGuard();
+    guard();
     if(plan.activeListingId||engine.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&isPublicationOpen(row)))throw fail('PUBLICATION_EXISTS','原商品或提交记录尚未关闭，不能再次刊登');
     const missing=missingListingFields(plan.listing),labels={title:'标题',description:'商品描述',condition:'成色',brand:'品牌',color:'颜色',parcel:'包裹规格',categoryPath:'完整商品分类'};
     if(missing.length)throw fail('LISTING_INCOMPLETE','计划缺少已确认的商品字段：'+missing.map(key=>labels[key]).join('、'));
     if(typeof this.ensureProfile==='function'){
      this.step(context,'open_environment',expected);
-     await this.ensureProfile(profileId,{signal,guard:identityGuard,jobId:job.id});
+     await this.ensureProfile(profileId,{signal,guard,jobId:job.id});
     }
     accountGuard();
-    this.step(context,'check_catalog',expected);
-    if(!account){
-     await go('https://www.vinted.fr/','identity');
-     const observed=await this.inspectInitialAccount(profileId,{signal,guard:accountGuard,tab:ownedTab,expectedAccount:initialIdentity.account,expectedMemberId:initialIdentity.memberId});accountGuard();
-     if(initialIdentity.memberId&&observed.memberId!==initialIdentity.memberId)throw fail('ACCOUNT_CHANGED','当前登录账号与原任务身份不一致');
-     account=engine.bindJobAccount(job.id,observed,{signal,guard});accountGuard();
-    }
-    await go(account.profileURL,'catalog');
-    const ownerAccount=await this.inspectCurrentAccount(profileId,{signal,expectedAccount:account,closeMenu:true});accountGuard();
-    account=engine.bindJobAccount(job.id,ownerAccount,{signal,guard});accountGuard();
-    const catalog=await this.inspectCatalog(profileId,{expectedAccount:account,title:plan.listing.title,signal});accountGuard();
-    if(catalog.complete!==true)throw fail('CATALOG_INCOMPLETE',catalog.reason||'衣橱未完整加载，无法核对是否已有相同商品');
-    if(catalog.duplicate!==false)throw fail('LISTING_EXISTS','该账号衣橱中已有相同标题的商品，已停止重复刊登');
-    this.step(context,'prepare_photos',expected);
-    const photos=await this.prepareJobPhotos(engine,job,signal);accountGuard();
-    if(!photos.summary?.ready||!photos.manifest)throw fail('PHOTO_UNVERIFIED','照片领取、下载或校验尚未完成');
+    ownedWindow=this.windows.get(profileId);
     this.step(context,'prepare_listing',expected);
     await go(FORM_URL,'listing');
     const draft=await this.prepareFields(profileId,{...plan.listing,priceCents:plan.listingPriceCents},{signal});accountGuard();
     const unresolved=[...(draft.missing||[]),...(draft.unresolved||[]).filter(row=>row.field!=='photos')];
-    if(unresolved.length)throw fail('LISTING_INCOMPLETE','网页商品字段未核对完成：'+unresolved.map(row=>row.label||row.field).join('、'));
+    if(unresolved.length)throw fail('LISTING_INCOMPLETE','网页商品字段未完成：'+unresolved.map(row=>(row.label||row.field)+(row.reason?'（'+String(row.reason).slice(0,160)+'）':'')).join('、'));
+    this.step(context,'prepare_photos',expected);
+    const photos=await this.prepareJobPhotos(engine,job,signal);accountGuard();
+    if(!photos.summary?.ready||!photos.manifest)throw fail('PHOTO_UNVERIFIED','照片领取、下载或校验尚未完成');
     this.step(context,'upload_photos',expected);
     const manifest=await this.trustedManifest(photos.manifest);accountGuard();
     const upload=await this.uploadPhotos(profileId,manifest,{signal});accountGuard();
     if(upload?.verified!==true||upload.uncertain!==false||upload.claimId!==photos.manifest.claimId||upload.count!==photos.manifest.count)throw fail('PHOTO_UNVERIFIED','原页面照片上传结果待核对，未重复上传',upload?.uncertain===true);
-    const observed=await this.inspectCurrentAccount(profileId,{signal,expectedAccount:account,closeMenu:true});accountGuard();
-    if(observed.verified!==true||observed.memberId!==account.memberId||observed.profileURL!==account.profileURL)throw fail('ACCOUNT_CHANGED','发布页账号与原绑定不一致');
-    engine.accountObservations.set(profileId,{...observed,profileId,checkedAt:new Date().toISOString()});
-    const input=await this.readPublicationInput(engine,plan.id,signal,accountGuard);accountGuard();
+    const input=await this.readPublicationInput(engine,plan.id,signal,accountGuard,sessionAuthority);accountGuard();
     this.step(context,'publish_listing',expected);
     const result=await this.submit({engine,planId:plan.id,input,signal,guard:accountGuard});submitted=true;accountGuard();
     const journal=this.journal(engine),record=journal.get(result.submissionId),candidate=result.navigationCandidate;
@@ -153,7 +134,7 @@ class VintedSalesRuntime extends VintedAdapter {
     const selected=this.current(profileId,{signal});
     if(selected.tab.id!==candidate.tabId||listingURL(selected.tab.view.webContents.getURL()).listingId!==candidate.listingId)throw fail('PUBLICATION_UNKNOWN_RESULT','发布后页面已改变；原提交保留等待核对',true);
     this.step(context,'verify_listing',expected);
-    const verified=await this.collectReceipt({record,expectedAccount:account},{signal,withEvidence:async({evidence,binding:page},pageGuard)=>{
+    const verified=await this.collectReceipt({record,expectedAccount:sessionAuthority},{signal,withEvidence:async({evidence,binding:page},pageGuard)=>{
      accountGuard();pageGuard();if(page.tabId!==candidate.tabId||evidence.listingId!==candidate.listingId)throw fail('PUBLICATION_UNKNOWN_RESULT','详情页与原提交导航不一致',true);
      return journal.reconcile(record.id,{...evidence,origin:clone(candidate)},{guard:()=>{accountGuard();pageGuard();}});
     }});

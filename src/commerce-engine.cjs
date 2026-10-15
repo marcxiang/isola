@@ -110,7 +110,7 @@ class CommerceEngine{
  }
  marketAccountRecords(){const rows=this.db.marketAccounts.map(row=>({...row}));for(const account of this.accounts?.list()||[]){if(account.identity&&!rows.some(row=>row.profileId===account.profileId&&row.memberId===account.identity.memberId))rows.push({...account.identity,platform:'vinted-fr',profileId:account.profileId});}return rows;}
  queueHealth(){return inspectQueue({runningPlanIds:this.running&&this.runningPlanIds instanceof Set?[...this.runningPlanIds]:null,jobs:this.db.jobs,plans:this.db.plans,sales:this.db.sales,profiles:this.profiles(),accounts:this.marketAccountRecords(),observedAccounts:[...this.accountObservations.values()],requireVerifiedAccount:true,readiness:this.adapter.readiness(),readinessByProfile:Object.fromEntries(this.profiles().map(p=>[p.id,this.adapter.readiness(p.id)])),activeProfileIds:[...this.active.keys()],maxConcurrent:this.db.settings.maxConcurrent,faulted:this.storageFaulted(),closing:this.closing,configBusy:this.configPending>0});}
- state(){const queue=this.queueHealth();return {runningPlanIds:this.running?(this.runningPlanIds instanceof Set?[...this.runningPlanIds]:null):[],accounts:this.accounts?.list()||[],queue,publications:this.db.publications.submissions.map(r=>({id:r.id,planId:r.proof.facts.planId,profileId:r.proof.facts.profileId,productId:r.proof.facts.productId,state:r.state,attemptCount:r.attemptCount,createdAt:r.createdAt,updatedAt:r.updatedAt,reason:r.reason,closedSale:!!r.closedSale,closedWithdrawal:!!r.closedWithdrawal,listingRevision:listingRevision(r.proof.facts.listingRevision),listingUrl:r.receipt?.url||r.navigation?.find(n=>n.committed)?.url||r.closedWithdrawal?.url||null})),settings:{...this.db.settings,hasToken:!!this.db.encryptedToken},connection:this.connection,profiles:this.profiles().map(p=>({id:p.id,name:p.name,status:p.status,fingerprintMode:p.fingerprintMode,operatingSystem:p.operatingSystem,deviceModel:p.deviceModel,windowType:p.windowType==='automation'?'automation':'normal',marketAccount:this.db.marketAccounts.find(a=>a.profileId===p.id)||null})),products:this.catalog(),productListings:this.db.productListings.map(row=>({...clone(row),missingFields:missingListingFields(row.listing)})),photoSets:this.db.photoSets,photoPreparations:this.db.photoPreparations.map(summarizePreparation).concat((this.db.localPhotoPreparations||[]).map(summarizeLocalPreparation)),plans:this.db.plans.map(plan=>({...clone(plan),archived:this.isPlanArchived(plan.id),archivedAt:(this.db.planArchives||[]).find(row=>row.planId===plan.id)?.archivedAt||null,missingFields:missingListingFields(plan.listing),activeListingUrl:this.listingURL(plan)})),jobs:this.db.jobs.map(record=>{const {payload,operation,result,archivedOperation,...job}=record;return {...job,scheduling:queue.jobs.find(row=>row.jobId===job.id)||null,canRetry:this.canRetry(record),result:result?{externalId:result.externalId||result.id||null,summary:result.summary||null}:null};}),events:this.db.events,running:this.running,configBusy:this.configPending>0,readiness:this.adapter.readiness(),faulted:this.storageFaulted()};}
+ state(){const queue=this.queueHealth();return {runningPlanIds:this.running?(this.runningPlanIds instanceof Set?[...this.runningPlanIds]:null):[],accounts:this.accounts?.list()||[],queue,publications:this.db.publications.submissions.map(r=>({id:r.id,planId:r.proof.facts.planId,profileId:r.proof.facts.profileId,productId:r.proof.facts.productId,state:r.state,sessionListing:r.proof.facts.account?.kind==='environment-session',attemptCount:r.attemptCount,createdAt:r.createdAt,updatedAt:r.updatedAt,reason:r.reason,closedSale:!!r.closedSale,closedWithdrawal:!!r.closedWithdrawal,listingRevision:listingRevision(r.proof.facts.listingRevision),listingUrl:r.receipt?.url||r.navigation?.find(n=>n.committed)?.url||r.closedWithdrawal?.url||null})),settings:{...this.db.settings,hasToken:!!this.db.encryptedToken},connection:this.connection,profiles:this.profiles().map(p=>({id:p.id,name:p.name,status:p.status,fingerprintMode:p.fingerprintMode,operatingSystem:p.operatingSystem,deviceModel:p.deviceModel,windowType:p.windowType==='automation'?'automation':'normal',marketAccount:this.db.marketAccounts.find(a=>a.profileId===p.id)||null})),products:this.catalog(),productListings:this.db.productListings.map(row=>({...clone(row),missingFields:missingListingFields(row.listing)})),photoSets:this.db.photoSets,photoPreparations:this.db.photoPreparations.map(summarizePreparation).concat((this.db.localPhotoPreparations||[]).map(summarizeLocalPreparation)),plans:this.db.plans.map(plan=>({...clone(plan),archived:this.isPlanArchived(plan.id),archivedAt:(this.db.planArchives||[]).find(row=>row.planId===plan.id)?.archivedAt||null,missingFields:missingListingFields(plan.listing),activeListingUrl:this.listingURL(plan)})),jobs:this.db.jobs.map(record=>{const {payload,operation,result,archivedOperation,...job}=record;return {...job,scheduling:queue.jobs.find(row=>row.jobId===job.id)||null,canRetry:this.canRetry(record),result:result?{externalId:result.externalId||result.id||null,summary:result.summary||null}:null};}),events:this.db.events,running:this.running,configBusy:this.configPending>0,readiness:this.adapter.readiness(),faulted:this.storageFaulted()};}
  validateMarketAccount(account){
   if(!account||typeof account!=='object'||Array.isArray(account)||typeof account.profileId!=='string'||!account.profileId||account.platform!=='vinted-fr'||typeof account.memberId!=='string'||!/^[1-9]\d{0,24}$/.test(account.memberId)||typeof account.username!=='string'||!account.username.trim()||account.username.length>100||/[\x00-\x1f\x7f]/.test(account.username)||typeof account.verifiedAt!=='string'||!Number.isFinite(Date.parse(account.verifiedAt)))throw Error('平台账号身份记录无效');
   let url;try{url=new URL(account.profileURL);}catch{throw Error('平台账号地址无效');}
@@ -247,9 +247,11 @@ class CommerceEngine{
   if(!['Petit','Moyen','Grand'].includes(plan.listing.parcel))throw problem('LISTING_INCOMPLETE','请按实际包装选择包裹规格 Petit / Moyen / Grand');
   if(!Number.isSafeInteger(products[0].stock)||products[0].stock<1)throw problem('NO_STOCK','货盘库存未知或不足，请同步商品并核对库存后再启用计划');
   const readiness=this.adapter.readiness(plan.profileId),publish=readiness?.capabilities?.listingPublish??readiness?.capabilities?.publish;
-  const expected=accountExpectation(this,plan.profileId),own=this.db.marketAccounts.filter(row=>row.profileId===plan.profileId),account=own[0];
-  if(own.length!==1&&readiness?.capabilities?.autoBindAccount!==true)throw problem('ACCOUNT_NOT_BOUND','当前执行器不能自动确认登录身份，请先确认该环境的 Vinted 登录');
-  if(account){this.validateMarketAccount(account);if(expected.memberId!==account.memberId)throw problem('ACCOUNT_CONFLICT','Vinted 账号绑定冲突，请先核对原账号和环境');}
+  if(readiness?.capabilities?.sessionListing!==true){
+   const expected=accountExpectation(this,plan.profileId),own=this.db.marketAccounts.filter(row=>row.profileId===plan.profileId),account=own[0];
+   if(own.length!==1&&readiness?.capabilities?.autoBindAccount!==true)throw problem('ACCOUNT_NOT_BOUND','当前执行器不能自动确认登录身份，请先确认该环境的 Vinted 登录');
+   if(account){this.validateMarketAccount(account);if(expected.memberId!==account.memberId)throw problem('ACCOUNT_CONFLICT','Vinted 账号绑定冲突，请先核对原账号和环境');}
+  }
   if(publish!==true)throw problem('CAPABILITY_UNVERIFIED','当前版本尚未提供可运行的自动上架流程');
   if(this.db.jobs.some(row=>row.profileId===plan.profileId&&(row.state==='uncertain'||row.mutationPending===true||['queued','running'].includes(row.state)&&(row.operation!=null||row.result!=null)))||this.db.publications.submissions.some(row=>row.proof.facts.profileId===plan.profileId&&row.state==='uncertain'&&isPublicationOpen(row)))throw problem('RECONCILE_REQUIRED','这个账号有结果未知的原操作，请先核对原任务，不能再次上架');
   if(plan.activeListingId||this.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&isPublicationOpen(row)))throw problem('PUBLICATION_EXISTS','这个计划已有在售商品或原提交记录，请核对原刊登，不能重复上架');
@@ -289,7 +291,7 @@ class CommerceEngine{
  isPlanArchived(id){return isPlanArchived(this.db,id);}
  plan(id,{includeArchived=false}={}){const p=this.db.plans.find(p=>p.id===id);if(!p)throw Error('销售计划不存在');if(!includeArchived&&this.isPlanArchived(id))throw archivedPlanError();return p;}
  profileBusy(profileId){return this.active.has(profileId)||this.leases.snapshot().some(row=>row.profileId===profileId);}
- recoverableJob(job,plan,{allowQueued=false}={}){return recoverableJob(job,plan,this.db,{allowQueued})&&(job.type!=='listing'||saleCycleComplete(this.db,plan.id));}
+ recoverableJob(job,plan,{allowQueued=false}={}){return recoverableJob(job,plan,this.db,{allowQueued,sessionListing:job.type==='listing'&&this.adapter.readiness(plan.profileId)?.capabilities?.sessionListing===true})&&(job.type!=='listing'||saleCycleComplete(this.db,plan.id));}
  canRetry(job){
   const plan=job&&this.db.plans.find(p=>p.id===job.planId);return !!plan&&this.recoverableJob(job,plan);
  }
@@ -337,8 +339,10 @@ class CommerceEngine{
   if(this.closing||this.storageFaulted()||this.configPending)throw problem('STOPPED','运营调度当前不可执行');
   if(this.isPlanArchived(job?.planId))throw archivedPlanError();
   if(!this.db.jobs.includes(job)||job.state!=='queued'||job.operation!=null||job.mutationPending!==false||job.result!=null)throw problem('JOB_NOT_RUNNABLE','任务状态不允许重新执行，请先核对原记录');
-  const records=this.marketAccountRecords(),ownAccounts=records.filter(row=>row.profileId===job.profileId);
-  if(ownAccounts.length>1||ownAccounts.some(own=>records.some(row=>row.profileId!==job.profileId&&row.platform===own.platform&&row.memberId===own.memberId)))throw problem('ACCOUNT_CONFLICT','账号绑定记录冲突，已停止该账号的业务操作');
+  if(!(job.type==='listing'&&this.adapter.readiness(job.profileId)?.capabilities?.sessionListing===true)){
+   const records=this.marketAccountRecords(),ownAccounts=records.filter(row=>row.profileId===job.profileId);
+   if(ownAccounts.length>1||ownAccounts.some(own=>records.some(row=>row.profileId!==job.profileId&&row.platform===own.platform&&row.memberId===own.memberId)))throw problem('ACCOUNT_CONFLICT','账号绑定记录冲突，已停止该账号的业务操作');
+  }
   if(this.db.jobs.filter(j=>j.id===job.id).length!==1||typeof job.dedupeKey!=='string'||!job.dedupeKey||this.db.jobs.filter(j=>j.dedupeKey===job.dedupeKey).length!==1)throw problem('DUPLICATE_JOB','任务编号或业务去重编号重复，已停止执行');
   const boundPlan=this.db.plans.find(p=>p.id===job.planId);if(!boundPlan||boundPlan.profileId!==job.profileId||boundPlan.productId!==job.productId||!this.profiles().some(p=>p.id===job.profileId))throw problem('PLAN_MISMATCH','任务与原计划、商品或环境不一致');
   if(job.type==='listing'&&this.db.publications.submissions.some(r=>r.proof.facts.planId===job.planId&&isPublicationOpen(r)))throw problem('PUBLICATION_EXISTS','原刊登提交记录尚未关闭，不能再次执行刊登');
@@ -502,8 +506,10 @@ class CommerceEngine{
     const facts=record.proof.facts,revision=listingRevision(plan.listingRevision);
     if(facts.profileId!==plan.profileId||facts.productId!==plan.productId||facts.sku!==plan.sku||facts.cycle!==plan.completedCount||listingRevision(facts.listingRevision)!==revision||this.profiles().filter(row=>row.id===plan.profileId).length!==1)throw problem('DELETION_PLAN_CHANGED','原提交与当前计划、环境、商品或刊登版本不一致');
     listingRevision(revision+1);
-    const accounts=db.marketAccounts.filter(row=>row.profileId===plan.profileId),account=accounts[0];
-    if(accounts.length!==1||account.memberId!==facts.account.memberId||account.profileURL!==facts.account.profileURL||db.marketAccounts.some(row=>row.profileId!==plan.profileId&&row.memberId===account.memberId)||(this.accounts?.list()||[]).some(row=>row.profileId!==plan.profileId&&row.identity?.memberId===account.memberId||row.profileId===plan.profileId&&row.identity&&(row.identity.memberId!==account.memberId||row.identity.profileURL!==account.profileURL)))throw problem('DELETION_ACCOUNT_CHANGED','删除确认的账号与原刊登绑定不一致');
+    if(!require('./commerce-session-authority.cjs').isEnvironmentSessionAccount(facts.account,plan.profileId)){
+     const accounts=db.marketAccounts.filter(row=>row.profileId===plan.profileId),account=accounts[0];
+     if(accounts.length!==1||account.memberId!==facts.account.memberId||account.profileURL!==facts.account.profileURL||db.marketAccounts.some(row=>row.profileId!==plan.profileId&&row.memberId===account.memberId)||(this.accounts?.list()||[]).some(row=>row.profileId!==plan.profileId&&row.identity?.memberId===account.memberId||row.profileId===plan.profileId&&row.identity&&(row.identity.memberId!==account.memberId||row.identity.profileURL!==account.profileURL)))throw problem('DELETION_ACCOUNT_CHANGED','删除确认的账号与原刊登绑定不一致');
+    }
     const known=[record.receipt,...(record.navigation||[])].filter(Boolean);
     for(const row of known){const parsed=parseListingURL(row.url);if(parsed.listingId!==identity.listingId||row.listingId!==identity.listingId||row.profileId!==undefined&&row.profileId!==plan.profileId)throw problem('DELETION_LISTING_CONFLICT','填写商品与原刊登或导航回执不一致');}
     if(plan.activeListingId&&plan.activeListingId!==identity.listingId||db.plans.some(row=>row.id!==id&&row.activeListingId===identity.listingId))throw problem('DELETION_LISTING_CONFLICT','原在售商品编号与删除确认不一致');
@@ -515,7 +521,8 @@ class CommerceEngine{
     return {plan,record,revision,job,key,nextKey};
    };
    const current=inspect(this.db),signature=fingerprint({plan:current.plan,record:current.record,job:current.job||null});
-   const evidence={kind:'operator_confirmed_deletion',confirmed:true,reason:'deleted_not_sold',reviewId:randomUUID(),profileId:current.plan.profileId,memberId:current.record.proof.facts.account.memberId,listingId:identity.listingId,url:identity.url,confirmedAt:now()};
+   const originalAccount=current.record.proof.facts.account,sessionAccount=require('./commerce-session-authority.cjs').isEnvironmentSessionAccount(originalAccount,current.plan.profileId);
+   const evidence={kind:'operator_confirmed_deletion',confirmed:true,reason:'deleted_not_sold',reviewId:randomUUID(),profileId:current.plan.profileId,...(sessionAccount?{account:clone(originalAccount)}:{memberId:originalAccount.memberId}),listingId:identity.listingId,url:identity.url,confirmedAt:now()};
    const {commitPublicationDeletion}=require('./vinted-publish-submit.cjs');
    await commitPublicationDeletion(this,submissionId,evidence,(before,publications)=>{
     const fresh=inspect(before);if(signature!==fingerprint({plan:fresh.plan,record:fresh.record,job:fresh.job||null}))throw problem('DELETION_PLAN_CHANGED','确认期间原计划、刊登或任务发生变化，已停止');
@@ -554,6 +561,7 @@ class CommerceEngine{
  }
  async poll({signal,generation=this.runGeneration,planIds=this.runningScope()}={}){
   if(!this.running||!this.tickCurrent(generation,signal)||typeof this.adapter.poll!=='function')return;
+  if(this.adapter.readiness()?.salesOnly===true&&this.adapter.readiness()?.capabilities?.sessionListing===true)return;
   const ids=[...new Set(this.db.plans.filter(plan=>plan.enabled&&this.planInScope(plan.id,planIds)).map(plan=>plan.profileId))];
   for(const profileId of ids){
    if(!this.running||!this.tickCurrent(generation,signal))return;

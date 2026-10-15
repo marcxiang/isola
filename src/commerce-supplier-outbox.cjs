@@ -2,6 +2,7 @@
 
 const {createHash}=require('node:crypto');
 const {normalizeBaseURL}=require('./sku-desk.cjs');
+const {isEnvironmentSessionAccount}=require('./commerce-session-authority.cjs');
 function stableJSON(value){if(Array.isArray(value))return '['+value.map(stableJSON).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).sort().filter(key=>value[key]!==undefined).map(key=>JSON.stringify(key)+':'+stableJSON(value[key])).join(',')+'}';return JSON.stringify(value);}
 const clone=value=>JSON.parse(JSON.stringify(value));
 const hash=value=>createHash('sha256').update(stableJSON(value)).digest('hex');
@@ -99,20 +100,29 @@ function binding(engine,id){
  const firstAfterWithdrawal=index>0&&prior.length>0&&prior.every(untouched)&&claim.listings.slice(0,index).every(unusedWithdrawal);
  const reused=index>0&&!firstAfterWithdrawal;
  ensure(identifier(db.supplierAccountId)&&(!claim.supplierAccountId||claim.supplierAccountId===db.supplierAccountId),'照片领取所属货盘账号无法核对');
- const account=one(db.marketAccounts,item=>item.profileId===row.profileId,'原环境账号绑定缺失或重复');
- ensure(!db.marketAccounts.some(item=>item.profileId!==row.profileId&&item.memberId===account.memberId),'同一平台账号绑定多个环境');
  ensure(!engine.profiles||engine.profiles().some(item=>item.id===row.profileId),'原浏览器环境不存在');
- let plan;
+ let plan,record,facts,account;
  if(row.submissionId){
-  const record=one(db.publications?.submissions,item=>item.id===row.submissionId,'原平台刊登回执缺失或重复'),facts=record.proof?.facts;
+  record=one(db.publications?.submissions,item=>item.id===row.submissionId,'原平台刊登回执缺失或重复');facts=record.proof?.facts;
   ensure(record.state==='published'&&record.attemptCount===1&&record.receipt?.listingId===row.payload.listingId&&validURL(record.receipt?.url,row.payload.listingId),'原平台刊登尚未核对');
-  ensure(facts?.profileId===row.profileId&&facts.productId===row.productId&&facts.photos?.claimId===row.claimId&&facts.photos?.setId===claim.setId&&facts.account?.memberId===account.memberId&&facts.account?.profileURL===account.profileURL,'原平台刊登的账号、商品或照片绑定已改变');
+  ensure(facts?.profileId===row.profileId&&facts.productId===row.productId&&facts.photos?.claimId===row.claimId&&facts.photos?.setId===claim.setId,'原平台刊登的环境、商品或照片绑定已改变');
   plan=one(db.plans,item=>item.id===facts.planId,'原销售计划缺失或重复');
   ensure(plan.profileId===row.profileId&&plan.productId===row.productId&&plan.sku===facts.sku,'原销售计划绑定已改变');
  }
+ const sessionScoped=isEnvironmentSessionAccount(facts?.account,row.profileId);
+ ensure(facts?.account?.kind!=='environment-session'||sessionScoped,'原平台刊登的环境会话权限格式无效');
+ if(sessionScoped){
+  // A published session receipt is attached to the original environment,
+  // item and photos. It does not require or establish a member-ID binding.
+  ensure(record.receipt?.verified===true&&record.receipt.profileId===row.profileId&&isEnvironmentSessionAccount(record.receipt.account,row.profileId)&&same(record.receipt.account,facts.account)&&record.receipt.memberId===undefined,'原平台刊登的环境会话回执已改变');
+ }else{
+  account=one(db.marketAccounts,item=>item.profileId===row.profileId,'原环境账号绑定缺失或重复');
+  ensure(!db.marketAccounts.some(item=>item.profileId!==row.profileId&&item.memberId===account.memberId),'同一平台账号绑定多个环境');
+  if(facts)ensure(facts.account?.memberId===account.memberId&&facts.account?.profileURL===account.profileURL,'原平台刊登的账号绑定已改变');
+ }
  const request={baseURL:normalizeBaseURL(db.settings.baseURL),supplierAccountId:db.supplierAccountId,claimId:row.claimId,payload:clone(row.payload)};
  if(row.operation)ensure(same(row.operation.request,request),'原货盘请求的地址或账号已改变');
- return {row,plan,reused,expected:{claimId:claim.id,setId:claim.setId,productId:claim.productId,payload:clone(row.payload)},request,signature:hash({request,setId:claim.setId,profileId:row.profileId,submissionId:row.submissionId,memberId:account.memberId,profileURL:account.profileURL,planId:plan?.id||null,reused,...(firstAfterWithdrawal?{withdrawnHistory:prior}:{} )})};
+ return {row,plan,reused,expected:{claimId:claim.id,setId:claim.setId,productId:claim.productId,payload:clone(row.payload)},request,signature:hash({request,setId:claim.setId,profileId:row.profileId,submissionId:row.submissionId,...(sessionScoped?{account:clone(facts.account)}:{memberId:account.memberId,profileURL:account.profileURL}),planId:plan?.id||null,reused,...(firstAfterWithdrawal?{withdrawnHistory:prior}:{} )})};
 }
 
 function createSupplierOutbox({now=Date.now,timeoutMs=30000}={}){

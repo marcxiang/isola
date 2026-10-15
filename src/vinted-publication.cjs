@@ -1,6 +1,7 @@
 'use strict';
 
 const {createHash,randomUUID}=require('node:crypto');
+const {isEnvironmentSessionAccount,assertEnvironmentSessionAuthority}=require('./commerce-session-authority.cjs');
 
 const ORIGIN='https://www.vinted.fr',FORM_URL=ORIGIN+'/items/new';
 const VERSION=1,MAX_PROOF_AGE_MS=15000,MAX_RECEIPT_AGE_MS=30000;
@@ -33,7 +34,12 @@ function boundedDispatch(dispatch,intent,{signal,timeoutMs}){
 }
 function frenchURL(value){let url;try{url=new URL(value);}catch{fail('PUBLICATION_INVALID','Vinted 地址无效');}if(url.origin!==ORIGIN||url.username||url.password||url.search||url.hash)fail('PUBLICATION_INVALID','只能核对无额外参数的法国 Vinted 地址');return url;}
 function account(value,profileId,{verified=false}={}){
+ if(value?.kind==='environment-session'){
+  if(!isEnvironmentSessionAccount(value,profileId))fail('PUBLICATION_INVALID','环境会话刊登绑定无效');
+  return {kind:'environment-session',profileId};
+ }
  object(value,'账号');if(verified&&value.verified!==true)fail('PUBLICATION_ACCOUNT_UNVERIFIED','当前登录账号尚未验证');
+ if(value.kind!==undefined)fail('PUBLICATION_INVALID','未知刊登账号绑定类型');
  exact(value.profileId,profileId,'账号所属环境');const memberId=string(value.memberId,'会员编号',30);
  if(!/^[1-9]\d{0,29}$/.test(memberId))fail('PUBLICATION_INVALID','会员编号格式无效');
  const url=frenchURL(value.profileURL),match=url.pathname.match(/^\/member\/([1-9]\d{0,29})(?:-[^/]+)?\/?$/);
@@ -41,6 +47,7 @@ function account(value,profileId,{verified=false}={}){
  // A canonical member identity avoids treating a changed display name as a different account.
  return {profileId,memberId,profileURL:ORIGIN+'/member/'+memberId};
 }
+function samePublicationOwner(a,b){return a.profileId===b.profileId||!isEnvironmentSessionAccount(a)&&!isEnvironmentSessionAccount(b)&&a.memberId===b.memberId;}
 function listingFields(plan){
  const listing=object(plan.listing,'刊登内容'),fields={};
  for(const key of ['title','description','condition','brand','color','parcel'])fields[key]=string(listing[key],key,key==='description'?5000:key==='title'?100:180,key==='description');
@@ -63,7 +70,8 @@ function buildPublicationProof({plan,product,claim,expectedAccount,evidence},{no
  if(cycle>=target)fail('PUBLICATION_PLAN_BLOCKED','累计销售目标已达到');
  if(plan.currency!=='EUR')fail('PUBLICATION_MISMATCH','法国站刊登币种必须是 EUR');
  exact(product.id,productId,'货盘商品');exact(product.sku,sku,'货盘 SKU');integer(product.stock,'可售库存',1);
- const expected=account(expectedAccount,profileId),observed=account(evidence.account,profileId,{verified:true});exact(observed,expected,'当前登录账号');
+ if(isEnvironmentSessionAccount(expectedAccount,profileId))assertEnvironmentSessionAuthority(expectedAccount,profileId);
+ const expected=account(expectedAccount,profileId),observed=account(evidence.account,profileId,{verified:true});exact(observed,expected,'刊登所属环境会话');
  exact(evidence.profileId,profileId,'当前环境');if(evidence.url!==FORM_URL)fail('PUBLICATION_PAGE_CHANGED','只能从法国站全新商品页发布');
  const documentKey=string(evidence.documentKey,'商品页面编号'),tabId=string(evidence.tabId,'标签编号');
  fresh(evidence.observedAt,now,MAX_PROOF_AGE_MS);
@@ -124,11 +132,15 @@ function validatePublicationReceipt(record,evidence,{now=Date.now(),freshness=tr
  if(Date.parse(evidence.observedAt)<Date.parse(record.submittedAt))fail('PUBLICATION_RECEIPT_INVALID','刊登结果早于本次提交');
  exact(evidence.profileId,facts.profileId,'结果所属环境');
  const current=account(evidence.account,facts.profileId,{verified:true});exact(current,facts.account,'结果页面登录账号');
- const seller=account(evidence.seller,facts.profileId,{verified:true});exact(seller,facts.account,'实际卖家');
+ if(!isEnvironmentSessionAccount(facts.account,facts.profileId)){const seller=account(evidence.seller,facts.profileId,{verified:true});exact(seller,facts.account,'实际卖家');}
  if(evidence.ownedByCurrentAccount!==true)fail('PUBLICATION_RECEIPT_UNVERIFIED','尚未确认刊登属于当前账号');
  const identity=listingIdentity(evidence.listingId,evidence.url),origin=object(evidence.origin,'原提交归属');
  const reviewed=origin.kind==='operator_reviewed_listing';
  if((origin.kind!=='observed_submission_navigation'&&!reviewed)||origin.submissionId!==record.id||origin.formDocumentKey!==facts.documentKey)fail('PUBLICATION_RECEIPT_UNATTRIBUTED','此刊登尚未与原提交建立可验证关联');
+ if(isEnvironmentSessionAccount(facts.account,facts.profileId)&&!reviewed){
+  const captured=(record.navigation||[]).find(row=>row.kind==='observed_submission_navigation'&&row.committed===true&&row.submissionId===record.id&&row.profileId===facts.profileId&&row.tabId===facts.tabId&&row.formDocumentKey===facts.documentKey&&row.listingId===identity.listingId&&row.url===identity.url&&digest(row)===digest(origin));
+  if(!captured)fail('PUBLICATION_RECEIPT_UNATTRIBUTED','环境会话刊登缺少原提交已持久保存的同标签跳转回执；不会重复发布');
+ }
  if(reviewed){
   if(!reviewedOrigins.has(origin))fail('PUBLICATION_RECEIPT_UNATTRIBUTED','操作员关联必须来自主进程的一次性核对');
   string(origin.reviewId,'核对编号');string(origin.listingDocumentKey,'详情页面编号');string(origin.tabId,'详情标签编号');
@@ -137,7 +149,7 @@ function validatePublicationReceipt(record,evidence,{now=Date.now(),freshness=tr
  if(evidence.priceKind!=='item'||evidence.priceCents!==facts.fields.priceCents||evidence.currency!==facts.currency)fail('PUBLICATION_RECEIPT_INVALID','实际单品售价或币种与计划不一致');
  exact(evidence.title,facts.fields.title,'实际刊登标题');
  if(evidence.photos?.verified!==true||evidence.photos?.count!==facts.photos.count||evidence.photos?.signature!==facts.photos.signature)fail('PUBLICATION_RECEIPT_INVALID','实际刊登照片与本次上传不一致');
- return {...identity,verified:true,profileId:facts.profileId,memberId:facts.account.memberId,priceCents:facts.fields.priceCents,currency:facts.currency,title:facts.fields.title,imageCount:facts.photos.count,photoSignature:facts.photos.signature,observedAt:evidence.observedAt,...(reviewed?{origin:clone(origin)}:{})};
+ return {...identity,verified:true,profileId:facts.profileId,...(isEnvironmentSessionAccount(facts.account,facts.profileId)?{account:clone(facts.account)}:{memberId:facts.account.memberId}),priceCents:facts.fields.priceCents,currency:facts.currency,title:facts.fields.title,imageCount:facts.photos.count,photoSignature:facts.photos.signature,observedAt:evidence.observedAt,...(reviewed?{origin:clone(origin)}:{})};
 }
 
 // Main-only: called after consuming a review capability and re-reading the same
@@ -149,6 +161,7 @@ function operatorReviewedEvidence(record,evidence,{reviewId,documentKey,tabId},n
 
 function validateSaleClosure(record,evidence,{now=Date.now(),freshness=true}={}){
  object(evidence,'成交回执');const facts=record.proof.facts;
+ if(isEnvironmentSessionAccount(facts.account,facts.profileId))fail('PUBLICATION_SALE_UNVERIFIED','环境会话刊登没有会员成交核验，不会自动记为成交');
  if(record.closedWithdrawal)fail('PUBLICATION_WITHDRAWN','原刊登已经确认删除，不能计为成交');
  if(record.state!=='published'||!record.receipt||evidence.verified!==true||evidence.paid!==true||evidence.cancelled!==false||evidence.quantity!==1)fail('PUBLICATION_SALE_UNVERIFIED','只有已经核对的单件已付款成交才能解除在售占用');
  if(freshness)fresh(evidence.observedAt,now,MAX_RECEIPT_AGE_MS);else timestamp(evidence.observedAt,'成交回执');
@@ -166,18 +179,20 @@ function validateDeletionClosure(record,evidence,{now=Date.now(),freshness=true}
  if(evidence.kind!=='operator_confirmed_deletion'||evidence.confirmed!==true||evidence.reason!=='deleted_not_sold'||evidence.verified!==undefined||evidence.webVerified!==undefined)fail('PUBLICATION_DELETION_INVALID','必须明确确认原刊登已删除且并未售出');
  const reviewId=string(evidence.reviewId,'删除确认编号'),confirmed=timestamp(evidence.confirmedAt,'删除确认'),submitted=timestamp(record.submittedAt,'刊登提交');
  if(confirmed<submitted||(freshness&&confirmed>now))fail('PUBLICATION_DELETION_INVALID','删除确认时间早于原提交或晚于当前时间');
- if(evidence.profileId!==facts.profileId||evidence.memberId!==facts.account.memberId)fail('PUBLICATION_DELETION_INVALID','删除确认不属于原环境或会员');
+ if(evidence.profileId!==facts.profileId)fail('PUBLICATION_DELETION_INVALID','删除确认不属于原环境');
+ if(isEnvironmentSessionAccount(facts.account,facts.profileId)){exact(evidence.account,facts.account,'删除确认的原环境会话');if(evidence.memberId!==undefined)fail('PUBLICATION_DELETION_INVALID','环境会话删除确认不能虚构会员编号');}
+ else if(evidence.memberId!==facts.account.memberId)fail('PUBLICATION_DELETION_INVALID','删除确认不属于原会员');
  const identity=listingIdentity(evidence.listingId,evidence.url);
  if(record.receipt&&record.receipt.listingId!==identity.listingId)fail('PUBLICATION_DELETION_INVALID','删除确认与原刊登回执不一致');
  const candidates=[...new Set((record.navigation||[]).filter(row=>row.committed===true).map(row=>row.listingId).filter(Boolean))];
  if(!record.receipt&&candidates.length&&!(candidates.length===1&&candidates[0]===identity.listingId))fail('PUBLICATION_DELETION_INVALID','删除确认与原提交跳转记录不一致');
- return {kind:'operator_confirmed_deletion',confirmed:true,reason:'deleted_not_sold',reviewId,profileId:facts.profileId,memberId:facts.account.memberId,...identity,confirmedAt:evidence.confirmedAt};
+ return {kind:'operator_confirmed_deletion',confirmed:true,reason:'deleted_not_sold',reviewId,profileId:facts.profileId,...(isEnvironmentSessionAccount(facts.account,facts.profileId)?{account:clone(facts.account)}:{memberId:facts.account.memberId}),...identity,confirmedAt:evidence.confirmedAt};
 }
 
 function restorePublicationState(input,{now=Date.now()}={}){
  const state=input===undefined?{version:VERSION,submissions:[]}:clone(object(input,'发布记录'));
  if(state.version!==VERSION||!Array.isArray(state.submissions)||state.submissions.length>100000)fail('PUBLICATION_CORRUPT','发布记录格式无效，不能自动重建刊登');
- const ids=new Set(),cycles=new Set(),occupancies=new Set(),orders=new Set(),withdrawals=new Set();let recovered=false;
+ const ids=new Set(),cycles=new Set(),occupancies=[],orders=new Set(),withdrawals=new Set();let recovered=false;
  for(const record of state.submissions){
   object(record,'提交记录');string(record.id,'提交编号');if(ids.has(record.id))fail('PUBLICATION_CORRUPT','重复的刊登提交编号');ids.add(record.id);
   validProof(record.proof,{freshness:false});timestamp(record.createdAt,'提交记录');timestamp(record.updatedAt,'提交更新');
@@ -187,7 +202,8 @@ function restorePublicationState(input,{now=Date.now()}={}){
   if(!attempted&&(record.submittedAt||record.receipt))fail('PUBLICATION_CORRUPT','未提交的刊登存在外部回执');
   if(record.state==='published'){
    const receipt=object(record.receipt,'已发布回执'),facts=record.proof.facts;listingIdentity(receipt.listingId,receipt.url);
-   if(receipt.verified!==true||receipt.profileId!==facts.profileId||receipt.memberId!==facts.account.memberId||receipt.priceCents!==facts.fields.priceCents||receipt.currency!==facts.currency||receipt.title!==facts.fields.title||receipt.imageCount!==facts.photos.count||receipt.photoSignature!==facts.photos.signature)fail('PUBLICATION_CORRUPT','已发布回执与提交记录不一致');
+   const sessionAccount=isEnvironmentSessionAccount(facts.account,facts.profileId),accountMatches=sessionAccount?receipt.memberId===undefined&&isEnvironmentSessionAccount(receipt.account,facts.profileId):receipt.memberId===facts.account.memberId;
+   if(receipt.verified!==true||receipt.profileId!==facts.profileId||!accountMatches||receipt.priceCents!==facts.fields.priceCents||receipt.currency!==facts.currency||receipt.title!==facts.fields.title||receipt.imageCount!==facts.photos.count||receipt.photoSignature!==facts.photos.signature)fail('PUBLICATION_CORRUPT','已发布回执与提交记录不一致');
    if(timestamp(receipt.observedAt,'刊登结果')<Date.parse(record.submittedAt))fail('PUBLICATION_CORRUPT','刊登结果早于本次提交');
    if(receipt.origin){const o=object(receipt.origin,'关联来源');if(o.kind!=='operator_reviewed_listing'||o.submissionId!==record.id||o.formDocumentKey!==facts.documentKey)fail('PUBLICATION_CORRUPT','操作员关联来源无效');for(const key of ['reviewId','listingDocumentKey','tabId'])string(o[key],key);if(timestamp(o.reviewedAt,'关联核对')<Date.parse(record.submittedAt)||Math.abs(Date.parse(o.reviewedAt)-Date.parse(receipt.observedAt))>MAX_RECEIPT_AGE_MS)fail('PUBLICATION_CORRUPT','操作员关联时间无效');}
   }else if(record.receipt)fail('PUBLICATION_CORRUPT','未核对完成的刊登含有完成回执');
@@ -195,7 +211,7 @@ function restorePublicationState(input,{now=Date.now()}={}){
   if(record.closedWithdrawal){const closure=validateDeletionClosure(record,record.closedWithdrawal,{freshness:false});exact(record.closedWithdrawal,closure,'原删除确认');if(withdrawals.has(closure.reviewId))fail('PUBLICATION_CORRUPT','删除确认编号重复关联刊登');withdrawals.add(closure.reviewId);}
   const cycle=digest([record.proof.facts.planId,record.proof.facts.cycle,listingRevision(record.proof.facts.listingRevision)]);
   if(record.state!=='cancelled'){if(cycles.has(cycle))fail('PUBLICATION_CORRUPT','同一销售周期存在多次刊登');cycles.add(cycle);}
-  if(isPublicationOpen(record)){const occupancy=digest([record.proof.facts.account.memberId,record.proof.facts.sku]);if(occupancies.has(occupancy))fail('PUBLICATION_CORRUPT','同一账号和 SKU 存在重复的待提交或在售刊登');occupancies.add(occupancy);}
+  if(isPublicationOpen(record)){const facts=record.proof.facts;if(occupancies.some(other=>other.sku===facts.sku&&samePublicationOwner(other.account,facts.account)))fail('PUBLICATION_CORRUPT','同一环境会话或账号和 SKU 存在重复的待提交或在售刊登');occupancies.push(facts);}
   if(record.state==='dispatching'){record.state='uncertain';record.reason='上次退出时刊登结果尚未核对；仅允许读取原结果';record.updatedAt=new Date(now).toISOString();recovered=true;}
   if(record.state==='prepared'){record.state='needs_review';record.reason='上次准备的页面证据已失效；取消未提交记录后重新核对页面';record.updatedAt=new Date(now).toISOString();recovered=true;}
  }
@@ -223,7 +239,7 @@ class PublicationJournal{
  prepare(proof){
   return this._atomic(state=>{
    validProof(proof,{now:this._now(),issued:true});const facts=proof.facts;
-   const conflict=state.submissions.find(record=>record.state!=='cancelled'&&((record.proof.facts.planId===facts.planId&&record.proof.facts.cycle===facts.cycle&&listingRevision(record.proof.facts.listingRevision)===listingRevision(facts.listingRevision))||(record.proof.facts.profileId===facts.profileId&&record.proof.facts.documentKey===facts.documentKey&&record.proof.facts.tabId===facts.tabId)||(isPublicationOpen(record)&&record.proof.facts.account.memberId===facts.account.memberId&&record.proof.facts.sku===facts.sku)));
+   const conflict=state.submissions.find(record=>record.state!=='cancelled'&&((record.proof.facts.planId===facts.planId&&record.proof.facts.cycle===facts.cycle&&listingRevision(record.proof.facts.listingRevision)===listingRevision(facts.listingRevision))||(record.proof.facts.profileId===facts.profileId&&record.proof.facts.documentKey===facts.documentKey&&record.proof.facts.tabId===facts.tabId)||(isPublicationOpen(record)&&samePublicationOwner(record.proof.facts.account,facts.account)&&record.proof.facts.sku===facts.sku)));
    if(conflict)fail('PUBLICATION_EXISTS','该账号和 SKU、销售周期或商品页面已有刊登记录，请核对原提交，不能新建');
    const now=new Date(this._now()).toISOString(),record={id:randomUUID(),state:'prepared',attemptCount:0,proof:clone(proof),createdAt:now,updatedAt:now,submittedAt:null,receipt:null,reason:''};
    state.submissions.push(record);return clone(record);

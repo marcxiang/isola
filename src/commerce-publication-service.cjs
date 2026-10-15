@@ -3,13 +3,14 @@ const {readPreparedPhotos}=require('./commerce-photos.cjs');
 const {VintedPublicationEvidence}=require('./vinted-publication-evidence.cjs');
 const {isPublicationOpen}=require('./vinted-publication.cjs');
 const {VintedPublishSubmit}=require('./vinted-publish-submit.cjs');
+const {assertEnvironmentSessionAuthority}=require('./commerce-session-authority.cjs');
 
 // Only a plan ID crosses IPC. Page proofs, supplier claims and private file
 // manifests are assembled here and never accepted from the renderer.
-async function publicationInput(engine,id,signal,guard){
+async function publicationInput(engine,id,signal,guard,{sessionAuthority}={}){
  if(typeof id!=='string'||!id||id.length>256)throw Error('刊登计划编号无效');
  if(engine.faulted)throw Error('运营存储不可用，已停止刊登核对');
- const plan=engine.plan(id),expectedAccount=engine.db.marketAccounts.find(account=>account.profileId===plan.profileId);
+ const plan=engine.plan(id),expectedAccount=sessionAuthority===undefined?engine.db.marketAccounts.find(account=>account.profileId===plan.profileId):assertEnvironmentSessionAuthority(sessionAuthority,plan.profileId);
  if(!expectedAccount)throw Error('请先核对该环境的 Vinted 账号');
  const prepared=await readPreparedPhotos(engine,id);guard();
  if(!prepared.summary?.ready||!prepared.manifest)throw Error('请先准备本计划的照片，并完成当前页面上传');

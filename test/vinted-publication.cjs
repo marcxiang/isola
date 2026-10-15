@@ -3,6 +3,7 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {buildPublicationProof,validatePublicationReceipt,restorePublicationState,PublicationJournal,listingRevision,listingJobKey,isPublicationOpen,FORM_URL,MAX_PROOF_AGE_MS}=require('../src/vinted-publication.cjs');
 const START=Date.parse('2026-10-14T10:00:00.000Z');
+const {createEnvironmentSessionAuthority}=require('../src/commerce-session-authority.cjs');
 const clone=value=>JSON.parse(JSON.stringify(value));
 const iso=value=>new Date(value).toISOString();
 function inputs(){
@@ -15,6 +16,40 @@ function inputs(){
   publication:{documentKey,count:1,observed:true,label:'Ajouter',enabled:true}};
  return {plan,product:{id:plan.productId,sku:'TEST',stock:5},claim:{id:'claim-1',profileId,productId:plan.productId,setId:'set-1',images:[{id:'image-1'}]},expectedAccount,evidence};
 }
+function sessionInputs(profileId='environment-1'){
+ const input=inputs();input.plan.profileId=profileId;input.claim.profileId=profileId;input.evidence.profileId=profileId;input.evidence.photos.profileId=profileId;
+ input.expectedAccount=createEnvironmentSessionAuthority(profileId);input.evidence.account={kind:'environment-session',profileId};return input;
+}
+
+test('environment session proof requires a main-process capability and contains no invented member identity',()=>{
+ const input=sessionInputs(),proof=buildPublicationProof(input,{now:START});assert.deepEqual(proof.facts.account,{kind:'environment-session',profileId:'environment-1'});assert.equal(Object.hasOwn(proof.facts.account,'memberId'),false);
+ for(const replacement of [clone(input.expectedAccount),{...input.expectedAccount,memberId:'123'},{...input.expectedAccount,verified:true},createEnvironmentSessionAuthority('other')]){
+  assert.throws(()=>buildPublicationProof({...input,expectedAccount:replacement},{now:START}));
+ }
+ for(const replacement of [{kind:'environment-session',profileId:'other'},{...input.evidence.account,memberId:'123'},{...input.evidence.account,verified:true}])assert.throws(()=>buildPublicationProof({...input,evidence:{...input.evidence,account:replacement}},{now:START}));
+});
+
+test('session publications retain one-submit durability, unknown-result stop and environment-scoped duplicate protection',async()=>{
+ const f=fixture(),input=sessionInputs(),proof=buildPublicationProof(input,{now:START}),record=await f.journal.prepare(proof);let calls=0;
+ await f.journal.dispatchOnce(record.id,proof,async()=>{calls++;assert.equal(f.disk.submissions[0].attemptCount,1);});
+ assert.equal(f.journal.get(record.id).state,'uncertain');await assert.rejects(f.journal.dispatchOnce(record.id,proof,async()=>calls++),{code:'PUBLICATION_UNKNOWN_RESULT'});assert.equal(calls,1);
+ const duplicate=sessionInputs();duplicate.plan.id='another-plan';duplicate.evidence.documentKey='other';duplicate.evidence.form.documentKey='other';duplicate.evidence.photos.documentKey='other';duplicate.evidence.publication.documentKey='other';
+ await assert.rejects(f.journal.prepare(buildPublicationProof(duplicate,{now:START})),{code:'PUBLICATION_EXISTS'});
+ const other=sessionInputs('environment-2');other.plan.id='other-plan';await f.journal.prepare(buildPublicationProof(other,{now:START}));assert.equal(f.journal.state().submissions.length,2);
+ assert.equal(restorePublicationState(f.journal.state(),{now:START}).state.submissions[0].state,'uncertain');
+});
+
+test('session receipt verifies original submission and item evidence without claiming a member was verified',async()=>{
+ const f=fixture(),proof=buildPublicationProof(sessionInputs(),{now:START}),record=await f.journal.prepare(proof);await f.journal.dispatchOnce(record.id,proof,async()=>{});
+ const evidence=evidenceFor(record);evidence.account={...proof.facts.account};delete evidence.seller;
+ evidence.origin={...evidence.origin,profileId:proof.facts.profileId,tabId:proof.facts.tabId,listingId:evidence.listingId,url:'https://www.vinted.fr/items/'+evidence.listingId,event:'did-navigate',committed:true,observedAt:iso(START)};
+ await assert.rejects(f.journal.reconcile(record.id,evidence),{code:'PUBLICATION_RECEIPT_UNATTRIBUTED'});
+ await f.journal._atomic(state=>{state.submissions.find(row=>row.id===record.id).navigation=[clone(evidence.origin)];});
+ const published=await f.journal.reconcile(record.id,evidence);assert.deepEqual(published.receipt.account,proof.facts.account);assert.equal(Object.hasOwn(published.receipt,'memberId'),false);assert.equal(restorePublicationState(f.journal.state(),{now:START}).state.submissions[0].state,'published');
+ for(const change of [value=>value.account.profileId='other',value=>value.account.memberId='123',value=>value.origin.submissionId='other',value=>value.origin.tabId='other',value=>value.origin.committed=false,value=>value.photos.signature='b'.repeat(64),value=>value.ownedByCurrentAccount=false]){const value=clone(evidence);change(value);assert.throws(()=>validatePublicationReceipt(published,value,{now:START}));}
+ const state=f.journal.state();state.submissions[0].receipt.memberId='123';assert.throws(()=>restorePublicationState(state,{now:START}),{code:'PUBLICATION_CORRUPT'});
+ await assert.rejects(f.journal.releaseAfterSale(record.id,saleFor(record)),{code:'PUBLICATION_SALE_UNVERIFIED'});
+});
 function fixture(options={}){
  let clock=START,disk=options.state,writes=0,failWrites=false;const written=[];
  const journal=new PublicationJournal({state:options.state,now:()=>clock,dispatchEnabled:options.enabled??true,persist:async state=>{writes++;if(failWrites)throw Error('disk full');await options.beforePersist?.(state);disk=clone(state);written.push(clone(state));}});

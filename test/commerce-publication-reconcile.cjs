@@ -2,19 +2,30 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {buildPublicationProof,PublicationJournal,FORM_URL}=require('../src/vinted-publication.cjs');
 const {projectPublicationReconciliation:project}=require('../src/commerce-publication-reconcile.cjs');
+const {createEnvironmentSessionAuthority}=require('../src/commerce-session-authority.cjs');
 const NOW=Date.parse('2026-10-14T12:00:00.000Z'),at=new Date(NOW).toISOString(),clone=value=>JSON.parse(JSON.stringify(value));
-async function fixture(){
+async function fixture({session=false}={}){
  const profileId='profile-1',listing={title:'Local test accessory',description:'Local fixture only.',categoryPath:['Maison','Accessoires'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'};
  const plan={id:'plan-1',profileId,productId:'product-1',sku:'TEST',enabled:true,completedCount:0,targetCount:2,activeListingId:null,status:'ready',currency:'EUR',listingPriceCents:500,listing,updatedAt:at};
  const account={profileId,memberId:'123',profileURL:'https://www.vinted.fr/member/123'},claim={id:'claim-1',setId:'set-1',profileId,productId:plan.productId,images:[{id:'image-1'}],listings:[]},documentKey='100.2';
  const input={plan,product:{id:plan.productId,sku:plan.sku,stock:1},claim,expectedAccount:account,evidence:{profileId,tabId:'tab-1',documentKey,url:FORM_URL,observedAt:at,challenge:false,account:{...account,verified:true},form:{documentKey,complete:true,invalidFields:[],unknownFields:[],fields:Object.entries({...listing,priceCents:500}).map(([field,value])=>({field,value,verified:true}))},photos:{documentKey,profileId,productId:plan.productId,claimId:claim.id,setId:claim.setId,count:1,signature:'a'.repeat(64),verified:true,busy:false,errorCount:0},publication:{documentKey,count:1,observed:true,label:'Ajouter',enabled:true}}};
+ if(session){input.expectedAccount=createEnvironmentSessionAuthority(profileId);input.evidence.account={...input.expectedAccount};}
  const journal=new PublicationJournal({persist:()=>{},now:()=>NOW,dispatchEnabled:true}),proof=buildPublicationProof(input,{now:NOW}),record=await journal.prepare(proof);await journal.dispatchOnce(record.id,proof,async()=>{});
  const job={id:'job-1',type:'listing',dedupeKey:'listing:plan-1:0',planId:plan.id,profileId,productId:plan.productId,payload:{cycle:0},state:'needs_review',step:'pending',operation:null,mutationPending:false,result:null,error:'Old blocker',retryAt:at,createdAt:at,updatedAt:at};
- const db={version:1,plans:[plan],claims:[claim],jobs:[job],marketAccounts:[account],publications:journal.state(),sales:[],encryptedToken:'PRIVATE-UNCHANGED'};
+ const db={version:1,plans:[plan],claims:[claim],jobs:[job],marketAccounts:session?[]:[account],publications:journal.state(),sales:[],encryptedToken:'PRIVATE-UNCHANGED'};
  const evidence={verified:true,mappingVerified:true,publicationStatus:'published',observedAt:at,profileId,account:{...account,verified:true},seller:{...account,verified:true},ownedByCurrentAccount:true,listingId:'98765',url:'https://www.vinted.fr/items/98765',origin:{kind:'observed_submission_navigation',submissionId:record.id,formDocumentKey:documentKey},priceKind:'item',priceCents:500,currency:'EUR',title:listing.title,photos:{verified:true,count:1,signature:'a'.repeat(64)}};
+ if(session){evidence.account={...input.expectedAccount};delete evidence.seller;evidence.origin={...evidence.origin,profileId,tabId:'tab-1',listingId:evidence.listingId,url:evidence.url,event:'did-navigate',committed:true,observedAt:at};await journal._atomic(state=>{state.submissions.find(row=>row.id===record.id).navigation=[clone(evidence.origin)];});db.publications=journal.state();}
  await journal.reconcile(record.id,evidence);
  return {db,next:journal.state(),journal,record,evidence,input,run(source=db,next=journal.state()){return project(source,next,{now:NOW});}};
 }
+
+test('session publication completes original job, photos and supplier outbox without creating a member binding',async()=>{
+ const f=await fixture({session:true}),result=f.run(),db=result.db;
+ assert.deepEqual(db.marketAccounts,[]);assert.equal(db.jobs[0].state,'completed');assert.equal(Object.hasOwn(db.jobs[0],'accountMemberId'),false);assert.deepEqual(db.jobs[0].publicationAccount,{kind:'environment-session',profileId:f.input.plan.profileId});
+ assert.equal(db.plans[0].activeListingId,'98765');assert.equal(db.claims[0].listings.length,1);assert.equal(db.publicationSupplierSync[0].state,'pending');
+ assert.equal(project(db,db.publications,{now:NOW+1000}).changed,false);
+ const mismatch=clone(f.next);mismatch.submissions[0].receipt.account.profileId='other';assert.throws(()=>f.run(f.db,mismatch));
+});
 
 test('one staged snapshot includes publication, active listing, claim link, old job completion and an unsent supplier association',async()=>{
  const f=await fixture(),before=clone(f.db),nextBefore=clone(f.next),result=f.run(),db=result.db;

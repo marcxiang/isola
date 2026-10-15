@@ -67,7 +67,10 @@ function inspectQueue(input,{now=Date.now()}={}){
     // publishing, whether it opens the fixed profile or uses an existing window.
     const liveAccountCheck=job?.type==='listing'&&['closed','running'].includes(profile?.status)&&readiness?.capabilities?.publish===true&&readiness?.capabilities?.autoOpenProfile===true;
     const autoBindAccount=job?.type==='listing'&&['closed','running'].includes(profile?.status)&&readiness?.capabilities?.publish===true&&readiness?.capabilities?.autoBindAccount===true&&(profile.status==='running'||readiness?.capabilities?.autoOpenProfile===true);
-    const autoOpen=liveAccountCheck&&profile.status==='closed';
+    // Session listing uses the selected environment's existing login. Old menu
+    // observations and account bindings are not prerequisites for this path.
+    const sessionListing=job?.type==='listing'&&['closed','running'].includes(profile?.status)&&readiness?.capabilities?.publish===true&&readiness?.capabilities?.sessionListing===true&&(profile.status==='running'||readiness?.capabilities?.autoOpenProfile===true);
+    const autoOpen=(liveAccountCheck||sessionListing)&&profile.status==='closed';
     if(!job?.id||jobIds.get(job.id)!==1||!job.dedupeKey||dedupes.get(job.dedupeKey)!==1)status=decision('blocked','DUPLICATE_JOB','任务编号或业务去重编号缺失或重复。','核对原任务，不能自动选择或重新创建。');
     else if(!STATES.has(job.state)||!CAPABILITIES[job.type])status=decision('blocked','INVALID_JOB_STATE','任务类型或状态无法识别。','保留原记录并检查数据。');
     else if(job.state==='uncertain'||job.mutationPending===true||(['queued','running'].includes(job.state)&&hasEvidence(job)))status={...reconcile(),state:'blocked'};
@@ -91,10 +94,10 @@ function inspectQueue(input,{now=Date.now()}={}){
     else if(job.retryAt!=null&&timestamp(job.retryAt)>current)status=WAITING_CODES.has(job.blockedReason)?decision('waiting',job.blockedReason,clean(job.error)||'原任务正在等待已验证能力或窗口就绪。','保持原任务，等待对应前置条件完成。',{retryAt:new Date(timestamp(job.retryAt)).toISOString()}):decision('waiting','RETRY_DELAY','任务正在等待下次读取检查。','等待约定时间；无需重复点击运行。',{retryAt:new Date(timestamp(job.retryAt)).toISOString()});
     else {
       const missing=CAPABILITIES[job.type].filter(cap=>readiness?.capabilities?.[cap]!==true);
-      status=readiness?.salesOnly===true&&job.type==='fulfillment'?decision('blocked','PROCUREMENT_DISABLED','当前为纯售卖模式，采购履约任务不会执行。','保留原业务记录；该模式只处理售卖和成交确认。'):missing.length?decision('blocked','CAPABILITY_UNVERIFIED','此任务所需网页步骤尚未验证：'+missing.join('、')+'。','先完成对应步骤的真实页面联调。',{missingCapabilities:missing}):accountProblem(job.profileId,job,input,current);
+      status=readiness?.salesOnly===true&&job.type==='fulfillment'?decision('blocked','PROCUREMENT_DISABLED','当前为纯售卖模式，采购履约任务不会执行。','保留原业务记录；该模式只处理售卖和成交确认。'):missing.length?decision('blocked','CAPABILITY_UNVERIFIED','此任务所需网页步骤尚未验证：'+missing.join('、')+'。','先完成对应步骤的真实页面联调。',{missingCapabilities:missing}):sessionListing?null:accountProblem(job.profileId,job,input,current);
       const needsBinding=autoBindAccount&&status?.reasonCode==='ACCOUNT_NOT_BOUND';
       if(needsBinding||liveAccountCheck&&status?.reasonCode==='ACCOUNT_RECHECK_REQUIRED')status=null;
-      if(!status)status=needsBinding?decision('eligible','ACCOUNT_AUTO_BIND','执行时将自动读取本人登录身份并保存固定环境绑定。','无需手动核对；先确认实际登录身份，再准备照片和上架。'):autoOpen?decision('eligible','PROFILE_AUTO_OPEN','调度时将自动打开此账号的固定环境。','无需手动打开；重新核对登录身份和商品资料，通过后上架。'):decision('eligible','READY','任务前置检查通过，等待本轮调度。',liveAccountCheck?'执行时会重新核对当前页面的登录身份，确认一致后继续核对商品和发布回执。':'运行时继续逐步核对账号、页面及业务回执。');
+      if(!status)status=sessionListing?decision('eligible','SESSION_LISTING_READY',autoOpen?'调度时将自动打开指定环境并使用当前登录会话上架。':'使用指定环境当前登录会话，等待本轮上架。','直接准备商品和照片；如页面要求登录，请在该环境完成登录后继续。'):needsBinding?decision('eligible','ACCOUNT_AUTO_BIND','执行时将自动读取本人登录身份并保存固定环境绑定。','无需手动核对；先确认实际登录身份，再准备照片和上架。'):autoOpen?decision('eligible','PROFILE_AUTO_OPEN','调度时将自动打开此账号的固定环境。','无需手动打开；重新核对登录身份和商品资料，通过后上架。'):decision('eligible','READY','任务前置检查通过，等待本轮调度。',liveAccountCheck?'执行时会重新核对当前页面的登录身份，确认一致后继续核对商品和发布回执。':'运行时继续逐步核对账号、页面及业务回执。');
     }
     rows.push({jobId:job?.id||null,profileId:job?.profileId||null,planId:job?.planId||null,type:job?.type||null,...status});
   }

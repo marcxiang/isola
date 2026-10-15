@@ -47,6 +47,33 @@ function expectationFixture(){return {db:{marketAccounts:[],jobs:[],sales:[],pub
 test('credential labels and email never supply a first owner identity',()=>{
  const f=expectationFixture();f.accounts.list=()=>[{profileId:'profile',login:'fixture@example.invalid',label:'123',identity:null}];assert.deepEqual(accountExpectation(f,'profile'),{memberId:null,account:null});
 });
+function sessionHistoryFixture(){
+ const f=expectationFixture(),account={kind:'environment-session',profileId:'profile'};
+ f.db.plans=[{id:'session-plan',profileId:'profile',activeListingId:'98765',completedCount:0}];
+ f.db.publications.submissions=[{id:'session-publication',proof:{facts:{planId:'session-plan',profileId:'profile',account}}}];
+ f.db.jobs=[{id:'session-job',type:'listing',planId:'session-plan',profileId:'profile',state:'completed',publicationAccount:{...account},mutationPending:false,result:{externalId:'98765'}}];
+ f.db.claims=[{id:'session-claim',profileId:'profile',listings:[{listingId:'98765',planId:'session-plan',submissionId:'session-publication'}]}];return f;
+}
+test('session-only publication, job and photo history never manufactures a marketplace member identity',()=>{
+ const f=sessionHistoryFixture(),before=clone(f.db);assert.deepEqual(accountExpectation(f,'profile'),{memberId:null,account:null});assert.deepEqual(f.db,before);
+ delete f.db.jobs[0].publicationAccount;Object.assign(f.db.jobs[0],{state:'cancelled',step:'listing_deleted',result:{kind:'listing_deleted',externalId:'98765'}});assert.deepEqual(accountExpectation(f,'profile'),{memberId:null,account:null});
+ f.db.jobs=[];f.db.claims=[];f.db.plans=[];assert.deepEqual(accountExpectation(f,'profile'),{memberId:null,account:null});
+});
+test('session publication history does not hide unidentified legacy business history',()=>{
+ const changes=[
+  f=>f.db.jobs.push({id:'legacy-message',type:'message',planId:'session-plan',profileId:'profile',state:'completed',mutationPending:false,result:{externalId:'legacy-message'}}),
+  f=>f.db.jobs.push({id:'legacy-offer',type:'offer',planId:'session-plan',profileId:'profile',state:'needs_review',mutationPending:true,operation:{kind:'offer'}}),
+  f=>f.db.jobs.push({id:'legacy-listing',type:'listing',planId:'legacy-plan',profileId:'profile',state:'completed',mutationPending:false,result:{externalId:'legacy-item'}}),
+  f=>f.db.sales.push({planId:'session-plan',jobId:'unknown-sale'}),
+  f=>f.db.claims[0].listings.push({listingId:'legacy-item'}),
+  f=>f.db.plans.push({id:'legacy-plan',profileId:'profile',activeListingId:'legacy-item',completedCount:0})
+ ];
+ for(const change of changes){const f=sessionHistoryFixture();change(f);const before=clone(f.db);assert.throws(()=>accountExpectation(f,'profile'),{code:'ACCOUNT_HISTORY_UNBOUND'});assert.deepEqual(f.db,before);}
+});
+test('a session publication is not a substitute for independently recorded legacy member evidence',()=>{
+ const f=sessionHistoryFixture();f.db.jobs[0].accountMemberId='123';assert.deepEqual(accountExpectation(f,'profile'),{memberId:'123',account:null});
+ f.db.publications.submissions.push({proof:{facts:{planId:'legacy-plan',profileId:'profile',account:{profileId:'profile',...identity('456')}}}});assert.throws(()=>accountExpectation(f,'profile'),{code:'ACCOUNT_CHANGED'});
+});
 test('original vault, job, sale and publication IDs constrain discovery even if market binding is missing',()=>{
  for(const source of ['vault','job','sale','publication']){const f=expectationFixture();if(source==='vault')f.accounts.list=()=>[{profileId:'profile',identity:identity()}];if(source==='job')f.db.jobs=[{profileId:'profile',accountMemberId:'123',mutationPending:false}];if(source==='sale')f.db.sales=[{profileId:'profile',memberId:'123'}];if(source==='publication')f.db.publications.submissions=[{proof:{facts:{profileId:'profile',account:identity()}}}];assert.equal(accountExpectation(f,'profile').memberId,'123',source);}
 });

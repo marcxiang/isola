@@ -5,6 +5,7 @@ const {VintedPublicationEvidence,rememberCategoryTraversal,probePublicationForm,
 const FORM='https://www.vinted.fr/items/new',START=Date.parse('2026-10-14T10:00:00.000Z');
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const clone=value=>JSON.parse(JSON.stringify(value));
+const {createEnvironmentSessionAuthority}=require('../src/commerce-session-authority.cjs');
 
 function fixture(options={}){
  const make=(tag,properties={})=>{
@@ -58,6 +59,18 @@ function fixture(options={}){
 test('read-only production collector builds proof from native fields, parcel radios, current account and original photo upload record',async()=>{
  const f=fixture(),result=await f.reader.collect(f.input);assert.equal(result.proof.facts.fields.priceCents,500);assert.equal(result.proof.facts.fields.parcel,'Moyen');assert.deepEqual(result.proof.facts.fields.categoryPath,f.input.plan.listing.categoryPath);assert.equal(result.summary.fieldCount,8);assert.equal(result.summary.photoCount,1);assert.equal(result.summary.readyForPublication,true);assert.equal(result.summary.publicationEnabled,false);assert.equal(f.actions,0);assert.equal(f.w.vintedDraftController,null);
  assert.equal(JSON.stringify(result).includes('/private/image.jpg'),false);assert.equal(f.reads,2);
+});
+
+test('session collector never reads account menus or usernames but retains all native listing and photo evidence',async()=>{
+ const f=fixture({closedAccountMenu:true,onAccount:()=>assert.fail('Session listing must not inspect account identity')});
+ f.input.expectedAccount=createEnvironmentSessionAuthority(f.input.plan.profileId);const result=await f.reader.collect(f.input);
+ assert.deepEqual(result.proof.facts.account,{kind:'environment-session',profileId:f.input.plan.profileId});assert.equal(result.summary.readyForPublication,true);assert.equal(f.actions,0);
+ assert.ok(result.summary.checks.some(row=>row.name==='当前自动化环境'&&row.ok));
+ f.nodes.title.value='changed';assert.equal((await f.reader.inspect(f.input)).readyForPublication,false);
+});
+
+test('a serialized session flag cannot bypass account checks or mint a publication proof',async()=>{
+ const f=fixture({closedAccountMenu:true});f.input.expectedAccount={kind:'environment-session',profileId:f.input.plan.profileId};const report=await f.reader.inspect(f.input);assert.equal(report.readyForPublication,false);assert.equal(report.code,'PUBLICATION_SESSION_UNTRUSTED');
 });
 
 test('inspect exposes review checks without leaking proof authority or paths',async()=>{

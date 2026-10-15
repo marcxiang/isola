@@ -178,7 +178,7 @@
     document.querySelectorAll('[data-purchase-control]').forEach(node=>{node.hidden=only;node.querySelectorAll('input,select').forEach(field=>{field.disabled=only;});});
     $('#execution-rules-title').textContent=only?'后台售卖规则':'执行与采购规则';
     $('#execution-rules-description').textContent=only?'按计划推进上架与售卖；每一步以当前功能状态和核对回执为准。':'先限定执行范围，再启动持续调度。';
-    $('#execution-stop-note').textContent=only?'缺货、图片冲突、页面变化、账号验证或提交结果不明确时，保留原记录并停止该任务，等待核对。':'缺货、图片冲突、页面变化、账户验证、金额不匹配或订单提交结果未知时，保留任务记录并等待核对。';
+    $('#execution-stop-note').textContent=only?'缺货、图片冲突、页面要求重新登录或人工验证、提交结果不明确时，保留原记录并停止该任务。':'缺货、图片冲突、页面变化、账户验证、金额不匹配或订单提交结果未知时，保留任务记录并等待核对。';
     $('#association-scope-note').textContent=only?'请在对应环境中打开这次提交的商品详情页。本次检查只读取当前活动页面；确认关联保存已核对的刊登，不会再次发布。':'请在对应环境中打开这次提交的商品详情页。本次检查只读取当前活动页面；确认关联仅保存本机记录，不会再次发布或提交采购。';
     $('#plan-automation-note').textContent=`勾选后保存本计划的规则；${remainingSalesText()}提交结果不明确时停止核对。`;
   }
@@ -194,8 +194,8 @@
     if(!selected)selectedPlanProfileId='';$('#automation-environment-list').hidden=!!selected;$('#automation-environment-detail').hidden=!selected;$('#environment-count').textContent=`${rows.length} / ${profiles.length} 个环境`;root.replaceChildren();
     const emptyList=$('#automation-environments-empty');emptyList.hidden=!!rows.length;emptyList.textContent=profiles.length?'没有匹配的自动化环境。':'还没有自动化环境。请在环境管理中新建环境，并将用途选择为自动化。';
     for(const [index,profile] of rows.entries()){
-      const plans=currentPlans().filter(plan=>same(plan.profileId,profile.id)),account=state.accounts.find(row=>same(row.profileId,profile.id)),status=account?accountStatus(account):{label:'未添加账号',tone:'neutral'},row=el('tr'),name=el('td','environment-table-name'),login=el('td'),tasks=el('td'),actions=el('td','environment-table-actions');row.dataset.environmentId=String(profile.id);
-      name.append(el('b','',profile.name),el('small','',profile.windowType==='automation'?'自动化环境':'已有关联环境'));login.append(badge(status.label,status.tone));if(account)login.append(el('small','',account.identity?`${account.identity.username} · ${when(account.identity.verifiedAt,true)}`:account.label||'尚待核对当前登录'));
+      const plans=currentPlans().filter(plan=>same(plan.profileId,profile.id)),account=state.accounts.find(row=>same(row.profileId,profile.id)),status=state.readiness.capabilities?.sessionListing===true?{label:profile.status==='running'?'使用当前窗口会话':'打开后使用原会话',tone:'neutral'}:account?accountStatus(account):{label:'未添加账号',tone:'neutral'},row=el('tr'),name=el('td','environment-table-name'),login=el('td'),tasks=el('td'),actions=el('td','environment-table-actions');row.dataset.environmentId=String(profile.id);
+      name.append(el('b','',profile.name),el('small','',profile.windowType==='automation'?'自动化环境':'已有关联环境'));login.append(badge(status.label,status.tone));if(account)login.append(el('small','',account.label||'已保存登录资料'));
       const jobs=state.jobs.filter(job=>same(job.profileId,profile.id)&&!completedStates.has(job.state)&&!cancelledStates.has(job.state)),running=jobs.filter(job=>job.state==='running'),attention=jobs.filter(job=>reviewStates.has(job.state));tasks.append(badge(running.length?`${running.length} 个执行中`:attention.length?`${attention.length} 个需核对`:jobs.length?`${jobs.length} 个待处理`:'暂无任务',attention.length?'warn':running.length?'good':'neutral'));
       const open=makeButton('商品与上架计划',()=>selectPlanEnvironment(profile.id,'plans'),'primary'),accounts=makeButton('账号与登录',()=>selectPlanEnvironment(profile.id,'accounts'));open.dataset.openEnvironment=String(profile.id);accounts.dataset.openEnvironmentAccount=String(profile.id);actions.append(open,accounts);
       row.append(el('td','',index+1),name,el('td','',accountProfileText(profile)),el('td','',{closed:'已关闭',running:'已打开',starting:'正在启动'}[profile.status]||'待核对'),login,el('td','',`${plans.length} 个 · ${plans.filter(plan=>plan.enabled).length} 个启用`),tasks,actions);root.append(row);
@@ -350,7 +350,7 @@
     const association=typeof api.inspectPublishedListing==='function'&&typeof api.associatePublishedListing==='function';
     $('#readiness').classList.toggle('ready',allReady);
     $('#readiness-title').textContent=available.length?(allReady?`${salesOnly()?'后台售卖':'后台业务'}流程可用`:'后台部分流程可用'):`${manualPublish?'手动上架可用':'资料准备可用'} · 后台业务待验证`;
-    $('#readiness-message').textContent=available.length?`后台可按计划执行${available.map(([name])=>name).join('、')}。${automaticListing()&&capabilities.autoOpenProfile===true?'上架时会自动打开计划的固定环境并读取实际登录账号。':''}每个步骤核对账号、商品和回执；提交结果不明确时停止并保留原记录。`:manualPublish?'可准备资料和照片，逐项核对后手动发布一次。启动调度不会启用下方仍待验证的业务。':'可连接货盘、保存计划并准备资料和照片；当前版本尚未提供手动发布入口。';
+    $('#readiness-message').textContent=available.length?capabilities.sessionListing===true?'上架直接使用指定环境当前的登录会话，进入刊登页填写商品并上传照片。无需核对账号或绑定用户名；提交结果不明确时保留原记录。':`后台可按计划执行${available.map(([name])=>name).join('、')}。${automaticListing()&&capabilities.autoOpenProfile===true?'上架时会自动打开计划的固定环境。':''}每个步骤检查商品和回执；提交结果不明确时停止并保留原记录。`:manualPublish?'可准备资料和照片，逐项核对后手动发布一次。启动调度不会启用下方仍待验证的业务。':'可连接货盘、保存计划并准备资料和照片；当前版本尚未提供手动发布入口。';
     const capabilityList=$('#readiness-capabilities');capabilityList.replaceChildren();
     for(const [name,available,detail] of [
       ['资料与照片',capabilities.inspect!==false&&typeof api.prepareDraft==='function'&&typeof api.uploadPhotos==='function','可准备'],
@@ -494,7 +494,7 @@
   }
   function withdrawalEligible(id) {
     const plan=find(state.plans,id),records=openPublications(id),record=records[0],profile=find(state.profiles,plan?.profileId),account=profile?.marketAccount;
-    return typeof api.confirmDeletedListing==='function'&&!!plan&&records.length===1&&['uncertain','published'].includes(record.state)&&record.attemptCount===1&&same(record.profileId,plan.profileId)&&same(record.productId,plan.productId)&&account?.platform==='vinted-fr'&&!!account.memberId&&!!account.username&&!!account.verifiedAt;
+    return typeof api.confirmDeletedListing==='function'&&!!plan&&records.length===1&&['uncertain','published'].includes(record.state)&&record.attemptCount===1&&same(record.profileId,plan.profileId)&&same(record.productId,plan.productId)&&(record.sessionListing===true||account?.platform==='vinted-fr'&&!!account.memberId&&!!account.username&&!!account.verifiedAt);
   }
   function withdrawalSignature(id) {
     const plan=find(state.plans,id),profile=find(state.profiles,plan?.profileId);

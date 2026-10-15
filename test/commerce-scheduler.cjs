@@ -36,6 +36,46 @@ test('native auto-binding explicitly admits a first listing without treating con
  f.readiness.capabilities.autoBindAccount=true;f.accounts=[{platform:'vinted-fr',profileId:'profile-1',memberId:'123'}];f.jobs[0].accountMemberId='456';assert.equal(first(f).reasonCode,'ACCOUNT_CHANGED');assert.deepEqual(inspect(f).runnableJobIds,[]);
  f.jobs[0].accountMemberId='123';f.accounts.push({platform:'vinted-fr',profileId:'other-profile',memberId:'123'});assert.equal(first(f).reasonCode,'ACCOUNT_RECORD_CONFLICT');
 });
+function sessionListingFixture(){const f=fixture();f.requireVerifiedAccount=true;f.readiness.capabilities.sessionListing=true;f.readiness.capabilities.autoOpenProfile=true;return f;}
+test('session listing uses the selected environment without bound or observed account evidence',()=>{
+ for(const status of ['running','closed']){
+  const f=sessionListingFixture();f.profiles[0].status=status;const before=JSON.stringify(f),result=inspect(f);
+  assert.deepEqual(result.runnableJobIds,['job-1']);assert.equal(result.jobs[0].reasonCode,'SESSION_LISTING_READY');assert.match(result.jobs[0].reason,/指定环境.*当前登录会话/);assert.doesNotMatch(result.jobs[0].nextAction,/核对|绑定|用户名|Profil/);assert.equal(JSON.stringify(f),before);
+ }
+ const f=sessionListingFixture();f.readiness.capabilities.autoOpenProfile=false;assert.equal(first(f).reasonCode,'SESSION_LISTING_READY');f.profiles[0].status='closed';assert.equal(first(f).reasonCode,'PROFILE_NOT_OPEN');
+});
+test('session listing ignores old identity conflicts without changing or fabricating any identity',()=>{
+ for(const evidence of [
+  {accounts:[],observedAccounts:[]},
+  {accounts:[{profileId:'profile-1',memberId:'123'}],observedAccounts:[{profileId:'profile-1',memberId:'456',verified:true}]},
+  {accounts:[{platform:'vinted-fr',profileId:'profile-1',memberId:'123'},{platform:'vinted-fr',profileId:'other-profile',memberId:'123'}]},
+  {accounts:[{profileId:'profile-1',memberId:'123'},{profileId:'profile-1',memberId:'456'}]},
+  {accounts:{invalid:true},observedAccounts:{invalid:true}}
+ ]){
+  const f=Object.assign(sessionListingFixture(),evidence);f.jobs[0].accountMemberId='789';const before=JSON.stringify(f);assert.equal(first(f).reasonCode,'SESSION_LISTING_READY');assert.deepEqual(inspect(f).runnableJobIds,['job-1']);assert.equal(JSON.stringify(f),before);
+ }
+});
+test('session listing capability is scoped to listing and the selected ready profile',()=>{
+ for(const type of ['message','offer','sale_confirmation','fulfillment']){const f=sessionListingFixture();f.jobs[0].type=type;if(type==='sale_confirmation')f.readiness.capabilities.saleConfirmation=true;assert.equal(first(f).reasonCode,'ACCOUNT_NOT_BOUND');}
+ for(const status of ['starting','closing','unavailable',undefined]){const f=sessionListingFixture();f.profiles[0].status=status;assert.equal(first(f).reasonCode,'PROFILE_NOT_OPEN');assert.deepEqual(inspect(f).runnableJobIds,[]);}
+ for(const sessionListing of [false,undefined]){const f=sessionListingFixture();f.readiness.capabilities.sessionListing=sessionListing;assert.equal(first(f).reasonCode,'ACCOUNT_NOT_BOUND');}
+ const unavailable=sessionListingFixture();unavailable.readiness.capabilities.publish=false;assert.equal(first(unavailable).reasonCode,'CAPABILITY_UNVERIFIED');
+ const perProfile=sessionListingFixture();perProfile.readinessByProfile={'profile-1':{capabilities:{publish:true}},'other-profile':{capabilities:{publish:true,sessionListing:true}}};assert.equal(first(perProfile).reasonCode,'ACCOUNT_NOT_BOUND');
+});
+test('session listing preserves publication evidence, duplicate cycles, pauses and profile stops',()=>{
+ for(const change of [
+  f=>{f.jobs[0].operation={kind:'publish'};},
+  f=>{f.jobs[0].mutationPending=true;},
+  f=>{f.jobs[0].result={externalId:'123'};}
+ ]){const f=sessionListingFixture();change(f);assert.equal(first(f).reasonCode,'RECONCILE_REQUIRED');assert.deepEqual(inspect(f).runnableJobIds,[]);}
+ const occupied=sessionListingFixture();occupied.plans[0].activeListingId='123';assert.equal(first(occupied).reasonCode,'LISTING_CYCLE_CHANGED');
+ const paused=sessionListingFixture();paused.plans[0].enabled=false;assert.equal(first(paused).reasonCode,'PLAN_PAUSED');
+ const duplicate=sessionListingFixture();duplicate.jobs.push(makeJob({id:'duplicate-job'}));assert.ok(inspect(duplicate).jobs.every(row=>row.reasonCode==='DUPLICATE_JOB'));
+ const stopped=sessionListingFixture();stopped.jobs.push(makeJob({id:'stopped-job',dedupeKey:'stopped-job',state:'needs_review',blockedReason:'PROFILE_STOPPED'}));assert.equal(first(stopped).reasonCode,'PROFILE_MANUALLY_PAUSED');
+ const faulted=sessionListingFixture();faulted.faulted=true;assert.equal(first(faulted).reasonCode,'STORAGE_UNAVAILABLE');
+ const busy=sessionListingFixture();busy.activeProfileIds=['profile-1'];assert.equal(first(busy).reasonCode,'PROFILE_BUSY');
+ const unknown=sessionListingFixture();unknown.jobs.push(makeJob({id:'uncertain-job',dedupeKey:'uncertain-job',state:'uncertain'}));assert.equal(first(unknown).reasonCode,'PROFILE_RECONCILE_REQUIRED');
+});
 test('automatic opening applies only to exact closed listing profiles with explicit per-profile support',()=>{
  for(const type of ['message','offer','sale_confirmation','fulfillment']){const f=autoOpenFixture();f.jobs[0].type=type;assert.equal(first(f).reasonCode,'PROFILE_NOT_OPEN');}
  for(const status of ['starting','closing','unavailable',undefined]){const f=autoOpenFixture();f.profiles[0].status=status;assert.equal(first(f).reasonCode,'PROFILE_NOT_OPEN');assert.deepEqual(inspect(f).runnableJobIds,[]);}

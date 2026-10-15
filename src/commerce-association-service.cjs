@@ -3,6 +3,7 @@ const {randomUUID,createHash}=require('node:crypto');
 const {VintedListingReceipt}=require('./vinted-listing-receipt.cjs');
 const {operatorReviewedEvidence,isPublicationOpen,listingRevision}=require('./vinted-publication.cjs');
 const {publicationJournal}=require('./vinted-publish-submit.cjs');
+const {isEnvironmentSessionAccount}=require('./commerce-session-authority.cjs');
 const TTL=120000;
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const clone=value=>JSON.parse(JSON.stringify(value));
@@ -16,8 +17,12 @@ function createAssociationService({readerFactory=adapter=>new VintedListingRecei
   ensure(!engine.faulted&&!engine.closing,'运营存储不可用');
   const plan=engine.plan(id),records=engine.db.publications.submissions.filter(row=>row.proof.facts.planId===id&&isPublicationOpen(row));
   ensure(records.length===1&&records[0].state==='uncertain'&&records[0].attemptCount===1,'仅能关联原先已提交且结果待核对的刊登');
-  const expectedAccount=engine.db.marketAccounts.find(row=>row.profileId===plan.profileId);
-  ensure(expectedAccount&&plan.profileId===records[0].proof.facts.profileId&&plan.completedCount===records[0].proof.facts.cycle&&listingRevision(plan.listingRevision)===listingRevision(records[0].proof.facts.listingRevision),'原计划与账号绑定不一致');
+  const facts=records[0].proof.facts,sessionScoped=isEnvironmentSessionAccount(facts.account,plan.profileId);
+  ensure(facts.account?.kind!=='environment-session'||sessionScoped,'原提交的环境会话权限无效');
+  // Recovery follows the authority already saved on the original attempted
+  // submission. It never upgrades it to a verified member or opens a menu.
+  const expectedAccount=sessionScoped?clone(facts.account):engine.db.marketAccounts.find(row=>row.profileId===plan.profileId);
+  ensure(expectedAccount&&plan.profileId===facts.profileId&&plan.completedCount===facts.cycle&&listingRevision(plan.listingRevision)===listingRevision(facts.listingRevision),sessionScoped?'原计划与环境会话不一致':'原计划与账号绑定不一致');
   return {plan,record:records[0],expectedAccount};
  }
  function fingerprint(value){return hash({plan:value.plan,record:value.record,account:value.expectedAccount});}
@@ -25,7 +30,7 @@ function createAssociationService({readerFactory=adapter=>new VintedListingRecei
  return {
   inspect(engine,id){return engine.configure(async(signal,guard)=>{
    reviews.delete(engine);const current=input(engine,id),saved=clone(current),signature=fingerprint(saved);
-   const result=await readerFactory(engine.adapter).collect(saved,{signal});guard();
+   const result=await readerFactory(engine.adapter).collect(saved,{signal,reviewOriginalSubmission:true});guard();
    ensure(fingerprint(input(engine,id))===signature,'读取期间原计划或提交已改变，请重新核对');
    const report={...result.summary,planId:id,submissionId:saved.record.id,readyForAssociation:false};
    if(result.evidence&&result.summary.verified&&result.summary.photoSignatureMatched&&result.binding?.documentKey&&result.binding?.tabId){
@@ -40,7 +45,7 @@ function createAssociationService({readerFactory=adapter=>new VintedListingRecei
    ensure(typeof token==='string'&&token.length<=256&&review&&token===review.token&&now()<review.expiresAt,'核对凭证无效或已过期，请重新读取商品');
    const current=input(engine,id);ensure(fingerprint(current)===review.signature&&current.record.id===review.submissionId,'计划、账号或原提交已改变，请重新核对');
    let associated;
-   const result=await readerFactory(engine.adapter).collect(clone(current),{signal,withEvidence:async(fresh,pageGuard)=>{
+   const result=await readerFactory(engine.adapter).collect(clone(current),{signal,reviewOriginalSubmission:true,withEvidence:async(fresh,pageGuard)=>{
     const finalGuard=()=>{guard();pageGuard();ensure(now()<review.expiresAt,'核对凭证已过期');ensure(fingerprint(input(engine,id))===review.signature,'保存前原计划或提交已改变');};
     finalGuard();ensure(fresh.summary.verified&&fresh.summary.photoSignatureMatched&&pageFingerprint(fresh)===review.page,'商品、账号、照片或页面已改变，请重新读取');
     const evidence=operatorReviewedEvidence(current.record,fresh.evidence,{reviewId:review.token,...fresh.binding},now());

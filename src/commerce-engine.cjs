@@ -1,4 +1,4 @@
-const {normalizeListing}=require('./listing-config.cjs');
+const {normalizeListing,missingListingFields}=require('./listing-config.cjs');
 const {startupDecision,retryDecision,inspectQueue,ProfileOperationLeases,CAPABILITIES}=require('./commerce-scheduler.cjs');
 const {restorePublicationState,listingRevision,listingJobKey,isPublicationOpen}=require('./vinted-publication.cjs');
 const parseListingURL=value=>require('./vinted-listing-receipt.cjs').listingURL(value);
@@ -18,6 +18,27 @@ function normalizeProduct(p){return {id:String(p.id||''),sku:String(p.sku||''),n
 function normalizeSet(s){return {id:String(s.id||''),productId:String(s.productId||s.product_id||''),name:String(s.name||s.id||''),claimStatus:s.claim?'claimed':String(s.status||'unknown'),claimedByMe:s.claimedByMe===true||s.claimed_by_me===true,imageCount:nullableInteger(s.imageCount??s.image_count??s.images?.length),claimId:s.claim?.id||s.claimId||null};}
 function fingerprint(input){return createHash('sha256').update(JSON.stringify(input)).digest('hex');}
 const clone=value=>JSON.parse(JSON.stringify(value));
+const productListingKeys=['productId','sku','listing','listingPriceCents','minOfferCents','createdAt','updatedAt'];
+const plainRecord=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+function draftPrice(value,label){return value===undefined||value===null||value===''?null:integer(value,1,100000000,label);}
+function validateDraftPrices(listingPriceCents,minOfferCents){if(minOfferCents!==null&&(listingPriceCents===null||minOfferCents>listingPriceCents))throw Error('最低接受价需要先填写售价，且不能高于售价');}
+function restoreProductListings(rows){
+ if(rows===undefined)return [];
+ if(!Array.isArray(rows))throw Error('商品刊登资料格式无效，原数据已保留');
+ const ids=new Set();
+ return rows.map(row=>{
+  if(!plainRecord(row)||Object.keys(row).length!==productListingKeys.length||productListingKeys.some(key=>!Object.hasOwn(row,key)))throw Error('商品刊登资料记录无效，原数据已保留');
+  const productId=text(row.productId,'商品编号'),sku=text(row.sku,'商品 SKU');
+  if(productId!==row.productId||sku!==row.sku||ids.has(productId))throw Error('商品刊登资料编号重复或无效，原数据已保留');ids.add(productId);
+  const listing=normalizeListing(row.listing),keys=Object.keys(listing);
+  if(!plainRecord(row.listing)||Object.keys(row.listing).length!==keys.length||keys.some(key=>!Object.hasOwn(row.listing,key)||key==='categoryPath'&&(!Array.isArray(row.listing[key])||row.listing[key].length!==listing[key].length||row.listing[key].some((value,index)=>value!==listing[key][index]))||key!=='categoryPath'&&row.listing[key]!==listing[key]))throw Error('商品刊登资料字段无效，原数据已保留');
+  const listingPriceCents=draftPrice(row.listingPriceCents,'商品售价'),minOfferCents=draftPrice(row.minOfferCents,'最低接受价');
+  if(listingPriceCents!==row.listingPriceCents||minOfferCents!==row.minOfferCents)throw Error('商品刊登资料金额无效，原数据已保留');validateDraftPrices(listingPriceCents,minOfferCents);
+  const date=value=>typeof value==='string'&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString()===value;
+  if(!date(row.createdAt)||!date(row.updatedAt)||Date.parse(row.updatedAt)<Date.parse(row.createdAt))throw Error('商品刊登资料时间无效，原数据已保留');
+  return {productId,sku,listing,listingPriceCents,minOfferCents,createdAt:row.createdAt,updatedAt:row.updatedAt};
+ });
+}
 const manuallyPausedProfile=(jobs,profileId)=>jobs.some(job=>job.profileId===profileId&&job.state==='needs_review'&&['PROFILE_CLOSED','PROFILE_STOPPED'].includes(job.blockedReason));
 const validEventText=value=>typeof value==='string'&&!!value.trim()&&value===value.trim()&&value.length<=256&&!/[\x00-\x1f\x7f]/.test(value);
 const eventIdentity=event=>Object.fromEntries(['type','id','profileId','memberId','listingId','buyerUsername','buyerMemberId','conversationId','text','priceCents','currency','quantity',...(event?.type==='sale'?['paid','cancelled']:[])].map(key=>[key,event?.[key]??null]));
@@ -51,8 +72,9 @@ class CommerceEngine{
   this.accounts=accounts;
   this.dir=dir;this.profiles=profiles;this.clientFactory=clientFactory;this.adapter=adapter;this.seal=seal;this.unseal=unseal;this.onChange=onChange;this.active=new Map();this.leases=new ProfileOperationLeases();this.accountObservations=new Map();this.running=false;this.timer=null;this.ticking=false;this.faulted=false;this.connection={status:'not_connected'};this.runGeneration=0;this.tickController=null;this.tickPromise=null;this.closing=false;this.closePromise=null;this.configPending=0;this.configController=null;this.configTail=Promise.resolve();
   fs.mkdirSync(dir,{recursive:true,mode:0o700});this.file=path.join(dir,'commerce-state.json');
-  this.db=fs.existsSync(this.file)?JSON.parse(fs.readFileSync(this.file,'utf8')):{version:1,settings:{...DEFAULTS},encryptedToken:'',plans:[],products:[],photoSets:[],jobs:[],events:[],claims:[],sales:[],reservations:[]};
+  this.db=fs.existsSync(this.file)?JSON.parse(fs.readFileSync(this.file,'utf8')):{version:1,settings:{...DEFAULTS},encryptedToken:'',plans:[],products:[],productListings:[],photoSets:[],jobs:[],events:[],claims:[],sales:[],reservations:[]};
   if(this.db.version!==1||!['plans','products','photoSets','jobs','events','claims','sales','reservations'].every(k=>Array.isArray(this.db[k])))throw Error('运营数据格式无效，原文件已保留，不能自动重新建单');
+  this.db.productListings=restoreProductListings(this.db.productListings);
   for(const plan of this.db.plans)plan.listingRevision=listingRevision(plan.listingRevision);
   for(const job of this.db.jobs)if(job.type==='listing'){if(!job.payload||typeof job.payload!=='object'||Array.isArray(job.payload))throw Error('原刊登任务缺少周期记录');job.payload.listingRevision=listingRevision(job.payload.listingRevision);}
   restorePhotoPreparations(this.db);
@@ -74,7 +96,7 @@ class CommerceEngine{
  storageFaulted(){return this.faulted||this.accounts?.faulted===true;}
  marketAccountRecords(){const rows=this.db.marketAccounts.map(row=>({...row}));for(const account of this.accounts?.list()||[]){if(account.identity&&!rows.some(row=>row.profileId===account.profileId&&row.memberId===account.identity.memberId))rows.push({...account.identity,platform:'vinted-fr',profileId:account.profileId});}return rows;}
  queueHealth(){return inspectQueue({jobs:this.db.jobs,plans:this.db.plans,sales:this.db.sales,profiles:this.profiles(),accounts:this.marketAccountRecords(),observedAccounts:[...this.accountObservations.values()],requireVerifiedAccount:true,readiness:this.adapter.readiness(),readinessByProfile:Object.fromEntries(this.profiles().map(p=>[p.id,this.adapter.readiness(p.id)])),activeProfileIds:[...this.active.keys()],maxConcurrent:this.db.settings.maxConcurrent,faulted:this.storageFaulted(),closing:this.closing,configBusy:this.configPending>0});}
- state(){const queue=this.queueHealth();return {accounts:this.accounts?.list()||[],queue,publications:this.db.publications.submissions.map(r=>({id:r.id,planId:r.proof.facts.planId,profileId:r.proof.facts.profileId,productId:r.proof.facts.productId,state:r.state,attemptCount:r.attemptCount,createdAt:r.createdAt,updatedAt:r.updatedAt,reason:r.reason,closedSale:!!r.closedSale,closedWithdrawal:!!r.closedWithdrawal,listingRevision:listingRevision(r.proof.facts.listingRevision),listingUrl:r.receipt?.url||r.navigation?.find(n=>n.committed)?.url||r.closedWithdrawal?.url||null})),settings:{...this.db.settings,hasToken:!!this.db.encryptedToken},connection:this.connection,profiles:this.profiles().map(p=>({id:p.id,name:p.name,status:p.status,fingerprintMode:p.fingerprintMode,operatingSystem:p.operatingSystem,deviceModel:p.deviceModel,marketAccount:this.db.marketAccounts.find(a=>a.profileId===p.id)||null})),products:this.db.products,photoSets:this.db.photoSets,photoPreparations:this.db.photoPreparations.map(summarizePreparation),plans:this.db.plans.map(plan=>({...plan,activeListingUrl:this.listingURL(plan)})),jobs:this.db.jobs.map(record=>{const {payload,operation,result,archivedOperation,...job}=record;return {...job,scheduling:queue.jobs.find(row=>row.jobId===job.id)||null,canRetry:this.canRetry(record),result:result?{externalId:result.externalId||result.id||null,summary:result.summary||null}:null};}),events:this.db.events,running:this.running,configBusy:this.configPending>0,readiness:this.adapter.readiness(),faulted:this.storageFaulted()};}
+ state(){const queue=this.queueHealth();return {accounts:this.accounts?.list()||[],queue,publications:this.db.publications.submissions.map(r=>({id:r.id,planId:r.proof.facts.planId,profileId:r.proof.facts.profileId,productId:r.proof.facts.productId,state:r.state,attemptCount:r.attemptCount,createdAt:r.createdAt,updatedAt:r.updatedAt,reason:r.reason,closedSale:!!r.closedSale,closedWithdrawal:!!r.closedWithdrawal,listingRevision:listingRevision(r.proof.facts.listingRevision),listingUrl:r.receipt?.url||r.navigation?.find(n=>n.committed)?.url||r.closedWithdrawal?.url||null})),settings:{...this.db.settings,hasToken:!!this.db.encryptedToken},connection:this.connection,profiles:this.profiles().map(p=>({id:p.id,name:p.name,status:p.status,fingerprintMode:p.fingerprintMode,operatingSystem:p.operatingSystem,deviceModel:p.deviceModel,marketAccount:this.db.marketAccounts.find(a=>a.profileId===p.id)||null})),products:this.db.products,productListings:this.db.productListings.map(row=>({...clone(row),missingFields:missingListingFields(row.listing)})),photoSets:this.db.photoSets,photoPreparations:this.db.photoPreparations.map(summarizePreparation),plans:this.db.plans.map(plan=>({...clone(plan),missingFields:missingListingFields(plan.listing),activeListingUrl:this.listingURL(plan)})),jobs:this.db.jobs.map(record=>{const {payload,operation,result,archivedOperation,...job}=record;return {...job,scheduling:queue.jobs.find(row=>row.jobId===job.id)||null,canRetry:this.canRetry(record),result:result?{externalId:result.externalId||result.id||null,summary:result.summary||null}:null};}),events:this.db.events,running:this.running,configBusy:this.configPending>0,readiness:this.adapter.readiness(),faulted:this.storageFaulted()};}
  validateMarketAccount(account){
   if(!account||typeof account!=='object'||Array.isArray(account)||typeof account.profileId!=='string'||!account.profileId||account.platform!=='vinted-fr'||typeof account.memberId!=='string'||!/^[1-9]\d{0,24}$/.test(account.memberId)||typeof account.username!=='string'||!account.username.trim()||account.username.length>100||/[\x00-\x1f\x7f]/.test(account.username)||typeof account.verifiedAt!=='string'||!Number.isFinite(Date.parse(account.verifiedAt)))throw Error('平台账号身份记录无效');
   let url;try{url=new URL(account.profileURL);}catch{throw Error('平台账号地址无效');}
@@ -120,12 +142,12 @@ class CommerceEngine{
   if(endpointChanged){if(history)throw Error('已有运营计划或历史，不能把原照片和订单切换到另一货盘');encrypted='';}
   let accountId=this.db.supplierAccountId;
   if(input.clearToken)encrypted='';else if(input.token){const token=text(input.token,'API 密钥',4096);if(history){const client=this.clientFactory({baseURL,token}),me=await boundedRead(requestSignal=>client.me({signal:requestSignal}),signal);guard();const id=this.accountIdentity(me);if(!accountId||!id||id!==accountId)throw Error('更换密钥前必须核对为同一个货盘账号，原密钥已保留');}encrypted=this.seal(token);}
-  guard();if(!history&&(endpointChanged||tokenChanged)){this.db.supplierAccountId=null;this.db.products=[];this.db.photoSets=[];}
+  guard();if(!history&&(endpointChanged||tokenChanged)){this.db.supplierAccountId=null;this.db.products=[];this.db.photoSets=[];this.db.productListings=[];}
   this.db.settings=next;this.db.encryptedToken=encrypted;this.connection={status:'not_connected'};this.persist();this.emit();return this.state();});
  }
  accountIdentity(data){const value=data.user?.id??data.account?.id??data.userId??data.accountId;return typeof value==='string'||Number.isSafeInteger(value)?String(value):null;}
  async connect(){
-  return this.configure(async(signal,guard)=>{try{const client=this.client(),data=await boundedRead(requestSignal=>client.me({signal:requestSignal}),signal);guard();const id=this.accountIdentity(data);if(this.db.supplierAccountId&&id!==this.db.supplierAccountId){if(this.hasHistory())throw Error('货盘账号与现有运营历史不匹配');this.db.products=[];this.db.photoSets=[];this.db.supplierAccountId=null;}if(id)this.db.supplierAccountId=id;this.connection={status:'connected',account:String(data.user?.username||data.account?.username||data.username||data.user?.id||data.account?.id||'已验证 API 密钥；账号字段待核对'),scopes:Array.isArray(data.scopes)?data.scopes:Array.isArray(data.permissions)?data.permissions:[],checkedAt:now()};this.event('info','货盘连接已验证');}
+  return this.configure(async(signal,guard)=>{try{const client=this.client(),data=await boundedRead(requestSignal=>client.me({signal:requestSignal}),signal);guard();const id=this.accountIdentity(data);if(this.db.supplierAccountId&&id!==this.db.supplierAccountId){if(this.hasHistory())throw Error('货盘账号与现有运营历史不匹配');this.db.products=[];this.db.photoSets=[];this.db.productListings=[];this.db.supplierAccountId=null;}if(id)this.db.supplierAccountId=id;this.connection={status:'connected',account:String(data.user?.username||data.account?.username||data.username||data.user?.id||data.account?.id||'已验证 API 密钥；账号字段待核对'),scopes:Array.isArray(data.scopes)?data.scopes:Array.isArray(data.permissions)?data.permissions:[],checkedAt:now()};this.event('info','货盘连接已验证');}
   catch(e){guard();this.connection={status:'error',error:e.message,checkedAt:now()};this.persist();throw e;}guard();this.persist();this.emit();return this.state();});
  }
  async sync(){
@@ -133,6 +155,22 @@ class CommerceEngine{
   // Keep below the provider's four-request server limit; avoid partial catalog commits.
   const products=await all('products','products'),sets=await all('photoSets','sets');
   guard();this.db.products=products.map(normalizeProduct).filter(p=>p.id&&p.sku);this.db.photoSets=sets.map(normalizeSet);this.event('info','已同步 '+this.db.products.length+' 个商品、'+this.db.photoSets.length+' 套照片');this.persist();this.emit();return this.state();});
+ }
+ saveProductListing(input){
+  if(this.closing||this.configPending)throw Error('货盘配置正在更新，请稍后保存商品资料');
+  if(this.storageFaulted())throw Error('运营存储不可用，请先修复后保存商品资料');
+  if(!plainRecord(input))throw Error('商品刊登资料格式无效');
+  const productId=text(input.productId,'商品编号'),products=this.db.products.filter(product=>product.id===productId),product=products[0];
+  if(products.length!==1||!product?.sku||text(product.sku,'商品 SKU')!==product.sku)throw Error('请先同步货盘并选择唯一有效的商品');
+  if(input.sku!==undefined&&input.sku!==product.sku)throw problem('PRODUCT_MISMATCH','编辑期间商品 SKU 已改变，请重新核对商品资料');
+  const previous=this.db.productListings.find(row=>row.productId===productId);
+  if(previous&&previous.sku!==product.sku)throw problem('PRODUCT_MISMATCH','货盘商品 SKU 与原商品资料不一致，原资料已保留');
+  const listing=normalizeListing(input.listing),listingPriceCents=draftPrice(input.listingPriceCents,'商品售价'),minOfferCents=draftPrice(input.minOfferCents,'最低接受价');
+  validateDraftPrices(listingPriceCents,minOfferCents);
+  const row={productId,sku:product.sku,listing,listingPriceCents,minOfferCents,createdAt:previous?.createdAt||now(),updatedAt:now()},before=this.db.productListings;
+  this.db.productListings=previous?before.map(item=>item===previous?row:item):[...before,row];
+  try{this.persist();}catch(error){this.db.productListings=before;throw error;}
+  this.emit();return {...clone(row),missingFields:missingListingFields(row.listing)};
  }
  savePlan(input){
   if(this.closing||this.configPending)throw Error('货盘配置正在更新，请稍后保存计划');
@@ -142,6 +180,7 @@ class CommerceEngine{
   const plan=validatePlan(input,{profiles:this.profiles(),products:this.db.products,previous});
   if(previous&&previous.sku!==plan.sku&&this.db.photoPreparations.some(p=>p.planId===previous.id))throw Error('已有照片领取的计划不能更换 SKU，原记录已保留');
   if(previous&&(previous.profileId!==plan.profileId||previous.productId!==plan.productId)&&(previous.activeListingId||previous.completedCount||this.db.jobs.some(j=>j.planId===previous.id)||this.db.photoPreparations.some(p=>p.planId===previous.id)))throw Error('已有业务记录的计划不能更换窗口或 SKU，请新建计划');
+  if(input.sku!==undefined&&input.sku!==plan.sku)throw problem('PRODUCT_MISMATCH','编辑期间商品 SKU 已改变，请重新核对上架计划');
   if(this.db.plans.some(p=>p.id!==plan.id&&p.profileId===plan.profileId&&p.productId===plan.productId))throw Error('该窗口已存在此商品的计划，请编辑原计划');
   if(previous)Object.assign(previous,plan);else this.db.plans.push(plan);this.event('info','已保存 '+plan.name+' 的销售计划');this.persist();this.emit();return plan;
  }

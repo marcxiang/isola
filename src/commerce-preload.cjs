@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('commerce', {
   saveSettings: input => ipcRenderer.invoke('commerce-settings-save', input),
   connect: () => ipcRenderer.invoke('commerce-connect'),
   sync: () => ipcRenderer.invoke('commerce-sync'),
+  saveProductListing: input => ipcRenderer.invoke('commerce-product-listing-save', input),
   savePlan: input => ipcRenderer.invoke('commerce-plan-save', input),
   saveAccount: input => ipcRenderer.invoke('commerce-account-save', input),
   deleteAccount: accountId => ipcRenderer.invoke('commerce-account-delete', accountId),

@@ -433,6 +433,7 @@ function register() {
   handle('commerce-open',openCommerce);
   const desk=(name,fn)=>ipcMain.handle(name,(e,...args)=>{if(!manager||manager.isDestroyed()||commerceOwner!==manager||!commerceView||commerceView.webContents.isDestroyed()||e.sender!==commerceView.webContents||e.senderFrame!==commerceView.webContents.mainFrame||e.sender.getURL()!==localFile('commerce.html'))throw Error('无权访问运营工作台');return fn(ensureCommerce(),...args);});
   desk('commerce-home',()=>showEnvironmentManager());
+  desk('commerce-product-listing-save',(c,input)=>c.saveProductListing(input));
   desk('commerce-account-save',(_c,input)=>commerceAccounts.save(input));desk('commerce-account-delete',(_c,id)=>commerceAccounts.remove(id));
   desk('commerce-account-login',(_c,id)=>commerceAccounts.login(id));desk('commerce-account-open',(_c,id)=>commerceAccounts.open(id));desk('commerce-account-verify',(_c,id,options)=>commerceAccounts.verify(id,options));
   desk('commerce-publication-inspect',(c,id)=>inspectPublication(c,id));

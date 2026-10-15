@@ -28,3 +28,13 @@ dialog{background:#242426;color:var(--ink);border:1px solid #51515b;border-radiu
 
 /* Separate available manual steps from unverified background business. */
 .readiness-content{min-width:0;flex:1}.readiness-capabilities{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px 16px;margin:12px 0 0;padding:0;list-style:none}.readiness-capabilities li{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;flex-wrap:wrap}.readiness-capabilities .pill{padding:2px 7px}#readiness-next{padding-top:10px;margin-top:12px;border-top:1px solid #635030;color:#eed3a2}.plan-publication-section{border-top:1px solid #3b3b44;padding:16px 0}.plan-publication-section .field-hint{margin:10px 0 12px}.plan-photo-heading{flex-wrap:wrap}@media(max-width:1100px){.readiness-capabilities{grid-template-columns:repeat(2,minmax(0,1fr))}#readiness{align-items:flex-start;flex-wrap:wrap}#readiness-settings{margin-left:auto}.readiness-content{flex-basis:calc(100% - 46px)}}
+/* Listing setup uses the same workspace and type scale as the plan editor. */
+.listing-workflow-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:0;list-style:none;counter-reset:listing-step}
+.listing-workflow-steps li{border:1px solid var(--line,#3b3b40);border-radius:9px;padding:15px;min-width:0;counter-increment:listing-step}
+.listing-workflow-steps h3{font-size:14px;margin:0 0 10px}.listing-workflow-steps h3:before{content:counter(listing-step);display:inline-grid;place-items:center;width:23px;height:23px;border-radius:50%;background:#34353d;color:#b9c7ff;margin-right:7px}
+.listing-workflow-steps p{font-size:12px;line-height:1.6;min-height:40px;color:var(--muted,#a8a8b2);overflow-wrap:anywhere}.listing-workflow-steps button{margin-top:8px}
+.listing-workflow-steps [data-complete="true"]{border-color:#416d58}.listing-workflow-steps [data-complete="true"] h3:before{background:#234d3a;color:#a3e1bc}
+.listing-config-note{padding:12px 16px;border-top:1px solid var(--line,#3b3b40)}.listing-config-note p{margin:5px 0;font-size:12px;line-height:1.6}.product-listing-status{display:block;margin-top:5px;font-size:12px}
+#product-listing-dialog{width:min(760px,calc(100vw - 36px));max-height:calc(100vh - 36px);overflow:auto}.inventory-intro{margin-bottom:16px}.inventory-intro h2{margin:0 0 8px}
+@media(max-width:1150px){.listing-workflow-steps{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:650px){.listing-workflow-steps{grid-template-columns:1fr}}

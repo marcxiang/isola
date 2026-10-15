@@ -1,0 +1,137 @@
+'use strict';
+
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),http=require('node:http');
+const {createHash}=require('node:crypto');
+const {nativeImage}=require('electron');
+const {CommerceEngine}=require('../src/commerce-engine.cjs');
+const {VintedSalesRuntime}=require('../src/vinted-sales-runtime.cjs');
+const {VintedAccount}=require('../src/vinted-account.cjs');
+const ORIGIN='https://www.vinted.fr',FORM=ORIGIN+'/items/new';
+const sha=value=>createHash('sha256').update(value).digest('hex'),clone=value=>JSON.parse(JSON.stringify(value));
+const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function until(read,{timeout=90000,detail=()=>''}={}){const end=Date.now()+timeout;while(!read()){if(Date.now()>end)throw Error('Local sales flow timed out: '+detail());await pause(40);}}
+
+const STYLE=String.raw`body{margin:0;font:16px Arial;color:#173b3a}header{position:fixed;inset:0 0 auto;height:72px;background:#eef8f7;z-index:80}button,a{font:inherit;padding:12px;display:inline-block}header>div{position:absolute;right:12px;top:8px}#avatar{background:white;border:1px solid #888}#account-menu{position:absolute;right:0;top:50px;width:250px;background:white;border:1px solid #888;padding:10px}#account-menu a,#account-menu button{display:block}main{max-width:650px;margin:90px 30px 220px}label{display:block;margin-top:12px}input:not([type=radio]):not([type=checkbox]):not([type=file]),textarea{display:block;width:560px;padding:10px;font:inherit}textarea{height:60px}#choice-menu:not(:empty){position:fixed;left:24px;top:96px;max-height:550px;overflow:auto;min-width:570px;padding:16px;background:#e6f7f5;border:1px solid #099;z-index:60}#choice-menu label{padding:10px}#photos{padding:12px;background:#eee}#photos img{width:90px;height:90px}#parcels{margin-top:20px}footer{padding:90px 0 30px}[hidden]{display:none!important}`;
+function header(s){return `<header><div><button id="avatar" type="button" aria-expanded="false" aria-controls="account-menu"><img alt="${s.username}" width="24" height="24" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Crect width='24' height='24' fill='gray'/%3E%3C/svg%3E"></button><div id="account-menu" aria-labelledby="avatar" hidden><a href="/member/${s.memberId}">Mon profil</a><a href="/settings/profile">Paramètres</a><a href="/my_orders">Mes commandes</a><button type="button">Se déconnecter</button></div></div></header>`;}
+const ACCOUNT_SCRIPT=String.raw`document.querySelector('#avatar').onclick=()=>{const button=document.querySelector('#avatar'),menu=document.querySelector('#account-menu');menu.hidden=!menu.hidden;button.setAttribute('aria-expanded',String(!menu.hidden));};`;
+const FORM_BODY=String.raw`<main><h1>Vends ton article</h1><form id="listing">
+<div id="photos" data-testid="media-upload"><input id="photo-file" type="file" data-testid="add-photos-input" accept="image/jpeg" multiple hidden><button type="button">Ajoute des photos</button><div id="thumbnails"></div><div role="status" id="upload-status"></div></div>
+<label for="title">Titre</label><input id="title" placeholder="Dis aux acheteurs ce que tu vends">
+<label for="description">Description</label><textarea id="description" placeholder="Ajoute des informations utiles"></textarea>
+<label for="category">Catégorie</label><input id="category" readonly placeholder="Sélectionne une catégorie"><div id="choice-menu"></div>
+<label for="brand">Marque</label><input id="brand" readonly placeholder="Sélectionne une marque">
+<label for="condition">État</label><input id="condition" readonly placeholder="Sélectionne un état">
+<label for="color">Couleur</label><input id="color" readonly placeholder="Sélectionne 2 couleurs maximum">
+<label for="price">Prix</label><input id="price" placeholder="0,00 €" inputmode="decimal">
+<div id="parcels"><h2>Taille du colis</h2>
+<label><input type="radio" name="parcel" value="Petit">Petit Convient pour un article qui tient dans une grande enveloppe.</label>
+<label><input type="radio" name="parcel" value="Moyen" checked>Recommandé Moyen Convient pour un article qui tient dans une boîte à chaussures.</label>
+<label><input type="radio" name="parcel" value="Grand">Grand Convient pour un article qui tient dans un carton de déménagement.</label></div>
+<footer><button type="button" id="save">Sauvegarder le brouillon</button><button type="submit" id="publish">Ajouter</button></footer></form></main>`;
+const FORM_SCRIPT=String.raw`
+window.fixture={events:[],confirmed:[],uploads:0,publishes:0,saves:0};
+for(const kind of ['click','input','change'])document.addEventListener(kind,event=>{if(event.target.closest('main'))fixture.events.push({kind,id:event.target.id,trusted:event.isTrusted});},true);
+const menu=document.querySelector('#choice-menu'),category=document.querySelector('#category'),brand=document.querySelector('#brand'),condition=document.querySelector('#condition'),color=document.querySelector('#color');
+function title(label){return '<div><h2><span>'+label+'</span></h2><button type="button" aria-label="Fermer">×</button></div>';}
+function finish(name,apply){let done=menu.querySelector('[data-done]');if(!done){done=document.createElement('button');done.type='button';done.dataset.done=name;done.id=name+'-done';done.textContent='Fait';menu.append(done);}done.onclick=()=>{fixture.confirmed.push(name);apply();menu.replaceChildren();};}
+function categories(level){menu.setAttribute('aria-label','Catégorie');menu.innerHTML='<input placeholder="Trouver une catégorie"><div id="category-options"></div>';const options=menu.querySelector('#category-options');if(level<2){const button=document.createElement('button');button.type='button';button.textContent=level===0?'Femmes':'Accessoires';button.onclick=()=>categories(level+1);options.append(button);}else{options.innerHTML='<label><input type="radio" name="category-choice">Autres accessoires</label>';options.querySelector('input').onchange=()=>finish('category',()=>{category.value='Autres accessoires';});}}
+category.onclick=()=>categories(0);
+brand.onclick=()=>{menu.setAttribute('aria-label','Marque');menu.innerHTML='<input placeholder="Rechercher une marque"><div id="brand-options"></div>';const search=menu.querySelector('input');search.oninput=()=>{const options=menu.querySelector('#brand-options');options.innerHTML=search.value==='Sans marque'?'<label><input type="radio" name="brand-choice">Sans marque</label>':'';const choice=options.querySelector('input');if(choice)choice.onchange=()=>finish('brand',()=>{brand.value='Sans marque';});};};
+condition.onclick=()=>{menu.removeAttribute('aria-label');menu.innerHTML=title('État')+'<label><input type="radio" name="condition-choice">Neuf sans étiquette Article neuf, sans étiquette ni emballage</label>';menu.querySelector('input').onchange=()=>finish('condition',()=>{condition.value='Neuf sans étiquette';});};
+color.onclick=()=>{menu.removeAttribute('aria-label');menu.innerHTML=title('Couleur')+'<div><div>Suggestions</div><label><input id="suggested-noir" type="checkbox" data-color="Noir">Noir</label></div><div><div>Toutes les couleurs</div><label><input id="canonical-noir" type="checkbox" data-color="Noir">Noir</label><label><input type="checkbox" data-color="Blanc">Blanc</label></div>';for(const input of menu.querySelectorAll('input'))input.onchange=()=>{for(const mirror of menu.querySelectorAll('input[data-color="'+input.dataset.color+'"]'))mirror.checked=input.checked;finish('color',()=>{color.value='Noir';});};};
+document.querySelector('#photo-file').addEventListener('change',async event=>{fixture.uploads++;const files=[...event.target.files];if(files.length!==1)throw Error('Fixture requires one original photo');const response=await fetch('/fixture/upload',{method:'POST',body:await files[0].arrayBuffer()});if(!response.ok)throw Error('Fixture upload rejected');document.querySelector('#thumbnails').innerHTML='<img src="/fixture-photo/original.jpg" alt="Photo 1 sur 1 mise en ligne Pour réorganiser les photos, appuie sur la barre d\'espace"><button type="button">Modifier la photo 1</button><button type="button">Supprimer la photo sélectionnée</button>';document.querySelector('#photos>button').textContent='Ajouter des photos';});
+document.querySelector('#save').onclick=()=>fixture.saves++;
+document.querySelector('#listing').onsubmit=async event=>{event.preventDefault();fixture.publishes++;const fields=Object.fromEntries(['title','description','category','brand','condition','color','price'].map(id=>[id,document.getElementById(id).value]));fields.parcel=document.querySelector('input[name=parcel]:checked').value;const response=await fetch('/fixture/publish',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({fields,...fixture})});if(!response.ok)throw Error('Fixture publication rejected');const next=await response.json();location.assign(next.url);};`;
+function html(s,kind){
+ let body,script=ACCOUNT_SCRIPT;
+ if(kind==='catalog')body=`<main><div role="tablist"><button role="tab" aria-selected="true">Annonces</button></div><section><h1>Ajoute des articles pour commencer à vendre</h1><p>Fais du tri ! Vends ce que tu n'utilises plus.</p><a href="${FORM}">Ajouter un article</a></section></main>`;
+ else if(kind==='form'){body=FORM_BODY;script+=FORM_SCRIPT;}
+ else{const fields=s.publications[0]?.fields||{};body=`<main><section><h1>${esc(fields.title)}</h1><p>${esc(fields.price)} €</p><a href="/member/${s.memberId}">${s.username}</a><button type="button" aria-label="${esc(fields.title)}"><img width="150" height="150" alt="${esc(fields.title)}" src="/fixture-photo/${s.imageChanged?'changed':'original'}.jpg"></button><div><button type="button">Modifier l'annonce</button><button type="button">Masquer</button><button type="button">Supprimer</button><a href="/member/items/close">Indiquer comme vendu</a><a href="/member/items/reservation">Marquer comme réservé</a></div></section></main>`;}
+ return '<!doctype html><meta charset="utf-8"><link rel="icon" href="data:,"><title>Local complete sales flow fixture</title><style>'+STYLE+'</style>'+header(s)+body+'<script>'+script+'</script>';
+}
+
+module.exports=async function salesFlowSmoke(api,check){
+ assert.ok(process.env.ISOLA_TEST_DATA,'Sales flow requires an isolated application directory');
+ const engine=api.getCommerce();assert.ok(engine.adapter instanceof VintedSalesRuntime);assert.equal(engine.running,false);assert.equal(engine.active.size,0);assert.equal(engine.db.plans.length,0);
+ const previous={db:engine.db,connection:engine.connection,observations:new Map(engine.accountObservations)},profiles=[],sessions=[],scenarios=[],supplierRequests=[],unexpected=[];
+ const jpeg=nativeImage.createFromBitmap(Buffer.from([0x20,0x40,0x90,0xff,0x20,0x40,0x90,0xff,0x20,0x40,0x90,0xff,0x20,0x40,0x90,0xff]),{width:2,height:2}).toJPEG(85),originalHash=sha(jpeg),token='local-sales-flow-fixture-token';
+ let server,baseURL;
+ const products=[0,1].map(index=>({id:'flow-product-'+index,sku:'FLOW-'+index,name:'Local sales fixture '+index,stock:5,unitPriceCents:100,availablePhotoSets:1,revision:1}));
+ const sets=products.map((product,index)=>({id:'flow-set-'+index,productId:product.id,status:'available',imageCount:1})),claims=new Map();
+ engine.db=clone(previous.db);
+ async function stop(){engine.setRunning(false);if(engine.tickPromise)await engine.tickPromise;await until(()=>!engine.ticking&&engine.active.size===0,{timeout:10000});}
+ async function prepare(index){
+  const s={memberId:String(9876500100+index),username:'fixture_flow_'+index,index,uploads:[],publications:[],requests:[],imageChanged:index===1};scenarios.push(s);
+  const profile=api.saveProfile({name:'QA complete sales '+index,url:ORIGIN+'/member/'+s.memberId,fingerprintMode:'native',width:1180,height:900,windowType:'automation'});profiles.push(profile);s.profile=profile;
+  const session=api.sesFor(profile);sessions.push(session);
+  session.protocol.handle('https',async request=>{
+   const url=new URL(request.url);s.requests.push({method:request.method,url:request.url});
+   const response=(body,status=200,type='text/html; charset=utf-8')=>new Response(body,{status,headers:{'content-type':type,'cache-control':'no-store'}});
+   if(url.origin!==ORIGIN){unexpected.push('Denied browser origin '+url.origin);return response('Denied',403);}
+   if(request.method==='POST'&&url.pathname==='/fixture/upload'){const bytes=Buffer.from(await request.arrayBuffer());s.uploads.push({sha256:sha(bytes),size:bytes.length});return response('ok');}
+   if(request.method==='POST'&&url.pathname==='/fixture/publish'){const payload=await request.json();s.publications.push(payload);return response(JSON.stringify({url:'/items/'+(77770010+index)+'-local-fixture'}),200,'application/json');}
+   if(request.method!=='GET'){unexpected.push('Denied browser write '+url.pathname);return response('Denied',403);}
+   if(url.pathname==='/member/'+s.memberId)return response(html(s,'catalog'));
+   if(url.pathname==='/items/new')return response(html(s,'form'));
+   if(url.pathname==='/items/'+(77770010+index)+'-local-fixture')return response(html(s,'detail'));
+   if(['/fixture-photo/original.jpg','/fixture-photo/changed.jpg'].includes(url.pathname))return response(jpeg,200,'image/jpeg');
+   unexpected.push('Unrecognized local browser route '+url.pathname);return response('No live requests are forwarded',404);
+  });
+  await api.launch(profile.id);const w=api.windows.get(profile.id);w.show();w.focus();
+  const identity=await new VintedAccount(engine.adapter).inspectAccount(profile.id,{closeMenu:true});assert.equal(identity.verified,true);assert.equal(identity.memberId,s.memberId);engine.bindMarketAccount(profile.id,identity);
+  w.close();await until(()=>!api.windows.has(profile.id),{timeout:10000});
+  const listing={title:'Local complete flow accessory '+index,description:'Local fixture only. No real item is listed.',categoryPath:['Femmes','Accessoires','Autres accessoires'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'};
+  const plan=engine.savePlan({profileId:profile.id,productId:products[index].id,enabled:true,targetCount:2,listingPriceCents:500,minOfferCents:400,reuseOwnPhotos:true,listing});s.planId=plan.id;s.listing=listing;return s;
+ }
+ async function execute(s){engine.setRunning(true);await until(()=>{const job=engine.db.jobs.find(row=>row.planId===s.planId);return job&&['completed','needs_review','uncertain'].includes(job.state)&&!engine.ticking;},{detail:()=>JSON.stringify(engine.state().jobs)});await stop();return engine.db.jobs.find(row=>row.planId===s.planId);}
+ try{
+  server=http.createServer(async(request,response)=>{
+   const chunks=[];for await(const chunk of request)chunks.push(chunk);let body;try{body=chunks.length?JSON.parse(Buffer.concat(chunks).toString()):undefined;}catch{body=null;}
+   const url=new URL(request.url,'http://127.0.0.1'),route=url.pathname;supplierRequests.push({method:request.method,route,key:request.headers['idempotency-key']||null,body});
+   const reply=(value,status=200,type='application/json')=>{response.writeHead(status,{'content-type':type,'cache-control':'no-store'});response.end(Buffer.isBuffer(value)?value:JSON.stringify(value));};
+   if(request.headers.authorization!=='Bearer '+token){unexpected.push('Supplier authentication failed');return reply({error:'Denied'},403);}
+   if(request.method==='GET'&&route==='/api/v1/me')return reply({user:{id:'fixture-flow-supplier',username:'fixture-flow-supplier'},scopes:['products:read','photos:read','photos:claim','photos:write']});
+   if(request.method==='GET'&&route==='/api/v1/products')return reply({products,total:products.length});
+   const product=products.find(row=>route==='/api/v1/products/'+row.id);if(request.method==='GET'&&product)return reply({product});
+   if(request.method==='GET'&&route==='/api/v1/photos/sets')return reply({sets:sets.filter(row=>!url.searchParams.has('productId')||row.productId===url.searchParams.get('productId')),total:sets.length});
+   const set=sets.find(row=>route==='/api/v1/photos/sets/'+row.id);if(request.method==='GET'&&set)return reply({set});
+   if(request.method==='POST'&&route==='/api/v1/photos/claims'){
+    const chosen=sets.find(row=>row.id===body?.setId&&row.productId===body?.productId);if(!chosen||chosen.status!=='available'||!request.headers['idempotency-key'])return reply({error:'Invalid claim'},409);
+    const claim={id:'flow-claim-'+chosen.id,platform:null,listingId:null,listingUrl:null};chosen.status='claimed';chosen.claim=claim;chosen.images=[{id:'flow-image-'+chosen.id,url:baseURL+'/photos/images/flow-image-'+chosen.id}];claims.set(claim.id,chosen);return reply({claimId:claim.id,set:chosen});
+   }
+   const claimed=[...claims.entries()].find(([id])=>route==='/api/v1/photos/claims/'+id);
+   if(claimed&&request.method==='GET')return reply({claimId:claimed[0],claim:claimed[1].claim,set:claimed[1]});
+   if(claimed&&request.method==='POST'){Object.assign(claimed[1].claim,body);return reply({ok:true});}
+   if(request.method==='GET'&&route.startsWith('/api/v1/photos/images/flow-image-flow-set-'))return reply(jpeg,200,'image/jpeg');
+   unexpected.push('Unrecognized local supplier route '+request.method+' '+route);return reply({error:'No external supplier access'},404);
+  });
+  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});baseURL='http://127.0.0.1:'+server.address().port+'/api/v1';
+  await check('sales complete flow saves connection rules, verifies the supplier and synchronizes actual catalog responses',async()=>{
+   await engine.saveSettings({baseURL,token,backgroundEnabled:true,maxConcurrent:1,fulfillmentMethod:'self'});const connected=await engine.connect();assert.equal(connected.connection.status,'connected');await engine.sync();assert.deepEqual(engine.db.products.map(row=>row.id),products.map(row=>row.id));assert.equal(engine.db.photoSets.length,2);assert.equal(engine.db.supplierAccountId,'fixture-flow-supplier');assert.equal(fs.readFileSync(engine.file,'utf8').includes(token),false);assert.deepEqual(unexpected,[]);return {supplierTransport:'authenticated loopback HTTP',products:2,photoSets:2,encryptedTokenPersisted:true};
+  });
+  await check('sales complete flow opens a closed environment and persists a real DOM upload, one trusted publication and its verified receipt',async()=>{
+   const s=await prepare(0),job=await execute(s);assert.equal(job.state,'completed',job.error);const plan=engine.plan(s.planId),publication=engine.db.publications.submissions.find(row=>row.proof.facts.planId===s.planId),claim=engine.db.claims.find(row=>row.profileId===s.profile.id),prepared=engine.db.photoPreparations.find(row=>row.planId===s.planId);
+   assert.equal(s.uploads.length,1);assert.deepEqual(s.uploads[0],{sha256:originalHash,size:jpeg.length});assert.equal(s.publications.length,1);const payload=s.publications[0];assert.equal(payload.publishes,1);assert.equal(payload.uploads,1);assert.equal(payload.saves,0);assert.deepEqual(payload.confirmed,['category','brand','condition','color']);assert.ok(payload.events.every(row=>row.trusted));assert.equal(payload.events.filter(row=>row.kind==='click'&&row.id==='publish').length,1);assert.equal(payload.events.some(row=>row.kind==='click'&&row.id==='suggested-noir'),false);assert.deepEqual(payload.fields,{title:s.listing.title,description:s.listing.description,category:'Autres accessoires',brand:'Sans marque',condition:'Neuf sans étiquette',color:'Noir',price:'5,00',parcel:'Moyen'});
+   assert.equal(publication.state,'published');assert.equal(publication.attemptCount,1);assert.equal(publication.receipt.listingId,'77770010');assert.equal(publication.proof.facts.photos.claimId,claim.id);assert.equal(publication.proof.facts.photos.setId,claim.setId);assert.equal(publication.proof.facts.fields.priceCents,500);assert.equal(prepared.assets[0].sha256,originalHash);assert.equal(plan.activeListingId,'77770010');assert.equal(plan.completedCount,0);assert.equal(job.result.submissionId,publication.id);assert.equal(job.result.externalId,'77770010');assert.equal(claim.listings.length,1);assert.equal(engine.db.publicationSupplierSync.find(row=>row.submissionId===publication.id).state,'pending');
+   const disk=JSON.parse(fs.readFileSync(engine.file,'utf8'));assert.equal(disk.publications.submissions.find(row=>row.id===publication.id).state,'published');assert.equal(disk.jobs.find(row=>row.id===job.id).state,'completed');assert.equal(disk.plans.find(row=>row.id===s.planId).activeListingId,'77770010');assert.deepEqual(unexpected,[]);return {source:'production main/runtime/client; local fixture pages only',nativePublicationClicks:1,uploadBytesMatchOriginal:true,photoClaimCount:1,journalState:publication.state,jobState:job.state,activeListingId:plan.activeListingId,confirmedSales:0};
+  });
+  await check('sales complete flow preserves an attempted publication as uncertain when the detail photo differs and never uploads or publishes it again',async()=>{
+   const s=await prepare(1),job=await execute(s);assert.equal(job.state,'uncertain',job.error);const publication=engine.db.publications.submissions.find(row=>row.proof.facts.planId===s.planId);assert.equal(publication.state,'uncertain');assert.equal(publication.attemptCount,1);assert.equal(publication.receipt,null);assert.equal(engine.plan(s.planId).activeListingId,null);assert.equal(s.uploads.length,1);assert.equal(s.publications.length,1);assert.equal(engine.canRetry(job),false);
+   const counts={claims:supplierRequests.filter(row=>row.method==='POST'&&row.route==='/api/v1/photos/claims').length,uploads:s.uploads.length,publishes:s.publications.length};engine.setRunning(true);await engine.runOnce();await stop();assert.deepEqual({claims:supplierRequests.filter(row=>row.method==='POST'&&row.route==='/api/v1/photos/claims').length,uploads:s.uploads.length,publishes:s.publications.length},counts);assert.equal(engine.db.jobs.filter(row=>row.planId===s.planId).length,1);assert.equal(engine.db.sales.length,0);assert.deepEqual(unexpected,[]);return {nativePublicationClicks:1,detailPhotoMismatch:true,originalAttemptPreserved:true,repeatClaims:0,repeatUploads:0,repeatPublications:0};
+  });
+  await check('sales complete flow reloads durable published and uncertain attempts without seeding a duplicate listing or sending procurement requests',async()=>{
+   const snapshot=JSON.parse(fs.readFileSync(engine.file,'utf8')),restored=new CommerceEngine({dir:engine.dir,profiles:engine.profiles,clientFactory:engine.clientFactory,adapter:engine.adapter,seal:engine.seal,unseal:engine.unseal});
+   try{assert.equal(restored.running,false);assert.deepEqual(restored.db.publications.submissions.map(row=>[row.state,row.attemptCount]),[['published',1],['uncertain',1]]);restored.seed();assert.equal(restored.db.jobs.length,snapshot.jobs.length);assert.equal(restored.db.claims.length,2);assert.equal(restored.db.sales.length,0);assert.equal(restored.plan(scenarios[0].planId).activeListingId,'77770010');assert.equal(restored.plan(scenarios[1].planId).activeListingId,null);}
+   finally{await restored.close();}
+   assert.equal(supplierRequests.filter(row=>row.method==='POST'&&row.route==='/api/v1/photos/claims').length,2);assert.ok(supplierRequests.filter(row=>row.method==='POST').every(row=>row.route.startsWith('/api/v1/photos/claims')));assert.deepEqual(unexpected,[]);return {durableAttempts:2,attemptCountEach:1,duplicateJobs:0,procurementRequests:0,externalVintedRequestsForwarded:0};
+  });
+ }finally{
+  await stop();for(const profile of profiles){const w=api.windows.get(profile.id);if(w&&!w.isDestroyed()){w.close();await until(()=>!api.windows.has(profile.id),{timeout:10000});}}
+  // Restore the fixture's original database only after the recovery engine is
+  // closed. Production correctly refuses deleting environments with history.
+  engine.db=previous.db;engine.connection=previous.connection;engine.accountObservations.clear();for(const [id,value] of previous.observations)engine.accountObservations.set(id,value);engine.persist();engine.emit();
+  try{for(const session of sessions)session.protocol.unhandle('https');for(const profile of profiles)await api.deleteProfile(profile.id);}
+  finally{if(server)await new Promise(resolve=>{server.closeAllConnections?.();server.close(resolve);});}
+ }
+};

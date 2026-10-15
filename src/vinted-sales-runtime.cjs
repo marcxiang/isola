@@ -10,6 +10,7 @@ const {VintedPublishSubmit,publicationJournal}=require('./vinted-publish-submit.
 const {VintedListingReceipt,listingURL}=require('./vinted-listing-receipt.cjs');
 const {createSupplierOutbox}=require('./commerce-supplier-outbox.cjs');
 const {FORM_URL,listingRevision,isPublicationOpen}=require('./vinted-publication.cjs');
+const {missingListingFields}=require('./listing-config.cjs');
 const clone=value=>JSON.parse(JSON.stringify(value));
 const fail=(code,message,ambiguous=false)=>Object.assign(Error(message),{code,ambiguous});
 const binding=plan=>JSON.stringify([plan.id,plan.profileId,plan.productId,plan.sku,plan.enabled,plan.completedCount,listingRevision(plan.listingRevision),plan.targetCount,plan.listingPriceCents,plan.minOfferCents,plan.reuseOwnPhotos,plan.listing]);
@@ -78,8 +79,8 @@ class VintedSalesRuntime extends VintedAdapter {
     account=this.account(engine,profileId);
     identityGuard();
     if(plan.activeListingId||engine.db.publications.submissions.some(row=>row.proof.facts.planId===plan.id&&isPublicationOpen(row)))throw fail('PUBLICATION_EXISTS','原商品或提交记录尚未关闭，不能再次刊登');
-    for(const key of ['title','description','condition','brand','color','parcel'])if(typeof plan.listing?.[key]!=='string'||!plan.listing[key].trim())throw fail('LISTING_INCOMPLETE','计划缺少已确认的商品字段：'+key);
-    if(!Array.isArray(plan.listing.categoryPath)||!plan.listing.categoryPath.length)throw fail('LISTING_INCOMPLETE','计划缺少已确认的完整商品分类');
+    const missing=missingListingFields(plan.listing),labels={title:'标题',description:'商品描述',condition:'成色',brand:'品牌',color:'颜色',parcel:'包裹规格',categoryPath:'完整商品分类'};
+    if(missing.length)throw fail('LISTING_INCOMPLETE','计划缺少已确认的商品字段：'+missing.map(key=>labels[key]).join('、'));
     if(typeof this.ensureProfile==='function'){
      this.step(context,'open_environment',expected);
      await this.ensureProfile(profileId,{signal,guard:identityGuard,jobId:job.id});

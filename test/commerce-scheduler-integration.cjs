@@ -85,7 +85,7 @@ test('a publication created after queueing blocks both direct and batch listing 
 test('pausing one product leaves another product operation in the same account running',async t=>{
   const entered=deferred(),release=deferred(),f=fixture(t,{requireReady:async()=>{entered.resolve();await release.promise;}});
   f.engine.db.products.push({id:'product-2',sku:'FIXTURE-2',name:'Other fixture product',stock:10,priceCents:1000,photoSetsAvailable:1});
-  const other=f.engine.savePlan({...f.plan,id:undefined,productId:'product-2'});other.activeListingId='987654';const job=f.enqueue('other-product',other),running=f.engine.runJob(job);await entered.promise;
+  const other=f.engine.savePlan({...f.plan,id:undefined,productId:'product-2',sku:'FIXTURE-2'});other.activeListingId='987654';const job=f.enqueue('other-product',other),running=f.engine.runJob(job);await entered.promise;
   const controller=f.engine.active.get(f.plan.profileId);f.engine.setPlanEnabled(f.plan.id,false);assert.equal(controller.signal.aborted,false);assert.equal(other.enabled,true);release.resolve();await running;assert.equal(job.state,'completed');assert.equal(f.calls.sends,1);
 });
 test('pausing the plan that owns the lease stops its unsubmitted operation',async t=>{

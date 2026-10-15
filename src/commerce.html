@@ -27,12 +27,13 @@
   <main>
     <header class="page-header">
       <div><div class="eyebrow">ISOLA / OPERATIONS</div><h1 id="page-title">商品运营</h1><p id="page-description">查看每个商品在哪个环境销售，以及接下来需要做什么。</p></div>
-      <div class="header-actions"><span class="runner-status" id="runner-status"><i></i> 已暂停</span><button type="button" id="run-once">检查一次</button><button type="button" class="primary" id="runner-toggle">启动调度</button></div>
+      <div class="header-actions"><span class="runner-status" id="runner-status"><i></i> 已暂停</span><button type="button" id="run-once" title="执行启用计划的一轮任务，可能领取图片并发布商品">执行一轮</button><button type="button" class="primary" id="runner-toggle">启动调度</button></div>
     </header>
     <div id="load-error" role="alert" class="banner error" hidden></div>
     <div id="readiness" class="banner" role="status"><span class="banner-icon">i</span><div class="readiness-content"><b id="readiness-title">正在读取功能状态</b><p id="readiness-message">等待本机运营状态。</p><ul id="readiness-capabilities" class="readiness-capabilities" aria-label="功能与执行状态"></ul><p id="readiness-next" hidden></p></div><button type="button" id="readiness-settings">配置连接</button></div>
 
     <section id="page-overview" class="page-section">
+      <section class="card listing-workflow" aria-labelledby="listing-workflow-title"><div class="section-heading"><div><h2 id="listing-workflow-title">自动上架流程</h2><p>先配置连接、保存商品资料，再为账号创建计划并启动。照片准备、填写和发布由计划自动推进。</p></div><span id="listing-workflow-status" class="pill neutral">等待配置</span></div><ol id="listing-workflow-steps" class="listing-workflow-steps"></ol><p class="field-hint">这里核对本机配置；执行时会再次检查实际登录账号、衣橱、库存、图片和网页。保存资料或计划不会自动发布。</p></section>
       <div class="stats">
         <article><span>启用的上架计划</span><strong id="stat-plans">0</strong><small id="stat-profiles">覆盖 0 个环境</small></article>
         <article><span>可用货盘商品</span><strong id="stat-products">0</strong><small id="stat-photo-sets">0 套图片</small></article>
@@ -61,6 +62,7 @@
 
     <section id="page-inventory" class="page-section" hidden>
       <div class="section-tools"><input id="product-search" type="search" placeholder="搜索商品名称或 SKU…" aria-label="搜索货盘"><span id="inventory-count" class="muted"></span><div class="spacer"></div><button type="button" id="sync">同步货盘</button></div>
+      <section class="card inventory-intro"><h2>先保存商品资料，再分配上架计划</h2><p class="field-hint">填写法国站的标题、描述、分类和选项名称。新计划会带入这份资料与建议售价，你可以在计划中单独调整；修改商品资料不会覆盖已有计划。照片由自动上架流程准备并上传。</p></section>
       <div class="card table-card"><table><thead><tr><th>商品 / SKU</th><th>库存</th><th>货盘价格</th><th>图片套数</th><th>操作</th></tr></thead><tbody id="products"></tbody></table><div id="inventory-empty" class="empty" hidden></div></div>
       <section class="card photos-card"><div class="section-heading"><div><h2 id="photos-heading">图片套装</h2><p>图片的使用状态以货盘返回的数据为准。</p></div><button type="button" id="clear-photo-filter" class="text-button" hidden>查看全部</button></div><div id="photo-sets" class="photo-grid"></div></section>
     </section>
@@ -106,19 +108,33 @@
 
   <dialog id="plan-dialog"><form id="plan-form"><div class="dialog-heading"><div><div class="eyebrow">ENVIRONMENT PLAN</div><h2 id="plan-title">新建上架计划</h2></div><button type="button" data-close="plan-dialog" class="icon-button" aria-label="关闭">×</button></div><input name="id" type="hidden">
     <div class="field-grid"><label>浏览器环境<select name="profileId" required></select></label><label>货盘商品<select name="productId" required></select></label></div><p class="field-hint" id="plan-product-info">选择货盘商品后查看库存和图片。</p>
-    <div class="field-grid three"><label>累计销售目标（件）<input name="targetCount" type="number" min="1" max="1000" step="1" value="1" required></label><label>上架价格（€）<input name="listingPrice" type="text" inputmode="decimal" value="" placeholder="例如 24.90" required maxlength="14"></label><label>最低接受价格（€）<input name="minOffer" type="text" inputmode="decimal" value="" placeholder="例如 20.00" required maxlength="14"></label></div>
+    <div class="field-grid three"><label>累计销售目标（件）<input name="targetCount" type="number" min="1" max="1000" step="1" value="1" required></label><label>上架价格（€）<input name="listingPrice" type="text" inputmode="decimal" value="" placeholder="例如 24.90" required maxlength="14"></label><label>最低接受价格（€，可选）<input name="minOffer" type="text" inputmode="decimal" value="" placeholder="自动接受报价时填写" maxlength="14"></label></div>
+    <p id="plan-template-info" class="field-hint" role="status"></p>
+    <p id="plan-listing-readiness" class="field-hint" role="status"></p>
     <p class="field-hint">同一环境、同一 SKU 最多一个在售商品。确认成交后再补充上架，直到达到累计销售目标。</p>
     <fieldset class="listing-fields"><legend>Vinted 刊登资料</legend><p class="field-hint">填写可以确认的商品信息，分类及选项请使用法国站显示的名称。资料可以先留空保存；核对时会列出缺项。</p>
       <label>商品标题<input name="listingTitle" type="text" maxlength="100" placeholder="使用真实商品名称，不直接使用测试 SKU"></label>
       <label>商品描述<textarea name="listingDescription" rows="4" maxlength="2000" placeholder="商品类型、材质、尺寸、使用情况及可确认的瑕疵"></textarea></label>
       <label>分类路径<input name="listingCategoryPath" type="text" maxlength="821" placeholder="逐层填写，用「 / 」分隔"></label>
       <div class="field-grid"><label>成色<input name="listingCondition" type="text" maxlength="100" placeholder="按实际成色填写"></label><label>品牌<input name="listingBrand" type="text" maxlength="100" placeholder="有依据才填写品牌或无品牌"></label><label>尺码<input name="listingSize" type="text" maxlength="100" placeholder="按商品实际尺码填写"></label><label>颜色<input name="listingColor" type="text" maxlength="100"></label></div>
-      <label>包裹规格<input name="listingParcel" type="text" maxlength="100" placeholder="按实际包装尺寸和重量填写"></label>
+      <label>包裹规格<input name="listingParcel" type="text" maxlength="100" list="parcel-options" placeholder="Petit / Moyen / Grand，按实际包装选择"></label>
     </fieldset>
     <div class="plan-rules"><label class="check-row"><input name="reuseOwnPhotos" type="checkbox" checked><span>允许同一账号重复使用自己的图片</span></label><label class="check-row"><input name="autoReply" type="checkbox"><span>启用客人问题自动回复</span></label><label class="check-row"><input name="autoAcceptOffers" type="checkbox"><span>启用报价自动接受（不低于最低接受价格）</span></label></div><p id="plan-automation-note" class="field-hint"></p>
     <label>商品回复说明<textarea name="replyPolicy" rows="3" maxlength="2000" placeholder="填写可以确认的商品信息，例如尺码、材质、发货时间。没有依据的问题会留待人工处理。"></textarea></label>
     <label class="toggle-row"><span><b>启用这个计划</b><small>只有调度已启动且所需流程完成验证后，才会执行。</small></span><input name="enabled" type="checkbox"></label><div id="plan-error" class="form-error" role="alert" hidden></div><div class="form-actions end"><button type="button" data-close="plan-dialog">取消</button><button type="submit" class="primary">保存计划</button></div>
   </form></dialog>
+
+  <dialog id="product-listing-dialog" aria-labelledby="product-listing-title"><form id="product-listing-form"><div class="dialog-heading"><div><div class="eyebrow">PRODUCT / LISTING DETAILS</div><h2 id="product-listing-title">商品上架资料</h2></div><button type="button" data-close="product-listing-dialog" class="icon-button" aria-label="关闭商品资料">×</button></div><input name="productId" type="hidden"><p id="product-listing-source" class="field-hint"></p>
+    <p class="field-hint">使用商品的真实资料，分类和选项填写法国站显示的名称。可以先存草稿；新建计划时会带入，已有计划保持原资料。</p>
+    <label>商品标题<input name="listingTitle" maxlength="100" placeholder="准确的法语商品标题"></label>
+    <label>商品描述<textarea name="listingDescription" rows="4" maxlength="2000" placeholder="材质、尺寸、使用情况及可确认的瑕疵"></textarea></label>
+    <label>分类路径<input name="listingCategoryPath" maxlength="821" placeholder="逐层填写，用「 / 」分隔"></label>
+    <div class="field-grid"><label>成色<input name="listingCondition" maxlength="100" placeholder="例如 Très bon état"></label><label>品牌<input name="listingBrand" maxlength="100" placeholder="例如 Sans marque，按实物确认"></label><label>尺码（按分类需要）<input name="listingSize" maxlength="100"></label><label>颜色<input name="listingColor" maxlength="100" placeholder="例如 Noir"></label></div>
+    <label>包裹规格<input name="listingParcel" maxlength="100" list="parcel-options" placeholder="Petit / Moyen / Grand，按实际包装选择"></label>
+    <div class="field-grid"><label>建议上架价格（€，可选）<input name="listingPrice" inputmode="decimal" maxlength="14" placeholder="例如 24.90"></label><label>最低接受价格（€，可选）<input name="minOffer" inputmode="decimal" maxlength="14" placeholder="仅用于报价规则"></label></div>
+    <p id="product-listing-readiness" class="field-hint" role="status"></p><p id="product-listing-error" class="form-error" role="alert" hidden></p><div class="form-actions end"><button type="button" data-close="product-listing-dialog">取消</button><button type="submit" class="primary" id="product-listing-save">保存商品资料</button></div>
+  </form></dialog>
+  <datalist id="parcel-options"><option value="Petit"></option><option value="Moyen"></option><option value="Grand"></option></datalist>
 
   <dialog id="job-dialog"><div class="dialog-heading"><div><div class="eyebrow">TASK RECEIPT</div><h2>任务详情</h2></div><button type="button" data-close="job-dialog" class="icon-button" aria-label="关闭">×</button></div><div id="job-detail"></div><form id="reconcile-form" hidden><h3>核对原订单</h3><p class="field-hint">根据已保存的货盘订单编号，重新读取原订单和仓库状态。此检查不会重新下单；停止调度后可以执行。</p><div class="form-actions"><button type="submit">检查原订单状态</button></div></form><form id="retry-form" hidden><h3>重新排队</h3><p class="field-hint">只恢复这条任务的排队状态，保留原编号和执行记录。此操作不会立即执行；之后可再次检查。</p><div class="form-actions"><button type="submit">重新排队此任务</button></div></form></dialog>
   <dialog id="preflight-dialog" aria-labelledby="preflight-title"><div class="dialog-heading"><div><div class="eyebrow">VINTED / PAGE CHECK</div><h2 id="preflight-title">核对刊登资料</h2></div><button type="button" data-close="preflight-dialog" class="icon-button" aria-label="关闭">×</button></div><div class="rule-note preflight-note"><b>填写页面只准备表单</b><p>按计划填写能够核对的字段，缺少的内容会列出；不会点击发布、发送消息、接受报价或提交采购。图片与网页选项仍需逐项核对。</p></div><div id="preflight-detail" aria-live="polite"></div><div id="publication-submission-result" aria-live="polite" hidden></div><div class="form-actions end"><button type="button" data-close="preflight-dialog">关闭</button><button type="button" id="preflight-edit">编辑资料</button><button type="button" id="preflight-fill" class="primary">填写页面</button><button type="button" id="publication-submit" class="primary" hidden disabled>发布商品</button></div></dialog>

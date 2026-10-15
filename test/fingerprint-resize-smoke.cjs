@@ -116,7 +116,7 @@ module.exports = async function fingerprintResize(api, check) {
   async function reset(tab){await tab.view.webContents.executeJavaScript('fixtureClicks=[];fixtureEvents=[];true');}
   async function receipt(tab,id,preset){
     await pause(100);const value=await tab.view.webContents.executeJavaScript('({clicks:fixtureClicks,events:fixtureEvents})');
-    assert.equal(value.clicks.length,1,'Exactly one real DOM click');assert.equal(value.clicks[0].target,id);assert.equal(value.clicks[0].trusted,true);
+    assert.equal(value.clicks.length,1,'Exactly one real DOM click: '+JSON.stringify({target:id,device:preset.deviceModel,...value}));assert.equal(value.clicks[0].target,id);assert.equal(value.clicks[0].trusted,true);
     assert.ok(value.events.every(event=>event.trusted),'All pointer events are trusted');
     for(const type of ['pointerdown','pointerup','click',...(mobile(preset)?['touchstart','touchend']:['mousedown','mouseup'])])assert.equal(value.events.filter(event=>event.type===type&&event.target===id).length,1,type+' on '+id);
     const expected=await point(tab,id),actual=value.clicks[0];assert.ok(actual.x>=expected.rect.x&&actual.x<=expected.rect.x+expected.rect.width&&actual.y>=expected.rect.y&&actual.y<=expected.rect.y+expected.rect.height,'Click coordinates remain inside the intended CSS target');
@@ -244,7 +244,7 @@ module.exports = async function fingerprintResize(api, check) {
         };
         try{await aiClick(first,'near');}finally{c.debugger.sendCommand=originalSend;}
         assert.ok(during,'Real press triggered a resize');assert.equal(during.state.ready,false);assert.deepEqual(during.bounds,oldBounds,'Old native geometry is held until release');
-        const firstReceipt=await receipt(first,'near',preset);await settle();const after=getDisplayState(c);assert.equal(after.ready,true);assert.ok(after.version>before.version);assert.notEqual(after.scale,before.scale);assert.deepEqual(first.view.getBounds(),after.bounds);
+        const firstReceipt=await receipt(first,'near',preset).catch(error=>{error.message+=' '+JSON.stringify({commands,before,during,current:getDisplayState(c)});throw error;});await settle();const after=getDisplayState(c);assert.equal(after.ready,true);assert.ok(after.version>before.version);assert.notEqual(after.scale,before.scale);assert.deepEqual(first.view.getBounds(),after.bounds);
         const pressType=mobile(preset)?'touchStart':'mousePressed',releaseType=mobile(preset)?'touchEnd':'mouseReleased';assert.equal(commands.filter(row=>row.args.type===pressType).length,1);assert.equal(commands.filter(row=>row.args.type===releaseType).length,1);
         if(!mobile(preset)){const press=commands.find(row=>row.args.type===pressType),released=commands.find(row=>row.args.type===releaseType);assert.equal(press.args.x,released.args.x);assert.equal(press.args.y,released.args.y);}
         await reset(first);await aiClick(first,'far');const nextReceipt=await receipt(first,'far',preset);await measure('after leased resize and next action',first,baseline,preset);

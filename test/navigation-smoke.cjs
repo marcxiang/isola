@@ -49,7 +49,11 @@ module.exports=async function navigationSmoke(api,check){
    await invoke('switch',second);assert.equal(cleaned,true);assert.equal(w.activeTab,second);assert.equal(await c.executeJavaScript(`document.querySelector('#draft').value`),'keep this draft');await invoke('switch',tab.id);
   });
   await check('tab close Keep retains WebContentsView and Leave removes it after unload',async()=>{
-   choice=0;await invoke('close',tab.id);assert.equal(c.isDestroyed(),false);assert.ok(w.tabs.includes(tab));choice=1;await invoke('close',tab.id);assert.equal(c.isDestroyed(),true);assert.equal(w.tabs.includes(tab),false);assert.equal(w.tabs.length,1);
+   const before=asked;choice=0;assert.equal(await invoke('close',tab.id),false);assert.equal(asked,before+1);assert.equal(c.isDestroyed(),false);assert.ok(w.tabs.includes(tab));
+   // Read the retained document before the next user action. The mocked native
+   // dialog returns immediately; Chromium still has to finish cancelling close.
+   assert.deepEqual(await c.executeJavaScript(`({dirty,content:document.querySelector('#draft').value})`),{dirty:true,content:'keep this draft'});
+   choice=1;const started=Date.now(),closed=await invoke('close',tab.id);assert.equal(closed,true,JSON.stringify({elapsedMs:Date.now()-started,asked:asked-before,blocked:tab.unloadGuard.blocked,reason:tab.unloadGuard.reason,aiRunning:w.aiAgent.state.running,commerceActive:api.getCommerce().active.has(profile.id)}));assert.equal(asked,before+2);assert.equal(c.isDestroyed(),true);assert.equal(w.tabs.includes(tab),false);assert.equal(w.tabs.length,1);
    tab=w.tabs[0];c=tab.view.webContents;await invoke('go',url);
   });
   await check('late WebContents destruction after close timeout removes stale tab and selects live neighbor',async()=>{

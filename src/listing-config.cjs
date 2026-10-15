@@ -2,6 +2,12 @@
 
 const LIMITS = Object.freeze({title:100,description:2000,categoryLabel:100,categoryDepth:8,condition:100,brand:100,size:100,color:100,parcel:100});
 const LABELS = {title:'商品标题',description:'商品描述',condition:'成色',brand:'品牌',size:'尺码',color:'颜色',parcel:'包裹规格'};
+const REQUIRED_FIELDS = Object.freeze(['title','description','condition','brand','color','parcel','categoryPath']);
+
+function missingListingFields(listing) {
+  const value = listing && typeof listing === 'object' && !Array.isArray(listing) ? listing : {};
+  return REQUIRED_FIELDS.filter(key => key === 'categoryPath' ? !Array.isArray(value[key]) || !value[key].length : typeof value[key] !== 'string' || !value[key].trim());
+}
 
 function text(value, key, max, multiline = false) {
   if (value === undefined || value === null) return '';
@@ -30,4 +36,4 @@ function normalizeListing(input) {
   return output;
 }
 
-module.exports = {normalizeListing,LIMITS};
+module.exports = {normalizeListing,missingListingFields,LIMITS};

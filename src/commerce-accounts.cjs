@@ -15,6 +15,8 @@ const ACCOUNT_RESULT_CODES = Object.freeze({
   UNAVAILABLE: '登录暂不可用，请打开当前窗口核对。'
 });
 const DEFAULT_CODE = { saved: 'SAVED', logging_in: 'LOGIN_STARTED', awaiting_user: 'LOGIN_REQUIRED', logged_in: 'LOGIN_VERIFIED', error: 'LOGIN_FAILED' };
+const REVIEW_CODES = new Set(['LOGIN_STARTED','LOGIN_OUTCOME_UNKNOWN','CHALLENGE_REQUIRED','ACCOUNT_CONFIRMATION_REQUIRED','PAGE_CHANGED','IDENTITY_UNVERIFIED']);
+function accountNeedsLoginReview(account) { return account?.loginReviewPending === true || account?.status === 'logging_in' || REVIEW_CODES.has(account?.lastResult?.code); }
 const MAX_ACCOUNTS = 500, MAX_FILE_BYTES = 8 * 1024 * 1024;
 const clone = value => structuredClone(value);
 const now = () => new Date().toISOString();
@@ -45,7 +47,7 @@ function normalizeIdentity(observed, at = now()) {
   return { memberId: observed.memberId, username, profileURL: 'https://www.vinted.fr/member/' + observed.memberId, verifiedAt: timestamp(at) };
 }
 function publicAccount(row) {
-  return { id: row.id, platform: row.platform, label: row.label, login: row.login, profileId: row.profileId, hasPassword: !!row.encryptedPassword, identity: clone(row.identity), status: row.status, lastResult: clone(row.lastResult), lastLoginAt: row.lastLoginAt, createdAt: row.createdAt, updatedAt: row.updatedAt };
+  return { id: row.id, platform: row.platform, label: row.label, login: row.login, profileId: row.profileId, hasPassword: !!row.encryptedPassword, identity: clone(row.identity), status: row.status, lastResult: clone(row.lastResult), loginReviewPending: accountNeedsLoginReview(row), lastLoginAt: row.lastLoginAt, createdAt: row.createdAt, updatedAt: row.updatedAt };
 }
 
 class AccountsStore {
@@ -121,8 +123,8 @@ class AccountsStore {
     return { status: input.status, code, message: ACCOUNT_RESULT_CODES[code], at: timestamp(input.at ?? now()) };
   }
   #validateStored(row) {
-    if (!plain(row) || row.platform !== 'vinted' || typeof row.encryptedPassword !== 'string' || row.encryptedPassword.length > 65536 || !ACCOUNT_STATUSES.includes(row.status)) throw Error('invalid account');
-    const result = { id: identifier(row.id), platform: 'vinted', label: text(row.label, 80, '账号名称'), login: normalizedLogin(row.login), profileId: identifier(row.profileId), encryptedPassword: row.encryptedPassword, identity: null, status: row.status, lastResult: null, lastLoginAt: row.lastLoginAt === null ? null : timestamp(row.lastLoginAt), createdAt: timestamp(row.createdAt), updatedAt: timestamp(row.updatedAt) };
+    if (!plain(row) || row.platform !== 'vinted' || typeof row.encryptedPassword !== 'string' || row.encryptedPassword.length > 65536 || !ACCOUNT_STATUSES.includes(row.status) || row.loginReviewPending !== undefined && typeof row.loginReviewPending !== 'boolean') throw Error('invalid account');
+    const result = { id: identifier(row.id), platform: 'vinted', label: text(row.label, 80, '账号名称'), login: normalizedLogin(row.login), profileId: identifier(row.profileId), encryptedPassword: row.encryptedPassword, identity: null, status: row.status, lastResult: null, loginReviewPending: accountNeedsLoginReview(row), lastLoginAt: row.lastLoginAt === null ? null : timestamp(row.lastLoginAt), createdAt: timestamp(row.createdAt), updatedAt: timestamp(row.updatedAt) };
     if (row.identity !== null) {
       const identity = normalizeIdentity({ ...row.identity, verified: true }, row.identity.verifiedAt);
       if (JSON.stringify(identity) !== JSON.stringify(row.identity)) throw Error('noncanonical identity');
@@ -171,8 +173,8 @@ class AccountsStore {
     const passwordPresent = Object.hasOwn(input, 'password');
     if (passwordPresent && (typeof input.password !== 'string' || !input.password || input.password.length > 1024 || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(input.password))) throw problem('ACCOUNT_INVALID', '密码无效；不修改时请省略，清除时请使用明确的清除选项');
     if (input.clearPassword && passwordPresent) throw problem('ACCOUNT_INVALID', '不能同时设置和清除密码');
-    const at = now(), row = { id: previous?.id ?? randomUUID(), platform, label, login, profileId, encryptedPassword: previous?.encryptedPassword ?? '', identity: previous && !loginChanged && !rebound ? clone(previous.identity) : null, status: previous?.status ?? 'saved', lastResult: clone(previous?.lastResult ?? null), lastLoginAt: previous?.lastLoginAt ?? null, createdAt: previous?.createdAt ?? at, updatedAt: at };
-    if (loginChanged || rebound || passwordPresent || input.clearPassword) { row.status = 'saved'; row.lastResult = this.#result({ status: 'saved', at }); if (loginChanged || rebound) row.lastLoginAt = null; }
+    const at = now(), row = { id: previous?.id ?? randomUUID(), platform, label, login, profileId, encryptedPassword: previous?.encryptedPassword ?? '', identity: previous && !loginChanged && !rebound ? clone(previous.identity) : null, status: previous?.status ?? 'saved', lastResult: clone(previous?.lastResult ?? null), loginReviewPending: previous ? accountNeedsLoginReview(previous) : false, lastLoginAt: previous?.lastLoginAt ?? null, createdAt: previous?.createdAt ?? at, updatedAt: at };
+    if (loginChanged || rebound || passwordPresent || input.clearPassword) { row.status = 'saved'; row.lastResult = this.#result({ status: 'saved', at }); row.loginReviewPending = false; if (loginChanged || rebound) row.lastLoginAt = null; }
     this.#guard(!previous ? 'create' : rebound ? 'rebind' : loginChanged ? 'change-login' : 'update', previous, row);
     if (passwordPresent) row.encryptedPassword = this.#encrypt(input.password); else if (input.clearPassword) row.encryptedPassword = '';
     const rows = clone(this.#rows), index = rows.findIndex(account => account.id === row.id); if (index < 0) rows.push(row); else rows[index] = row;
@@ -185,13 +187,17 @@ class AccountsStore {
   verify(id, observed) {
     this.#available(); const previous = this.#account(id), identity = normalizeIdentity(observed);
     if (previous.identity && previous.identity.memberId !== identity.memberId) throw problem('ACCOUNT_CHANGED', ACCOUNT_RESULT_CODES.ACCOUNT_CHANGED);
-    const rows = clone(this.#rows), row = rows.find(account => account.id === id); row.identity = identity; row.status = 'logged_in'; row.lastResult = this.#result({ status: 'logged_in', at: identity.verifiedAt }); row.lastLoginAt = identity.verifiedAt; row.updatedAt = identity.verifiedAt;
+    const rows = clone(this.#rows), row = rows.find(account => account.id === id); row.identity = identity; row.status = 'logged_in'; row.lastResult = this.#result({ status: 'logged_in', at: identity.verifiedAt }); row.loginReviewPending = false; row.lastLoginAt = identity.verifiedAt; row.updatedAt = identity.verifiedAt;
     this.#commit(rows); return publicAccount(row);
   }
   markResult(id, input) {
     this.#available(); const previous = this.#account(id), result = this.#result(input);
+    if(input.loginReviewPending !== undefined && typeof input.loginReviewPending !== 'boolean') throw problem('ACCOUNT_INVALID', '账号核对状态无效');
     if (result.status === 'logged_in' && !previous.identity) throw problem('IDENTITY_UNVERIFIED', ACCOUNT_RESULT_CODES.IDENTITY_UNVERIFIED);
-    const rows = clone(this.#rows), row = rows.find(account => account.id === id); row.status = result.status; row.lastResult = result; row.updatedAt = result.at; if (result.status === 'logged_in') row.lastLoginAt = result.at;
+    // A failed read must report its own result without erasing the independent
+    // read-before-login latch. Only fresh identity verification or an explicit
+    // credential/binding edit clears that latch.
+    const rows = clone(this.#rows), row = rows.find(account => account.id === id); row.status = result.status; row.lastResult = result; row.loginReviewPending = accountNeedsLoginReview(previous) || accountNeedsLoginReview({status:result.status,lastResult:result}) || input.loginReviewPending === true; row.updatedAt = result.at; if (result.status === 'logged_in') row.lastLoginAt = result.at;
     this.#commit(rows); return publicAccount(row);
   }
   async withCredentials(id, callback) {
@@ -209,4 +215,4 @@ class AccountsStore {
   }
 }
 
-module.exports = { AccountsStore, ACCOUNT_STATUSES, ACCOUNT_RESULT_CODES, normalizeIdentity };
+module.exports = { AccountsStore, ACCOUNT_STATUSES, ACCOUNT_RESULT_CODES, normalizeIdentity, accountNeedsLoginReview };

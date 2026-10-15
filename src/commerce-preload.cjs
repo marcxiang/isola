@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('commerce', {
   importProductPhotos: options => ipcRenderer.invoke('commerce-local-photos-import', options),
   importSupplierPhotos: options => ipcRenderer.invoke('commerce-supplier-photos-import', options),
   saveManualProduct: input => ipcRenderer.invoke('commerce-local-product-save', input),
+  deleteManualProduct: productId => ipcRenderer.invoke('commerce-local-product-delete', productId),
+  deletePlan: planId => ipcRenderer.invoke('commerce-plan-delete', planId),
   savePlan: input => ipcRenderer.invoke('commerce-plan-save', input),
   saveAndStartPlan: input => ipcRenderer.invoke('commerce-plan-save-start', input),
   startPlan: planId => ipcRenderer.invoke('commerce-plan-start', planId),
@@ -46,5 +48,10 @@ contextBridge.exposeInMainWorld('commerce', {
     const listener = (_, state) => fn(state);
     ipcRenderer.on('commerce-state', listener);
     return () => ipcRenderer.removeListener('commerce-state', listener);
+  },
+  onEnvironment: fn => {
+    if(typeof fn!=='function')return ()=>{};
+    const listener=(_event,context)=>{if(context&&typeof context.profileId==='string'&&['accounts','plans'].includes(context.section))fn({profileId:context.profileId,section:context.section});};
+    ipcRenderer.on('commerce-environment',listener);return ()=>ipcRenderer.removeListener('commerce-environment',listener);
   }
 });

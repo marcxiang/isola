@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Isola · 运营工作台</title>
   <link rel="stylesheet" href="commerce.css">
+  <link rel="stylesheet" href="commerce-environments.css">
 </head>
 <body>
   <aside class="sidebar">
@@ -16,8 +17,7 @@
     </nav>
     <nav id="workspace-commerce-menu" class="sidebar-submenu" aria-label="账号与运营">
       <button type="button" data-page="overview" class="nav-item active" aria-current="page"><span>▦</span> 商品运营</button>
-      <button type="button" data-page="accounts" class="nav-item"><span>◎</span> 账号中心 <b id="nav-account-count" hidden>0</b></button>
-      <button type="button" data-page="plans" class="nav-item"><span>▤</span> 上架计划</button>
+      <button type="button" data-page="plans" class="nav-item"><span>▤</span> 自动化环境 <b id="nav-account-count" hidden>0</b></button>
       <button type="button" data-page="inventory" class="nav-item"><span>◇</span> 商品与图片</button>
       <button type="button" data-page="jobs" class="nav-item"><span>≋</span> 任务记录 <b id="nav-review-count" hidden>0</b></button>
       <button type="button" data-page="settings" class="nav-item"><span>⚙</span> 连接与规则</button>
@@ -33,7 +33,7 @@
     <div id="readiness" class="banner" role="status"><span class="banner-icon">i</span><div class="readiness-content"><b id="readiness-title">正在读取功能状态</b><p id="readiness-message">等待本机运营状态。</p><ul id="readiness-capabilities" class="readiness-capabilities" aria-label="功能与执行状态"></ul><p id="readiness-next" hidden></p></div><button type="button" id="readiness-settings">配置连接</button></div>
 
     <section id="page-overview" class="page-section">
-      <section class="card listing-workflow" aria-labelledby="listing-workflow-title"><div class="section-heading"><div><h2 id="listing-workflow-title">自动上架流程</h2><p>先配置连接、保存商品资料，再为账号创建计划并启动。照片准备、填写和发布由计划自动推进。</p></div><span id="listing-workflow-status" class="pill neutral">等待配置</span></div><ol id="listing-workflow-steps" class="listing-workflow-steps"></ol><p class="field-hint">这里核对本机配置；执行时会再次检查实际登录账号、衣橱、库存、图片和网页。保存资料或计划不会自动发布。</p></section>
+      <section class="card listing-workflow" aria-labelledby="listing-workflow-title"><div class="section-heading"><div><h2 id="listing-workflow-title">自动上架流程</h2><p>先配置连接、保存商品资料，再为账号创建计划并启动。照片准备、填写和发布由计划自动推进。</p></div><span id="listing-workflow-status" class="pill neutral">等待配置</span></div><ol id="listing-workflow-steps" class="listing-workflow-steps"></ol><p class="field-hint">这里核对本机配置；执行时会再次检查实际登录账号、衣橱、库存、图片和网页。保存资料或未启用的计划不会自动发布；选择“启用并开始”后会执行上架。</p></section>
       <div class="stats">
         <article><span>启用的上架计划</span><strong id="stat-plans">0</strong><small id="stat-profiles">覆盖 0 个环境</small></article>
         <article><span>可用货盘商品</span><strong id="stat-products">0</strong><small id="stat-photo-sets">0 套图片</small></article>
@@ -48,23 +48,32 @@
       <section class="card operations-events"><div class="section-heading"><div><h2>最新动态</h2><p>最近的调度与执行结果。</p></div><span class="live-label">本机记录</span></div><div id="events" class="event-list" aria-live="polite"></div></section>
     </section>
 
-    <section id="page-accounts" class="page-section" hidden>
-      <section class="card account-intro"><div class="section-heading"><div><h2>一个账号，固定一个浏览环境</h2><p>录入 Vinted 邮箱或用户名，选择已有设备环境。保存的登录会话会继续留在该环境。</p></div><button type="button" id="new-account" class="primary">＋ 添加账号</button></div><p class="field-hint">“打开并登录”会在固定环境中处理登录；验证码、短信验证或无法确认的结果由你手动接管，再点击“核对登录”。手机方案属于桌面浏览器兼容模拟。</p><p id="account-service-note" class="field-hint" role="status"></p></section>
+    <section id="page-plans" class="page-section" hidden>
+      <section id="automation-environment-list">
+        <div class="section-tools"><input id="environment-search" type="search" placeholder="搜索自动化环境、设备或账号…" aria-label="搜索自动化环境"><span id="environment-count" class="muted"></span></div>
+        <div id="automation-environments" class="automation-environment-grid"></div>
+      </section>
+      <section id="automation-environment-detail" hidden>
+        <div class="environment-detail-heading"><button id="environment-back" type="button">← 全部自动化环境</button><div><h2 id="environment-title"></h2><p id="environment-description" class="field-hint"></p></div><span id="environment-state" class="pill neutral"></span></div>
+        <nav class="environment-detail-tabs" aria-label="环境运营设置"><button type="button" data-environment-tab="accounts">账号与登录</button><button type="button" data-environment-tab="plans">商品与上架计划</button><button type="button" id="environment-jobs">查看本环境任务</button></nav>
+    <section id="page-accounts" class="environment-account-panel" hidden>
+      <section class="card account-intro"><div class="section-heading"><div><h2>当前环境账号</h2><p>在此环境保存 Vinted 邮箱或用户名。登录会话继续留在本环境中。</p></div><button type="button" id="new-account" class="primary">＋ 添加账号</button></div><p class="field-hint">“打开并登录”会在固定环境中处理登录；验证码、短信验证或无法确认的结果由你手动接管，再点击“核对登录”。手机方案属于桌面浏览器兼容模拟。</p><p id="account-service-note" class="field-hint" role="status"></p></section>
       <div class="section-tools account-filters"><input id="account-search" type="search" aria-label="搜索账号" placeholder="搜索名称、邮箱或用户名…" autocomplete="off"><select id="account-status" aria-label="账号状态筛选"><option value="">全部账号</option><option value="attention">需要处理</option><option value="logged_in">最近已核验</option><option value="saved">待登录</option></select><span id="account-count" class="muted" role="status"></span></div>
       <div id="accounts-list" class="account-list"></div>
       <p class="footnote">这里显示本机保存的登录结果和最近核验身份，不代表账号持续在线。更换环境或删除账号前请关闭对应窗口；已有运营历史的绑定由系统保留。</p>
     </section>
 
-    <section id="page-plans" class="page-section" hidden>
-      <div class="section-tools"><input id="plan-search" type="search" placeholder="搜索商品或环境…" aria-label="搜索计划"><div class="spacer"></div><button type="button" class="primary" id="new-plan">＋ 新建计划</button></div>
+    <section id="environment-plans-panel" hidden>
+      <div class="section-tools"><input id="plan-search" type="search" placeholder="搜索此环境的商品或 SKU…" aria-label="搜索当前环境计划"><span id="environment-plan-count" class="muted"></span><div class="spacer"></div><button type="button" class="primary" id="new-plan">＋ 添加商品计划</button></div>
       <div id="plans" class="plan-list"></div>
+    </section>
+      </section>
     </section>
 
     <section id="page-inventory" class="page-section" hidden>
       <div class="section-tools"><input id="product-search" type="search" placeholder="搜索商品名称或 SKU…" aria-label="搜索商品"><span id="inventory-count" class="muted"></span><div class="spacer"></div><button type="button" id="sync">同步货盘</button><button type="button" id="new-manual-product" class="primary">＋ 自己添加商品</button></div>
       <section class="card inventory-intro"><h2>自己添加，或从货盘同步</h2><p class="field-hint">手动商品可填写资料并选择本地照片，无需货盘连接。新计划会带入商品资料与建议售价，你可以单独调整；修改商品资料不会覆盖已有计划。照片由自动上架流程上传。</p></section>
-      <div class="card table-card"><table><thead><tr><th>商品 / SKU</th><th>库存</th><th>参考价格</th><th>可用图片组</th><th>操作</th></tr></thead><tbody id="products"></tbody></table><div id="inventory-empty" class="empty" hidden></div></div>
-      <section class="card photos-card"><div class="section-heading"><div><h2 id="photos-heading">图片套装</h2><p>已使用的套装也可手动复用：读取原图后创建手动商品，原使用记录保留。原图无法读取时会说明原因。</p></div><button type="button" id="clear-photo-filter" class="text-button" hidden>查看全部</button></div><div id="photo-sets" class="photo-grid"></div></section>
+      <div id="products" class="inventory-product-grid" aria-label="商品列表"></div><div id="inventory-empty" class="empty" hidden></div>
     </section>
 
     <section id="page-jobs" class="page-section" hidden>
@@ -96,6 +105,7 @@
     </section>
   </main>
 
+  <dialog id="record-delete-dialog" aria-labelledby="record-delete-title"><div class="dialog-heading"><div><div class="eyebrow">ISOLA / DELETE</div><h2 id="record-delete-title">删除记录</h2></div><button type="button" data-close="record-delete-dialog" class="icon-button" aria-label="关闭删除确认">×</button></div><div id="record-delete-summary" class="account-confirm-summary"></div><p id="record-delete-note" class="field-hint"></p><p id="record-delete-error" class="form-error" role="alert" hidden></p><div class="form-actions end"><button type="button" data-close="record-delete-dialog">取消</button><button id="record-delete-confirm" type="button" class="danger-button">确认删除</button></div></dialog>
   <dialog id="account-dialog" aria-labelledby="account-title"><form id="account-form" autocomplete="off"><div class="dialog-heading"><div><div class="eyebrow">VINTED / ACCOUNT</div><h2 id="account-title">添加账号</h2></div><button type="button" data-close="account-dialog" class="icon-button" aria-label="关闭账号编辑">×</button></div><input name="id" type="hidden">
     <label>账号名称<input name="label" required maxlength="80" placeholder="例如：法国店铺 A" autocomplete="off"></label>
     <label>Vinted 邮箱或用户名<input name="login" required maxlength="254" placeholder="登录邮箱或用户名" autocomplete="off" spellcheck="false" autocapitalize="none"></label>
@@ -123,6 +133,8 @@
     <label>商品回复说明<textarea name="replyPolicy" rows="3" maxlength="2000" placeholder="填写可以确认的商品信息，例如尺码、材质、发货时间。没有依据的问题会留待人工处理。"></textarea></label>
     <label class="toggle-row"><span><b>保存后立即开始上架</b><small>只启动这个计划；账号、资料和执行许可缺失时会明确提示，计划保持原状态。</small></span><input name="enabled" type="checkbox"></label><div id="plan-error" class="form-error" role="alert" hidden></div><div class="form-actions end"><button type="button" data-close="plan-dialog">取消</button><button type="submit" class="primary">保存计划</button></div>
   </form></dialog>
+
+  <dialog id="product-detail-dialog" class="product-detail-dialog" aria-labelledby="product-detail-title"><div class="dialog-heading"><div><div class="eyebrow">PRODUCT DETAILS</div><h2 id="product-detail-title">商品详情</h2></div><button type="button" data-close="product-detail-dialog" class="icon-button" aria-label="关闭商品详情">×</button></div><p id="product-detail-source" class="field-hint"></p><div id="product-detail-summary"></div><div id="product-detail-actions" class="product-detail-actions"></div><div id="product-detail-listing"></div><section class="product-detail-photos"><div class="section-heading"><h3 id="photos-heading">图片套装</h3><button type="button" id="clear-photo-filter" class="text-button">返回商品列表</button></div><p id="product-photo-note" class="field-hint"></p><p id="product-detail-error" class="form-error" role="alert" hidden></p><div id="photo-sets" class="photo-grid"></div></section><div class="form-actions end"><button type="button" data-close="product-detail-dialog">关闭</button></div></dialog>
 
   <dialog id="product-listing-dialog" aria-labelledby="product-listing-title"><form id="product-listing-form"><div class="dialog-heading"><div><div class="eyebrow">PRODUCT / LISTING DETAILS</div><h2 id="product-listing-title">商品上架资料</h2></div><button type="button" data-close="product-listing-dialog" class="icon-button" aria-label="关闭商品资料">×</button></div><input name="productId" type="hidden"><p id="product-listing-source" class="field-hint"></p>
     <div data-manual-product-only hidden><div class="field-grid"><label>商品名称<input name="manualName" maxlength="200" placeholder="本机管理用的商品名称"></label><label>可售数量<input name="manualStock" type="number" min="0" max="1000000" step="1" value="1"></label></div><div class="manual-photo-picker"><button type="button" id="manual-photo-import">选择本地照片</button><span id="manual-photo-count" role="status">尚未选择照片</span></div><p class="field-hint">导入照片副本后核对图片哈希与上传回执。无照片且未启用的草稿可首次补图；已有照片不替换，新照片请新建商品。</p></div>

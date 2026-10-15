@@ -16,6 +16,18 @@ npm start
 
 公开仓库仅保存源码和进度。运行会话、密钥及真实账号/任务数据库未上传；新电脑需要重新配置和登录，不能凭空重建原 TEST 任务再次发布。继续真实任务需保留并核对原电脑的原记录。旧应用等待系统钥匙串是 2026-10-15 的最后现场观察，下次先重新检查现场状态。
 
+## 最新接续 — 0.5.3-dev.15，2026-10-15
+
+账号与计划整合为自动化环境工作流：commerce state 新增明确 windowType，main 的 manager-only commerce-environment-open 只接受已有自动化环境及 accounts/plans 小枚举，通过同一工作台私有上下文路由进入详情。普通环境已有账号或计划作为旧关联保留可达；新计划锁定选中的自动化环境。账号不再有独立侧栏页面，legacy accounts 路由映射到环境入口。商品页为卡片，图片套组移进精确商品详情，异步复用保留单一商品编辑弹窗。
+
+AccountsStore 新增向后兼容的 loginReviewPending 闩锁。核对服务纯读取失败不冒称 submitted；开窗也纳入本次结果保存。旧 LOGIN_OUTCOME_UNKNOWN 不再覆盖 UNAVAILABLE/STOPPED/身份变化等当前失败，原禁止重复登录仍由独立闩锁保留；成功 store.verify 原子写 LOGIN_VERIFIED 并清闩锁，重启保持。没有解密或修改真实账号库，没有自动重新提交登录。
+
+commerce-deletion 只删除零业务记录计划、无引用本地商品与模板，内部 configure+lease/storage/history 检查，持久失败回滚。原 job/dedupe、claim/preparation、journal/outbox、sale/reservation 和照片文件不删除；不是强制删除失败任务。UI 显式确认、busy 防双击、状态变化使确认失效，拒绝原因保留。原 Mac 任务不改，新 Mac 包未构建。
+
+<!-- dev15-validation -->
+
+dev.15 Windows 专项验证：Node 931 项通过、零失败、1 项 Windows 不适用检查跳过；环境工作台与商品/删除界面 83/83、账号 43/43、商品与自动上架 32/32。各桌面模块使用独立临时数据和新的 Electron 进程，默认沙箱开启；修正测试导航时序与状态污染后最终组全部通过，无自动重跑。另一次上架专项因测试窗口被最小化而安全停止，保留该失败记录后另行复测通过。打包 EXE 验证环境内账号、商品卡片与详情、有关联商品拒绝删除、草稿删除、计划快照、设备参数及加密账号存储；依赖审计为 0。真实 Vinted 核对或发布未在本轮完成，完整桌面回归仍不以专项替代，新 Mac 包未构建。
+
 ## 最新接续 — 0.5.3-dev.14，2026-10-15
 
 手机核对按用户指定的界面路径：独立 review tab 两读唯一 Profil / Mon profil 候选，用本次原生点击原链接进入本人主页，再用正常 reader 取得用户名并核对已有身份。已有绑定也走手机主页流程；候选仍不是核验身份。main 使用私有点击回调与导航 lease，保留原 href/slug，允许同 member 规范地址重定向，不能用 loadURL 冒充点击。原始标签与草稿保留。

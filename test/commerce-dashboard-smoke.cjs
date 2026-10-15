@@ -9,7 +9,7 @@ const {inspectQueue}=require('../src/commerce-scheduler.cjs');
 module.exports=async function commerceDashboardSmoke(_api,check){
   const {BrowserWindow}=require('electron');
   const fixture={settings:{backgroundEnabled:true,maxConcurrent:2},connection:{status:'connected'},readiness:{vinted:'unverified'},running:false,faulted:false,configBusy:false,
-    profiles:[{id:'paris',name:'Paris A'},{id:'lyon',name:'Lyon B'}],
+    profiles:[{id:'paris',name:'Paris A',windowType:'automation'},{id:'lyon',name:'Lyon B',windowType:'automation'}],
     products:[{id:'vacuum',name:'吸尘器配件',sku:'VAC-01'},{id:'scarf',name:'丝巾',sku:'SCARF-02'},{id:'bag',name:'手提袋',sku:'BAG-03'}],
     plans:[{id:'unpublished',productId:'vacuum',profileId:'paris',name:'吸尘器配件',sku:'VAC-01',enabled:true,status:'listed',listingPriceCents:500,minOfferCents:300,targetCount:2,completedCount:0},
       {id:'listed',productId:'vacuum',profileId:'lyon',name:'吸尘器配件',sku:'VAC-01',enabled:true,listingPriceCents:650,minOfferCents:450,targetCount:4,completedCount:1,activeListingId:'12345',activeListingUrl:'https://www.vinted.fr/items/12345-fixture'},
@@ -26,6 +26,7 @@ module.exports=async function commerceDashboardSmoke(_api,check){
   const update=async value=>{await js(`window.dashboardFixture.update(${JSON.stringify(value)})`);await frames();};
   const filter=async(id,value)=>{await js(`(()=>{const element=document.querySelector(${JSON.stringify('#'+id)});element.value=${JSON.stringify(value)};element.dispatchEvent(new Event(${JSON.stringify(id==='distribution-search'?'input':'change')},{bubbles:true}));})()`);await frames();};
   const visiblePlans=()=>js(`Array.from(document.querySelectorAll('#distribution-list [data-plan-id]'),row=>row.dataset.planId)`);
+  const selectEnvironment=async(id,page='overview')=>{await js(`(()=>{document.querySelector('[data-page="plans"]').click();if(!document.querySelector('#automation-environment-detail').hidden)document.querySelector('#environment-back').click();document.querySelector('[data-open-environment="${id}"]').click();})()`);await frames();assert.equal(await js(`!document.querySelector('#automation-environment-detail').hidden&&document.querySelector('#environment-title').textContent===${JSON.stringify(fixture.profiles.find(profile=>profile.id===id).name)}`),true);if(page!=='plans'){await js(`document.querySelector('[data-page="${page}"]').click()`);await frames();}};
   try{
     await window.loadFile(path.resolve(__dirname,'../src/commerce.html'));await frames();
     await check('operations dashboard maps products to distinct environments and never treats enabled plans as published',async()=>{
@@ -75,7 +76,9 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       const result=await js(`(()=>{const form=document.querySelector('#plan-form');return {open:document.querySelector('#plan-dialog').open,id:form.elements.id.value,product:form.elements.productId.value,profile:form.elements.profileId.value,price:form.elements.listingPrice.value,min:form.elements.minOffer.value,target:form.elements.targetCount.value};})()`);
       assert.deepEqual(result,{open:true,id:'listed',product:'vacuum',profile:'lyon',price:'6.50',min:'4.50',target:'4'});
       await js(`document.querySelector('#plan-dialog').close();Array.from(document.querySelectorAll('[data-product-id="bag"] button')).find(button=>button.textContent==='分配销售环境').click()`);
+      assert.equal(await js('document.querySelector("#plan-dialog").open'),false);await selectEnvironment('paris','plans');assert.equal(await js('document.querySelector("#plan-dialog").open'),true);
       assert.equal(await js(`document.querySelector('#plan-form').elements.productId.value`),'bag');await js(`document.querySelector('#plan-dialog').close()`);
+      await js(`document.querySelector('[data-page="overview"]').click()`);
       return {environmentPricesPreserved:true,unassignedProductSelected:true};
     });
     await check('operations account and publication checks keep unverified accounts explicit and never expose a publish action',async()=>{
@@ -92,6 +95,7 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       return {unverifiedAccountExplicit:true,onlyReadOnlyChecks:true,publishButtonAbsent:true};
     });
     await check('operations recovers after state refresh and shows unresolved work before completed targets',async()=>{
+      await selectEnvironment('paris');
       const changed=structuredClone(fixture);changed.plans[2].completedCount=3;changed.jobs[0].state='queued';changed.jobs[0].error='';await update(changed);
       assert.equal(await js(`document.querySelector('[data-plan-id="review"]').dataset.operation`),'pending');
       changed.jobs[0].state='completed';await update(changed);assert.equal(await js(`document.querySelector('[data-plan-id="review"]').dataset.operation`),'target_reached');
@@ -105,7 +109,7 @@ module.exports=async function commerceDashboardSmoke(_api,check){
     });
     await check('listing plans route publication checks by stored plan ID without submitting or associating',async()=>{
       const before=(await js(`window.dashboardFixture.calls()`)).length;
-      await js(`(()=>{document.querySelector('[data-page="plans"]').click();const card=document.querySelector('.plan-card[data-listing-plan-id="unpublished"]');Array.from(card.querySelectorAll('button')).find(button=>button.textContent==='核对发布条件').click();})()`);await frames();
+      await selectEnvironment('paris','plans');await js(`(()=>{const card=document.querySelector('.plan-card[data-listing-plan-id="unpublished"]');Array.from(card.querySelectorAll('button')).find(button=>button.textContent==='核对发布条件').click();})()`);await frames();
       const result=await js(`({calls:window.dashboardFixture.calls(),open:document.querySelector('#preflight-dialog').open,title:document.querySelector('#preflight-title').textContent,text:document.querySelector('#preflight-detail').textContent})`);
       assert.deepEqual(result.calls.slice(before),[{name:'inspectPublication',args:['unpublished']}]);assert.equal(result.open,true);assert.equal(result.title,'核对发布条件');assert.match(result.text,/请先上传并核对照片/);
       assert.equal(result.calls.some(call=>['submitPublication','associatePublishedListing'].includes(call.name)),false);
@@ -148,6 +152,7 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       return {explicitFalseWins:true,staleCapabilitiesRevoked:true,legacyCompatible:true};
     });
     await check('queued jobs project real scheduler wait conditions into plan cards and task detail without changing job state',async()=>{
+      await selectEnvironment('paris');
       const changed=structuredClone(fixture),at='2026-10-14T12:00:00.000Z';changed.readiness={vinted:'unverified',salesOnly:true,capabilities:{publish:true,listingPublish:true,messages:false,offers:false,saleConfirmation:false}};
       changed.profiles=changed.profiles.map(profile=>({...profile,status:profile.id==='paris'?'closed':'running'}));
       changed.jobs=[{id:'queued-wait',dedupeKey:'listing:unpublished:0',planId:'unpublished',productId:'vacuum',profileId:'paris',type:'listing',state:'queued',step:'pending',payload:{cycle:0},operation:null,mutationPending:false,result:null,updatedAt:at}];
@@ -166,6 +171,7 @@ module.exports=async function commerceDashboardSmoke(_api,check){
       return {schedulerReasons:['PROFILE_NOT_OPEN','ACCOUNT_NOT_BOUND','PLAN_PAUSED'],queuedStatePreserved:true,legacyWithoutScheduling:true,externalActions:0};
     });
     await check('automatic listing shows the closed-profile opening stage without asking for a manual launch',async()=>{
+      await selectEnvironment('paris');
       const changed=structuredClone(fixture),at='2026-10-14T12:00:00.000Z';changed.readiness={vinted:'partial',salesOnly:true,capabilities:{publish:true,autoOpenProfile:true,messages:false,offers:false,saleConfirmation:false}};
       changed.profiles=changed.profiles.map(profile=>({...profile,status:'closed'}));
       changed.jobs=[{id:'auto-open-job',dedupeKey:'listing:unpublished:0',planId:'unpublished',productId:'vacuum',profileId:'paris',type:'listing',state:'queued',step:'pending',payload:{cycle:0},operation:null,mutationPending:false,result:null,updatedAt:at}];

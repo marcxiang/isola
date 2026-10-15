@@ -18,6 +18,7 @@ const {inspectPublication,submitPublication}=require('./commerce-publication-ser
 const associationService=require('./commerce-association-service.cjs').createAssociationService();
 const {createPhotoService}=require('./commerce-photo-service.cjs');
 const {createLocalProductService}=require('./commerce-local-products.cjs');
+const commerceDeletion=require('./commerce-deletion.cjs');
 const { SKUDeskClient } = require('./sku-desk.cjs');
 const { RequestGate } = require('./sku-transport.cjs');
 const {stopDraft,installUnloadGuard,closeContents}=require('./navigation-lifecycle.cjs');
@@ -116,7 +117,7 @@ async function showEnvironmentManager(){
   workspacePage='environments';if(commerceOwner===w&&commerceView&&!commerceView.webContents.isDestroyed())commerceView.setVisible(false);
   w.setTitle('Isola · 环境管理');showWorkspaceWindow(w);w.webContents.focus();return {page:workspacePage};
 }
-async function openCommerce(page){
+async function openCommerce(page,environmentContext){
   if(page!==undefined&&(typeof page!=='string'||!COMMERCE_PAGES.has(page)))throw Error('运营页面无效');
   const request=++workspaceSequence,engine=ensureCommerce(),w=manager&&!manager.isDestroyed()?manager:await createManager();
   if(managerLoading)await managerLoading;
@@ -130,7 +131,11 @@ async function openCommerce(page){
   }
   await commerceLoading;
   if(request!==workspaceSequence||w.isDestroyed()||commerceOwner!==w||!commerceView||commerceView.webContents.isDestroyed())return {page:workspacePage};
-  workspacePage='commerce';resizeWorkspace(w);commerceView.setVisible(true);w.setTitle('Isola · 账号与运营');showWorkspaceWindow(w);commerceView.webContents.focus();engine.emit();if(page!==undefined)commerceView.webContents.send('commerce-page',page);return {page:workspacePage};
+  workspacePage='commerce';resizeWorkspace(w);commerceView.setVisible(true);w.setTitle('Isola · 账号与运营');showWorkspaceWindow(w);commerceView.webContents.focus();engine.emit();if(page!==undefined)commerceView.webContents.send('commerce-page',page);if(environmentContext)commerceView.webContents.send('commerce-environment',environmentContext);return {page:workspacePage};
+}
+function openAutomationEnvironment(profileId,section='plans'){
+ if(typeof profileId!=='string'||!['plans','accounts'].includes(section)||profile(profileId).windowType!=='automation')throw Error('请选择已有自动化环境及账号或计划设置');
+ return openCommerce('plans',{profileId,section});
 }
 function profile(id) { const p = profiles.find(p => p.id === id); if (!p) throw Error('环境不存在'); return p; }
 function requireClosed(id) { if (windows.has(id) || locks.has(id)) throw Error('请先关闭该环境'); }
@@ -557,7 +562,8 @@ function register() {
   handle('info', () => ({ version: app.getVersion(), chromium: process.versions.chrome, platform: process.platform, arch: process.arch, dataPath: app.getPath('userData') }));
   handle('fingerprint-preview', input => fingerprintFor(validate({...input,id:undefined,name:'配置预览',url:'https://example.com',proxy:{type:'direct'}})));
   handle('fingerprint-catalog', () => ({devices:DEVICE_PRESETS,systems:FINGERPRINT_PRESETS}));
-  handle('commerce-open',openCommerce);
+  handle('commerce-open',page=>openCommerce(page));
+  handle('commerce-environment-open',openAutomationEnvironment);
   const desk=(name,fn)=>ipcMain.handle(name,(e,...args)=>{if(!manager||manager.isDestroyed()||commerceOwner!==manager||!commerceView||commerceView.webContents.isDestroyed()||e.sender!==commerceView.webContents||e.senderFrame!==commerceView.webContents.mainFrame||e.sender.getURL()!==localFile('commerce.html'))throw Error('无权访问运营工作台');return fn(ensureCommerce(),...args);});
   desk('commerce-home',()=>showEnvironmentManager());
   desk('commerce-product-listing-save',(c,input)=>c.saveProductListing(input));
@@ -565,6 +571,8 @@ function register() {
   desk('commerce-supplier-photos-import',(c,input)=>localProductService.importSupplierPhotos(c,input));
   desk('commerce-local-product-save',(c,input)=>localProductService.saveManualProduct(c,input));
   desk('commerce-plan-start',(c,id)=>c.startPlan(id));
+  desk('commerce-plan-delete',(c,id)=>commerceDeletion.deletePlan(c,id));
+  desk('commerce-local-product-delete',(c,id)=>commerceDeletion.deleteLocalProduct(c,id));
   desk('commerce-plan-save-start',(c,input)=>c.saveAndStartPlan(input));
   desk('commerce-account-save',(_c,input)=>commerceAccounts.save(input));desk('commerce-account-delete',(_c,id)=>commerceAccounts.remove(id));
   desk('commerce-account-login',(_c,id)=>commerceAccounts.login(id));desk('commerce-account-open',(_c,id)=>commerceAccounts.open(id));desk('commerce-account-verify',(_c,id,options)=>commerceAccounts.verify(id,options));

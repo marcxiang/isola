@@ -1,11 +1,12 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {CommerceAccountService}=require('../src/commerce-account-service.cjs');
+const {accountNeedsLoginReview}=require('../src/commerce-accounts.cjs');
 const observed={verified:true,memberId:'123',username:'fixture_seller',profileURL:'https://www.vinted.fr/member/123',documentKey:'fixture-document'};
 function fixture(){
  let account={id:'account-1',login:'fixture@example.invalid',profileId:'profile-1',hasPassword:true,identity:null,lastResult:{code:'SAVED'}},credentialReads=0,loginCalls=0,verifyCalls=0;
- const engine={db:{marketAccounts:[]},accountObservations:new Map(),configure:async work=>work(new AbortController().signal,()=>{}),emit(){},bindMarketAccount(profileId,value){assert.equal(value.verified,true);this.db.marketAccounts=[{...value,profileId}];account.identity={...value};account.lastResult={code:'LOGIN_VERIFIED'};}};
- const store={get:id=>{if(id!==account.id)throw Error('missing');return structuredClone(account);},save:input=>{account={...account,...input};return structuredClone(account);},remove:()=>{},markResult:(_id,result)=>{account.status=result.status;account.lastResult={...result,message:'固定安全状态'};},withCredentials:async(_id,work)=>{credentialReads++;return work({login:account.login,password:'fixture-secret'});}};
+ const engine={db:{marketAccounts:[]},accountObservations:new Map(),configure:async work=>work(new AbortController().signal,()=>{}),emit(){},bindMarketAccount(profileId,value){assert.equal(value.verified,true);this.db.marketAccounts=[{...value,profileId}];account.identity={...value};account.lastResult={code:'LOGIN_VERIFIED'};account.status='logged_in';account.loginReviewPending=false;}};
+ const store={get:id=>{if(id!==account.id)throw Error('missing');return structuredClone(account);},save:input=>{account={...account,...input};return structuredClone(account);},remove:()=>{},markResult:(_id,result)=>{account.loginReviewPending=accountNeedsLoginReview(account)||result.loginReviewPending===true||accountNeedsLoginReview({status:result.status,lastResult:result});account.status=result.status;account.lastResult={...result,message:'固定安全状态'};},withCredentials:async(_id,work)=>{credentialReads++;return work({login:account.login,password:'fixture-secret'});}};
  const login={login:async(_id,input)=>{loginCalls++;assert.equal(input.password,'fixture-secret');return {status:'logged_in',verified:true,account:observed,submitted:true};},verify:async()=>{verifyCalls++;return {status:'logged_in',verified:true,account:observed,submitted:false};}};
  const service=new CommerceAccountService({engine,store,openPage:async()=>{},login});
  return {service,engine,store,login,get account(){return account;},get credentialReads(){return credentialReads;},get loginCalls(){return loginCalls;},get verifyCalls(){return verifyCalls;}};
@@ -43,7 +44,7 @@ test('only a complete stored account or engine binding supplies the mobile expec
 test('pending mobile verification forwards its prior binding without decrypting or repeating the unknown submission',async()=>{
  const f=fixture(),binding={memberId:'123',profileURL:'https://www.vinted.fr/member/123',username:'fixture_seller'};f.account.identity={...binding};f.account.lastResult={code:'LOGIN_OUTCOME_UNKNOWN'};
  f.login.verify=async(_id,input)=>{assert.deepEqual(input.expectedAccount,{profileId:'profile-1',...binding});return {status:'awaiting_user',code:'ACCOUNT_UNVERIFIED',submitted:false};};
- const out=await f.service.login('account-1');assert.equal(out.result.verified,false);assert.equal(out.result.submitted,true);assert.equal(out.result.code,'IDENTITY_UNVERIFIED');assert.equal(f.credentialReads,0);assert.equal(f.loginCalls,0);
+ const out=await f.service.login('account-1');assert.equal(out.result.verified,false);assert.equal(out.result.submitted,false);assert.equal(out.result.loginReviewPending,true);assert.equal(out.result.code,'IDENTITY_UNVERIFIED');assert.equal(f.credentialReads,0);assert.equal(f.loginCalls,0);
 });
 test('corrupt saved mobile URLs or usernames are rejected before credential access',async()=>{
  for(const change of [{profileURL:'https://www.vinted.fr/member/456'},{username:'   '}]){const f=fixture();f.account.identity={memberId:'123',profileURL:'https://www.vinted.fr/member/123',username:'fixture_seller',...change};await assert.rejects(f.service.login('account-1'),{code:'ACCOUNT_CHANGED'});assert.equal(f.credentialReads,0);assert.equal(f.loginCalls,0);}
@@ -98,6 +99,11 @@ test('anonymous homepage gets one official email-form navigation before any subm
 });
 test('a failed manual verification cannot erase the previous unknown submission latch',async()=>{
  for(const reject of [false,true]){const f=fixture();let loginCalls=0;f.login.login=async()=>{loginCalls++;return {status:'awaiting_user',code:'LOGIN_RESULT_UNKNOWN',submitted:true};};f.login.verify=async()=>{if(reject){const e=Error('provider detail');e.code='WINDOW_CLOSED';throw e;}return {status:'error',code:'WINDOW_CLOSED',submitted:false,verified:false};};
-  await f.service.login('account-1');assert.equal(f.account.lastResult.code,'LOGIN_OUTCOME_UNKNOWN');await f.service.verify('account-1',{confirmCurrent:true});assert.equal(f.account.lastResult.code,'LOGIN_OUTCOME_UNKNOWN');await f.service.login('account-1');assert.equal(loginCalls,1);assert.equal(f.credentialReads,1);
+  await f.service.login('account-1');assert.equal(f.account.lastResult.code,'LOGIN_OUTCOME_UNKNOWN');const checked=await f.service.verify('account-1',{confirmCurrent:true});assert.equal(f.account.lastResult.code,'UNAVAILABLE');assert.equal(checked.result.submitted,false);assert.equal(checked.result.loginReviewPending,true);await f.service.login('account-1');assert.equal(loginCalls,1);assert.equal(f.credentialReads,1);
  }
+});
+test('initial account-window failures replace the stale interruption message while retaining the login review latch',async()=>{
+ const f=fixture();f.account.lastResult={code:'LOGIN_OUTCOME_UNKNOWN'};f.service.openPage=async()=>{throw Object.assign(Error('private provider detail'),{code:'ACCOUNT_UNAVAILABLE'});};
+ const out=await f.service.verify('account-1',{confirmCurrent:true});assert.equal(out.result.verified,false);assert.equal(out.result.code,'UNAVAILABLE');assert.equal(out.result.submitted,false);assert.equal(out.result.loginReviewPending,true);assert.equal(f.account.lastResult.code,'UNAVAILABLE');assert.equal(f.credentialReads,0);assert.equal(f.verifyCalls,0);assert.doesNotMatch(JSON.stringify(out),/private provider detail/);
+ f.service.openPage=async()=>{};f.login.verify=async()=>({status:'awaiting_user',code:'STOPPED',submitted:false});const stopped=await f.service.login('account-1');assert.equal(stopped.result.code,'STOPPED');assert.equal(stopped.result.loginReviewPending,true);assert.equal(f.credentialReads,0);assert.equal(f.loginCalls,0);
 });

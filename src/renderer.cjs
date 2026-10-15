@@ -2,7 +2,7 @@ const $ = s => document.querySelector(s), form = $('#form'), editor = $('#editor
 const isEditorOpen=()=>!editor.hidden;
 $('#commerce-open').onclick=()=>{const expanded=$('#commerce-open').getAttribute('aria-expanded')!=='true';$('#commerce-open').setAttribute('aria-expanded',String(expanded));$('#commerce-submenu').hidden=!expanded;};
 for(const item of document.querySelectorAll('[data-commerce-page]'))item.onclick=()=>run(()=>window.isola.openCommerce(item.dataset.commercePage));
-$('#editor-open-accounts').onclick=()=>run(()=>window.isola.openCommerce('accounts'));
+$('#editor-open-accounts').onclick=()=>run(()=>form.elements.id.value&&form.elements.windowType.value==='automation'?window.isola.openAutomationEnvironment(form.elements.id.value,'accounts'):window.isola.openCommerce('plans'));
 let profiles = [], selected = new Set(), runtimeInfo = {}, currentWindowType = 'normal';
 const profileWindowType=p=>p.windowType==='automation'?'automation':'normal';
 function toast(t) { $('#toast').textContent = t; $('#toast').style.display = 'block'; clearTimeout(window.toastTimer); window.toastTimer = setTimeout(() => $('#toast').style.display = 'none', 6500); }
@@ -43,6 +43,7 @@ function render(){
   const opened=node('td','last-opened',dateLabel(p.lastOpenedAt));if(p.lastOpenedAt)opened.title=String(p.lastOpenedAt);const notesCell=node('td'),notes=node('div','notes',p.notes||'—');notes.title=p.notes||'';notesCell.append(notes);
   const actionCell=node('td','actions-cell'),actions=node('div','actions'),open=button(running?'关闭':'打开',()=>running?window.isola.stop(p.id):window.isola.launch(p.id),running?'':'primary');open.disabled=starting;
   const editButton=button('编辑',()=>{if(running||starting)throw Error('请先关闭环境');edit(p);});editButton.disabled=running||starting;actions.append(open,editButton);
+  if(automation&&typeof window.isola.openAutomationEnvironment==='function'){const operations=button('账号与计划',()=>window.isola.openAutomationEnvironment(p.id));operations.dataset.openAutomationEnvironment=p.id;operations.disabled=starting;actions.append(operations);}
   const more=node('details','more'),summary=node('summary','','更多'),menu=node('div');summary.setAttribute('aria-label',p.name+' 更多操作');
   const duplicate=button('复制配置',async()=>{more.open=false;await window.isola.duplicate(p.id);toast('已复制配置，浏览数据不会复制');});
   const test=button('检测出口 IP',async()=>{more.open=false;toast('正在检测出口 IP…');const result=await window.isola.test(p);profiles=await window.isola.list();render();toast(p.name+' · '+result.ip+' · '+result.ms+' ms');});

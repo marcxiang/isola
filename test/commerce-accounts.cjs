@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { randomBytes, createCipheriv, createDecipheriv } = require('node:crypto');
-const { AccountsStore, ACCOUNT_RESULT_CODES, normalizeIdentity } = require('../src/commerce-accounts.cjs');
+const { AccountsStore, ACCOUNT_RESULT_CODES, normalizeIdentity, accountNeedsLoginReview } = require('../src/commerce-accounts.cjs');
 
 function encryption() {
   const key = randomBytes(32);
@@ -121,6 +121,33 @@ test('login results contain fixed safe messages, preserve identity and recover a
   const restarted = new AccountsStore(f.options), recovered = restarted.get(a.id);
   assert.equal(recovered.status, 'awaiting_user'); assert.equal(recovered.lastResult.code, 'LOGIN_OUTCOME_UNKNOWN'); assert.equal(recovered.lastLoginAt, previousLoginAt); assert.equal(recovered.identity.memberId, '12345');
   assert.equal(new AccountsStore(f.options).get(a.id).status, 'awaiting_user');
+});
+test('the login review latch survives current check failures and label edits, and only fresh identity or explicit credential edits clears it', t => {
+  const f=fixture(t),saved=f.store.save(input());f.store.verify(saved.id,identity());f.store.markResult(saved.id,{status:'logging_in'});
+  f.store.markResult(saved.id,{status:'awaiting_user',code:'UNAVAILABLE',loginReviewPending:false});assert.equal(f.store.get(saved.id).lastResult.code,'UNAVAILABLE');assert.equal(f.store.get(saved.id).loginReviewPending,true);assert.equal(f.store.get(saved.id).identity.memberId,'12345');
+  f.store.save({id:saved.id,label:'Only a label edit'});assert.equal(f.store.get(saved.id).loginReviewPending,true);const restored=new AccountsStore(f.options);assert.equal(restored.get(saved.id).lastResult.code,'UNAVAILABLE');assert.equal(restored.get(saved.id).loginReviewPending,true);
+  restored.verify(saved.id,identity());const verified=new AccountsStore(f.options).get(saved.id);assert.equal(verified.loginReviewPending,false);assert.equal(verified.lastResult.code,'LOGIN_VERIFIED');assert.equal(verified.lastResult.message,ACCOUNT_RESULT_CODES.LOGIN_VERIFIED);
+  restored.markResult(saved.id,{status:'awaiting_user',code:'LOGIN_OUTCOME_UNKNOWN'});restored.save({id:saved.id,password:'explicit replacement password'});assert.equal(restored.get(saved.id).loginReviewPending,false);assert.equal(restored.get(saved.id).lastResult.code,'SAVED');
+});
+test('legacy account rows infer their review latch without rewriting current errors or treating a false field as fresh verification', t => {
+  const f=fixture(t),saved=f.store.save(input());f.store.markResult(saved.id,{status:'awaiting_user',code:'LOGIN_OUTCOME_UNKNOWN'});const data=decodedStore(f);delete data.accounts[0].loginReviewPending;fs.writeFileSync(f.store.file,rawStore(f.options,data));
+  const legacy=new AccountsStore(f.options);assert.equal(legacy.get(saved.id).loginReviewPending,true);assert.equal(legacy.get(saved.id).lastResult.code,'LOGIN_OUTCOME_UNKNOWN');assert.equal(accountNeedsLoginReview({loginReviewPending:false,lastResult:{code:'LOGIN_OUTCOME_UNKNOWN'}}),true);
+  legacy.markResult(saved.id,{status:'awaiting_user',code:'STOPPED'});const restored=new AccountsStore(f.options);assert.equal(restored.get(saved.id).lastResult.code,'STOPPED');assert.equal(restored.get(saved.id).loginReviewPending,true);
+  const corrupt=JSON.parse(f.options.unseal(JSON.parse(fs.readFileSync(f.store.file,'utf8')).encryptedData));corrupt.accounts[0].loginReviewPending='false';fs.writeFileSync(f.store.file,rawStore(f.options,corrupt));assert.throws(()=>new AccountsStore(f.options),{code:'ACCOUNT_STORAGE_INVALID'});
+});
+test('real encrypted account state records a failed check after interruption, prevents another password submission and persists successful recovery across restart', async t => {
+  const {CommerceEngine}=require('../src/commerce-engine.cjs'),{CommerceAccountService}=require('../src/commerce-account-service.cjs'),f=fixture(t),saved=f.store.save(input());f.store.verify(saved.id,identity());f.store.markResult(saved.id,{status:'logging_in'});
+  const vault=new AccountsStore(f.options);assert.equal(vault.get(saved.id).lastResult.code,'LOGIN_OUTCOME_UNKNOWN');
+  const engine=new CommerceEngine({dir:f.dir,profiles:()=>f.profiles,accounts:vault,seal:f.options.seal,unseal:f.options.unseal,adapter:{readiness:()=>({})}});let passwordReads=0,loginSubmits=0,verifyReads=0,mode='open-failure';
+  const original=vault.withCredentials.bind(vault);vault.withCredentials=async(...args)=>{passwordReads++;return original(...args);};
+  const service=new CommerceAccountService({engine,store:vault,openPage:async()=>{if(mode==='open-failure')throw Object.assign(Error('private window error'),{code:'ACCOUNT_UNAVAILABLE'});},login:{login:async()=>{loginSubmits++;throw Error('Credentials must not be submitted');},verify:async()=>{verifyReads++;return mode==='success'?{status:'logged_in',verified:true,account:identity('12345',{documentKey:'fresh-recovered-document'})}:{status:'awaiting_user',code:'STOPPED',verified:false,submitted:false};}}});
+  try{
+    const unavailable=await service.verify(saved.id,{confirmCurrent:true});assert.equal(unavailable.result.code,'UNAVAILABLE');assert.equal(unavailable.result.submitted,false);assert.equal(unavailable.result.loginReviewPending,true);assert.equal(unavailable.message,ACCOUNT_RESULT_CODES.UNAVAILABLE);assert.equal(new AccountsStore(f.options).get(saved.id).lastResult.code,'UNAVAILABLE');
+    mode='stopped';const stopped=await service.verify(saved.id,{confirmCurrent:true});assert.equal(stopped.result.code,'STOPPED');assert.equal(stopped.result.submitted,false);assert.equal(new AccountsStore(f.options).get(saved.id).loginReviewPending,true);
+    await service.login(saved.id);assert.equal(passwordReads,0);assert.equal(loginSubmits,0);assert.equal(verifyReads,2);assert.equal(vault.get(saved.id).identity.memberId,'12345');
+    mode='success';const recovered=await service.verify(saved.id,{confirmCurrent:true});assert.equal(recovered.result.verified,true);assert.equal(recovered.account.loginReviewPending,false);assert.equal(recovered.account.lastResult.code,'LOGIN_VERIFIED');assert.equal(recovered.message,'已核对当前 Vinted 登录身份。');
+    const restarted=new AccountsStore(f.options).get(saved.id);assert.equal(restarted.status,'logged_in');assert.equal(restarted.lastResult.code,'LOGIN_VERIFIED');assert.equal(restarted.lastResult.message,ACCOUNT_RESULT_CODES.LOGIN_VERIFIED);assert.equal(restarted.loginReviewPending,false);assert.equal(restarted.identity.memberId,'12345');assert.equal(passwordReads,0);assert.equal(loginSubmits,0);
+  }finally{await engine.close();}
 });
 
 test('withCredentials locks account edits, allows trusted result updates, and scrubs transient object references', async t => {

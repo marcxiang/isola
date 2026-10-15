@@ -1,4 +1,5 @@
 'use strict';
+const {accountNeedsLoginReview}=require('./commerce-accounts.cjs');
 
 // The renderer can ask to operate on an account ID, but never reads credentials.
 // Authentication is separate from the general AI page-control interface.
@@ -56,10 +57,9 @@ class CommerceAccountService{
  }
  open(id){return this.operate(id,async(account,signal,guard)=>{await this.openPage(account.profileId,{signal,guard});guard();return {account:this.store.get(id),message:'已打开固定环境，可在页面继续操作。'};});}
  verify(id,options={}){return this.operate(id,async(account,signal,guard)=>{
-  await this.openPage(account.profileId,{signal,guard});guard();
-  const wasSubmitted=pendingReview.has(account.lastResult?.code);
   let result;
   try{
+   await this.openPage(account.profileId,{signal,guard});guard();
    const expected=this.expectations(account),confirmed=options?.confirmCurrent===true;
    result=await this.loginService.verify(account.profileId,{...expected,signal,confirmCurrent:confirmed,closeAccountMenu:true,requireOwnProfileClick:true});guard();
    if(!hasVerifiedResult(result)&&(result?.code==='PROFILE_REVIEW_REQUIRED'||!expected.expectedMemberId&&result?.code==='ACCOUNT_UNVERIFIED')&&confirmed&&typeof this.loginService.inspectOwnProfileLink==='function'&&typeof this.loginService.clickOwnProfileLink==='function'){
@@ -76,17 +76,17 @@ class CommerceAccountService{
     if(hasVerifiedResult(result)&&(candidate.expiresAt<=Date.now()||result.account.memberId!==candidate.memberId||result.account.profileURL!==candidate.profileURL))throw fail('ACCOUNT_CHANGED');
    }
   }
-  catch(error){return this.record(account,{status:'awaiting_user',code:error?.code,submitted:wasSubmitted},guard);}
+  catch(error){return this.record(account,{status:'awaiting_user',code:error?.code,submitted:false},guard);}
   if(hasVerifiedResult(result))return this.commitIdentity(account,result.account,guard);
-  return this.record(account,{...result,submitted:wasSubmitted||result?.submitted===true},guard);
+  return this.record(account,{...result,submitted:result?.submitted===true},guard);
  });}
  record(account,result,guard){
   guard();const mapped=resultCodes[result?.code]||result?.code;let code=safeCodes.has(mapped)?mapped:result?.submitted?'LOGIN_OUTCOME_UNKNOWN':'UNAVAILABLE';
   if(result?.submitted===true&&!pendingReview.has(code))code='LOGIN_OUTCOME_UNKNOWN';
   const status=result?.status==='error'&&!result?.submitted?'error':'awaiting_user';
-  this.store.markResult(account.id,{status,code});this.engine.accountObservations.delete(account.profileId);this.engine.emit();
+  this.store.markResult(account.id,{status,code,loginReviewPending:accountNeedsLoginReview(account)||result?.submitted===true});this.engine.accountObservations.delete(account.profileId);this.engine.emit();
   const saved=this.store.get(account.id);
-  return {account:saved,result:{status,code,submitted:result?.submitted===true,verified:false},message:saved.lastResult?.message||MESSAGES.ACCOUNT_UNAVAILABLE};
+  return {account:saved,result:{status,code,submitted:result?.submitted===true,verified:false,loginReviewPending:accountNeedsLoginReview(saved)},message:saved.lastResult?.message||MESSAGES.ACCOUNT_UNAVAILABLE};
  }
  login(id){return this.operate(id,async(account,signal,guard)=>{
   const expected=this.expectations(account);
@@ -94,10 +94,10 @@ class CommerceAccountService{
   // A previous submission or interrupted attempt must be read back first.
   // Updating the saved credentials is an explicit fresh attempt; background
   // scheduling never repeats an authentication submission.
-  if(pendingReview.has(account.lastResult?.code)){
+  if(accountNeedsLoginReview(account)){
    let result;try{result=await this.loginService.verify(account.profileId,{...expected,signal});guard();}catch(error){result={status:'awaiting_user',code:error?.code||'LOGIN_OUTCOME_UNKNOWN'};}
    if(hasVerifiedResult(result))return this.commitIdentity(account,result.account,guard);
-   return this.record(account,{...result,submitted:true},guard);
+   return this.record(account,{...result,submitted:result?.submitted===true},guard);
   }
   if(!account.hasPassword){
    const result=await this.loginService.verify(account.profileId,{...expected,signal});guard();

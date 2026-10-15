@@ -16,7 +16,7 @@ module.exports=async function salesMainSmoke(api,check){
   assert.ok(engine.adapter instanceof VintedSalesRuntime,'Must exercise the production runtime installed by main');
   assert.equal(engine.adapter.readiness().capabilities.publish,true);assert.equal(engine.adapter.readiness().capabilities.procurement,false);assert.equal(engine.adapter.readiness().capabilities.autoOpenProfile,true);
   originalDB=engine.db;engine.db=JSON.parse(JSON.stringify(originalDB));originalInspect=engine.adapter.inspectCatalog;originalEnsureProfile=engine.adapter.ensureProfile;
-  profile=api.saveProfile({name:'QA sales main local fixture',url:USER_URL,fingerprintMode:'native',width:1180,height:900});session=api.sesFor(profile);
+  profile=api.saveProfile({name:'QA sales main local fixture',windowType:'automation',url:USER_URL,fingerprintMode:'native',width:1180,height:900});session=api.sesFor(profile);
   session.protocol.handle('https',request=>{
    requests.push({method:request.method,url:request.url});const url=new URL(request.url);
    if(request.method!=='GET'||url.origin!=='https://www.vinted.fr')return new Response('Fixture denies this request',{status:403});

@@ -6,7 +6,9 @@ const closedReceipts=new WeakMap(),CLOSED_RECEIPT_MS=30000;
 const profileCandidates=new WeakMap(),PROFILE_CANDIDATE_MS=30000;
 const receiptKey=(profileId,tab)=>profileId+'\0'+tab.id;
 const norm=value=>String(value||'').replace(/\s+/g,' ').trim();
-const stopped=()=>problem('STOPPED','账号核验已停止');
+const ABORT_MESSAGES={PAGE_CHANGED:'账号读取期间页面发生了非预期导航，请检查原页面后继续。',WINDOW_CLOSED:'账号读取窗口或标签页已关闭，请重新打开对应环境。',PAGE_BUSY:'账号读取期间该环境开始了其他页面操作，请等待当前操作完成。',TAB_CHANGED:'账号读取期间当前标签页已改变，请回到原页面后继续。',WRONG_SITE:'账号读取期间页面离开了法国 Vinted，请检查原页面。',INPUT_SURFACE_UNAVAILABLE:'账号读取窗口暂不可操作，请显示原环境后继续。',ACCOUNT_CHANGED:'账号读取期间本人身份发生变化，已停止后续操作。',PROFILE_CLOSED:'对应浏览器环境已关闭，账号读取已停止。',PROFILE_STOPPED:'对应浏览器环境的任务已停止。'};
+const stopped=signal=>{const code=signal?.reason?.code;return Object.hasOwn(ABORT_MESSAGES,code)?problem(code,ABORT_MESSAGES[code]):problem('STOPPED','账号核验已停止');};
+const navigationDetails=(event,url,inPlace,isMainFrame)=>({url:event?.url??url,sameDocument:event?.isSameDocument??inPlace,isMainFrame:event?.isMainFrame??isMainFrame});
 
 // Failure-only structural diagnostics: never include account names, hrefs,
 // page text, native IDs or data-testid values in operator-visible errors.
@@ -268,9 +270,9 @@ class VintedAccount {
     this.adapter=adapter;this.timeoutMs=Math.max(20,Math.min(10000,timeoutMs));this.menuWaitMs=Math.max(0,Math.min(3000,menuWaitMs));this.pollIntervalMs=Math.max(10,Math.min(200,pollIntervalMs));
   }
   async bounded(task,context){
-    if(context.signal.aborted)throw stopped();
+    if(context.signal.aborted)throw stopped(context.signal);
     let timer,onAbort;
-    const cancelled=new Promise((_,reject)=>{onAbort=()=>reject(stopped());context.signal.addEventListener('abort',onAbort,{once:true});timer=setTimeout(()=>{reject(problem('ACCOUNT_TIMEOUT','账号页面没有及时响应，已停止核验'));context.controller.abort();},this.timeoutMs);});
+    const cancelled=new Promise((_,reject)=>{onAbort=()=>reject(stopped(context.signal));context.signal.addEventListener('abort',onAbort,{once:true});timer=setTimeout(()=>{reject(problem('ACCOUNT_TIMEOUT','账号页面没有及时响应，已停止核验'));context.controller.abort();},this.timeoutMs);});
     try{return await Promise.race([Promise.resolve().then(task),cancelled]);}finally{clearTimeout(timer);context.signal.removeEventListener('abort',onAbort);}
   }
   async state(profileId,context,expected){
@@ -314,14 +316,14 @@ class VintedAccount {
   // Only a freshly opened native mobile drawer may produce one; it supplies
   // no username, binding, login status or closed-menu publication authority.
   async inspectOwnProfileLink(profileId,{signal}={}){
-    const controller=new AbortController(),cancel=()=>controller.abort(),context={controller,signal:controller.signal,profileCandidateOnly:true};let w,contents,menuOpenAttempted=false;
-    const navigated=(_event,_url,_inPlace,mainFrame)=>{if(mainFrame!==false)cancel();};
+    const controller=new AbortController(),cancel=()=>controller.abort(stopped(signal)),gone=()=>controller.abort(problem('WINDOW_CLOSED',ABORT_MESSAGES.WINDOW_CLOSED)),context={controller,signal:controller.signal,profileCandidateOnly:true};let w,contents,menuOpenAttempted=false;
+    const navigated=(event,url,inPlace,mainFrame)=>{if(navigationDetails(event,url,inPlace,mainFrame).isMainFrame!==false)controller.abort(problem('PAGE_CHANGED',ABORT_MESSAGES.PAGE_CHANGED));};
     try{
-      if(signal?.aborted)throw stopped();signal?.addEventListener('abort',cancel,{once:true});
+      if(signal?.aborted)throw stopped(signal);signal?.addEventListener('abort',cancel,{once:true});
       const selected=this.adapter.current(profileId,context);w=selected.w;context.tab=selected.tab;contents=context.tab.view.webContents;
       if(contents.getURL()!==ORIGIN+'/'||contents.isLoadingMainFrame?.())throw problem('ACCOUNT_UNVERIFIED','请在新建的本人账号核验标签页读取个人主页');
       w.vintedDraftController=controller;closedReceipts.get(this.adapter)?.delete(receiptKey(profileId,context.tab));
-      contents.on?.('did-start-navigation',navigated);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);
+      contents.on?.('did-start-navigation',navigated);contents.on?.('destroyed',gone);contents.on?.('render-process-gone',gone);
       const surface=await this.bounded(()=>this.adapter.control.isolated(context.tab,'('+probeOwnProfileSurface.toString()+')()'),context);
       if(surface?.challenge)throw problem('LOGIN_CHALLENGE','请先在核验标签页完成人工验证');if(surface?.ready!==true||surface.url!==ORIGIN+'/')throw problem('ACCOUNT_UNVERIFIED','本人账号核验页尚未完整加载');
       const guard=()=>this.adapter.current(profileId,context),initial=await this.state(profileId,context),expected={documentKey:initial.documentKey};
@@ -337,19 +339,23 @@ class VintedAccount {
       const createdAt=Date.now(),candidate=Object.freeze({kind:'own-profile-candidate',verified:false,profileId,tabId:context.tab.id,documentKey:second.documentKey,...memberURL(second.profileCandidate.profileURL),profileHref:second.menus[0].href,observedAt:new Date(createdAt).toISOString(),expiresAt:createdAt+PROFILE_CANDIDATE_MS,consistentReads:2});
       profileCandidates.set(candidate,{adapter:this.adapter,profileId,tab:context.tab,token,createdAt});return candidate;
     }catch(error){error.accountMenuOpenAttempted=menuOpenAttempted;throw error;}
-    finally{signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('destroyed',cancel);contents?.removeListener?.('render-process-gone',cancel);if(w?.vintedDraftController===controller)w.vintedDraftController=null;}
+    finally{signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('destroyed',gone);contents?.removeListener?.('render-process-gone',gone);if(w?.vintedDraftController===controller)w.vintedDraftController=null;}
   }
   validateOwnProfileLink(profileId,candidate,options={}){return this.consumeOwnProfileLink(profileId,candidate,options,false);}
   clickOwnProfileLink(profileId,candidate,options={}){return this.consumeOwnProfileLink(profileId,candidate,options,true);}
   async consumeOwnProfileLink(profileId,candidate,{signal,now=Date.now()}={},click=false){
     const entry=profileCandidates.get(candidate);profileCandidates.delete(candidate);
     if(!entry||entry.adapter!==this.adapter||entry.profileId!==profileId||candidate.verified!==false||candidate.expiresAt<=now||entry.createdAt>now)throw problem('ACCOUNT_UNVERIFIED','个人主页候选已过期或不属于原环境，请重新核验');
-    const controller=new AbortController(),cancel=()=>controller.abort(),context={controller,signal:controller.signal,tab:entry.tab,profileCandidateOnly:true,nativeDrawerToken:entry.token};let w,contents,clickAllowed=false,navigationCount=0,lastNavigationURL;
-    const navigated=(event,url,_inPlace,mainFrame)=>{if((event?.isMainFrame??mainFrame)===false)return;if(!clickAllowed||navigationCount===0&&url!==candidate.profileHref||navigationCount>0&&(navigationCount!==1||candidate.profileHref===candidate.profileURL||url!==candidate.profileURL)){cancel();return;}navigationCount++;lastNavigationURL=url;};
-    const inPage=(event,url,isMain)=>{if((event?.isMainFrame??isMain)===false)return;if(url!==lastNavigationURL)navigated(event,url,true,true);};
+    const controller=new AbortController(),cancel=()=>controller.abort(stopped(signal)),gone=()=>controller.abort(problem('WINDOW_CLOSED',ABORT_MESSAGES.WINDOW_CLOSED)),context={controller,signal:controller.signal,tab:entry.tab,profileCandidateOnly:true,nativeDrawerToken:entry.token};let w,contents,clickAllowed=false,navigationCount=0,lastNavigationURL;
+    const navigated=(event,url,inPlace,mainFrame)=>{const navigation=navigationDetails(event,url,inPlace,mainFrame);if(navigation.isMainFrame===false)return;url=navigation.url;
+      // A router can push the native anchor's exact URL, then replace its state
+      // at that same URL. This is one destination, not another navigation grant.
+      if(clickAllowed&&navigationCount>0&&navigation.sameDocument===true&&url===lastNavigationURL)return;
+      if(!clickAllowed||navigationCount===0&&url!==candidate.profileHref||navigationCount>0&&(navigationCount!==1||candidate.profileHref===candidate.profileURL||url!==candidate.profileURL)){controller.abort(problem('PAGE_CHANGED',ABORT_MESSAGES.PAGE_CHANGED));return;}navigationCount++;lastNavigationURL=url;};
+    const inPage=(event,url,isMain)=>{const navigation=navigationDetails(event,url,true,isMain);if(navigation.isMainFrame===false)return;if(navigation.url!==lastNavigationURL)navigated(event,url,true,isMain);};
     try{
-      if(signal?.aborted)throw stopped();signal?.addEventListener('abort',cancel,{once:true});const selected=this.adapter.current(profileId,context);w=selected.w;contents=entry.tab.view.webContents;w.vintedDraftController=controller;
-      contents.on?.('did-start-navigation',navigated);contents.on?.('did-navigate-in-page',inPage);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);
+      if(signal?.aborted)throw stopped(signal);signal?.addEventListener('abort',cancel,{once:true});const selected=this.adapter.current(profileId,context);w=selected.w;contents=entry.tab.view.webContents;w.vintedDraftController=controller;
+      contents.on?.('did-start-navigation',navigated);contents.on?.('did-navigate-in-page',inPage);contents.on?.('destroyed',gone);contents.on?.('render-process-gone',gone);
       if(contents.getURL()!==ORIGIN+'/'||contents.isLoadingMainFrame?.())throw problem('ACCOUNT_CHANGED','原个人主页核验标签页已改变');
       const surface=await this.bounded(()=>this.adapter.control.isolated(context.tab,'('+probeOwnProfileSurface.toString()+')()'),context);
       if(surface?.challenge)throw problem('LOGIN_CHALLENGE','请先在核验标签页完成人工验证');if(surface?.ready!==true||surface.url!==ORIGIN+'/'||surface.documentKey!==candidate.documentKey)throw problem('ACCOUNT_CHANGED','原个人主页核验页已改变');
@@ -360,20 +366,20 @@ class VintedAccount {
       clickAllowed=true;await this.bounded(()=>this.adapter.control.performAction(context.tab,{action:'click',elementId:armed.elementId},this.adapter.options(context.signal,()=>this.adapter.current(profileId,context))),context);this.adapter.current(profileId,context);
       const url=contents.getURL();if(navigationCount<1||![candidate.profileHref,candidate.profileURL].includes(url)||memberURL(url).memberId!==candidate.memberId)throw problem('ACCOUNT_CHANGED','原生点击后未进入该账号本人的个人主页');
       return {profileId,tabId:context.tab.id,url};
-    }finally{signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('did-navigate-in-page',inPage);contents?.removeListener?.('destroyed',cancel);contents?.removeListener?.('render-process-gone',cancel);if(contents&&!contents.isDestroyed()&&[ORIGIN+'/',candidate.profileHref,candidate.profileURL].includes(contents.getURL()))await this.adapter.control.isolated(context.tab,'(()=>{const guard=globalThis.__isolaOwnProfileClickGuard;if(guard?.token==='+JSON.stringify(entry.token)+'){guard.stop();delete globalThis.__isolaOwnProfileClickGuard;}})()').catch(()=>{});if(w?.vintedDraftController===controller)w.vintedDraftController=null;}
+    }finally{signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('did-navigate-in-page',inPage);contents?.removeListener?.('destroyed',gone);contents?.removeListener?.('render-process-gone',gone);if(contents&&!contents.isDestroyed()&&[ORIGIN+'/',candidate.profileHref,candidate.profileURL].includes(contents.getURL()))await this.adapter.control.isolated(context.tab,'(()=>{const guard=globalThis.__isolaOwnProfileClickGuard;if(guard?.token==='+JSON.stringify(entry.token)+'){guard.stop();delete globalThis.__isolaOwnProfileClickGuard;}})()').catch(()=>{});if(w?.vintedDraftController===controller)w.vintedDraftController=null;}
   }
   async inspectAccount(profileId,{signal,controller:providedController,tab:providedTab,expectedAccount,closeMenu=false,requireOwnProfileHeading=false}={}){
     const controller=providedController||new AbortController();
     if(!controller?.signal||typeof controller.abort!=='function')throw new TypeError('AbortController is required');
-    const cancel=()=>controller.abort();if(signal?.aborted)throw stopped();signal?.addEventListener('abort',cancel,{once:true});
+    const cancel=()=>controller.abort(stopped(signal));if(signal?.aborted)throw stopped(signal);signal?.addEventListener('abort',cancel,{once:true});
     const context={signal:controller.signal,controller,tab:providedTab,expectedAccount,requireOwnProfileHeading:requireOwnProfileHeading===true};
     let w,contents,ownsLock=false,menuOpened=false,menuOpenAttempted=false;
-    const changed=()=>controller.abort(),navigated=(_event,_url,_inPlace,mainFrame)=>{if(mainFrame!==false)changed();};
+    const gone=()=>controller.abort(problem('WINDOW_CLOSED',ABORT_MESSAGES.WINDOW_CLOSED)),navigated=(event,url,inPlace,mainFrame)=>{if(navigationDetails(event,url,inPlace,mainFrame).isMainFrame!==false)controller.abort(problem('PAGE_CHANGED',ABORT_MESSAGES.PAGE_CHANGED));};
     try{
       const selected=this.adapter.current(profileId,context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;
       closedReceipts.get(this.adapter)?.delete(receiptKey(profileId,context.tab));
       ownsLock=w.vintedDraftController!==controller;if(ownsLock)w.vintedDraftController=controller;
-      contents.on?.('did-start-navigation',navigated);contents.on?.('destroyed',changed);contents.on?.('render-process-gone',changed);
+      contents.on?.('did-start-navigation',navigated);contents.on?.('destroyed',gone);contents.on?.('render-process-gone',gone);
       const guard=()=>this.adapter.current(profileId,context);
       let state=await this.state(profileId,context),expected={documentKey:state.documentKey,username:state.button.username};
       if(!state.account){
@@ -408,7 +414,7 @@ class VintedAccount {
       return {verified:true,site:ORIGIN,memberId:confirmed.account.memberId,username:confirmed.account.username,usernameSource:confirmed.account.usernameSource,profileURL:confirmed.account.profileURL,documentKey:expected.documentKey,menuOpened,menuClosed,evidence:{kind:'current-account-menu',identitySource:'current-account-menu',association:confirmed.account.association,consistentReads:2},message:menuClosed?'已从当前账号菜单核对会员编号并关闭菜单；未打开个人主页或改动商品表单。':'已核对当前窗口的账号菜单；菜单保持展开，未打开个人主页或改动商品表单。'};
     }catch(error){error.accountMenuOpened=menuOpened?true:menuOpenAttempted?null:false;error.accountMenuOpenAttempted=menuOpenAttempted;error.accountMenuClosed=false;throw error;}
     finally{
-      signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('destroyed',changed);contents?.removeListener?.('render-process-gone',changed);
+      signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigated);contents?.removeListener?.('destroyed',gone);contents?.removeListener?.('render-process-gone',gone);
       if(ownsLock&&w?.vintedDraftController===controller)w.vintedDraftController=null;
     }
   }

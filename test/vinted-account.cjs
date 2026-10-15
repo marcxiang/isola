@@ -57,7 +57,8 @@ function fixture(options={}){
       const target=ids.get(args.elementId);assert.equal(args.action,'click');
       if(options.nativeProfileClicks&&target?.tagName==='A'&&['Mon profil','Profil'].includes(target.text)){
         const event={isTrusted:options.untrustedClick!==true,prevented:false,preventDefault(){this.prevented=true;},stopImmediatePropagation(){}};for(const fn of target.listeners.get('click')||[])fn(event);
-        if(!event.prevented){const destination=options.clickURL||target.href;if(options.inPageOnly){url=destination;contents.emit('did-navigate-in-page',{},url,true);}else{contents.emit('did-start-navigation',{},destination,false,true);url=destination;documentKey++;}if(options.canonicalRedirect){contents.emit('did-start-navigation',{},PROFILE,false,true);url=PROFILE;}}
+        const start=(destination,sameDocument)=>options.navigationDetailsOnly?contents.emit('did-start-navigation',{url:destination,isSameDocument:sameDocument,isMainFrame:true}):contents.emit('did-start-navigation',{},destination,sameDocument,true);
+        if(!event.prevented){const destination=options.clickURL||target.href;if(options.inPageOnly){url=destination;contents.emit('did-navigate-in-page',{},url,true);}else{start(destination,!!options.initialSameDocument);url=destination;if(!options.initialSameDocument)documentKey++;}if(options.canonicalRedirect){start(PROFILE,false);url=PROFILE;}for(const route of options.extraNavigations||[]){start(route.url,route.sameDocument);url=route.url;if(route.sameDocument)contents.emit('did-navigate-in-page',{},url,true);}}
         if(opts.signal.aborted)throw Object.assign(Error('stopped'),{code:'STOPPED'});return snapshot();
       }
       assert.ok(currentButtons.includes(target),'only the observed avatar button can receive a click');
@@ -91,6 +92,28 @@ test('a mobile candidate follows only its original native Profil anchor once, in
  for(const [profileLabel,extra] of [['Mon profil',{}],['Profil',{profileURL:PROFILE+'-fixture',canonicalRedirect:true}],['Profil',{inPageOnly:true}]]){
   const f=fixture({mobile:true,url:'https://www.vinted.fr/',unrelated:true,profileHeading:false,nativeProfileClicks:true,profileLabel,...extra}),candidate=await f.account.inspectOwnProfileLink('profile-1');assert.equal(candidate.profileHref,extra.profileURL||PROFILE);
   const out=await f.account.clickOwnProfileLink('profile-1',candidate);assert.deepEqual(out,{profileId:'profile-1',tabId:f.tab.id,url:PROFILE});assert.equal(Object.hasOwn(out,'verified'),false);assert.equal(f.calls.length,2);assert.equal(getClosedAccountEvidence(f.adapter,{profileId:'profile-1',tab:f.tab,documentKey:candidate.documentKey}),null);await assert.rejects(f.account.clickOwnProfileLink('profile-1',candidate));assert.equal(f.calls.length,2);assert.equal(f.w.vintedDraftController,null);
+ }
+});
+test('canonical native profile clicks treat repeated same-address SPA state changes as one destination for both Electron event shapes',async()=>{
+ for(const navigationDetailsOnly of [false,true]){
+  const f=fixture({mobile:true,url:'https://www.vinted.fr/',unrelated:true,profileHeading:false,nativeProfileClicks:true,initialSameDocument:true,navigationDetailsOnly,extraNavigations:[{url:PROFILE,sameDocument:true},{url:PROFILE,sameDocument:true}]}),candidate=await f.account.inspectOwnProfileLink('profile-1');
+  assert.equal(candidate.profileHref,PROFILE);assert.deepEqual(await f.account.clickOwnProfileLink('profile-1',candidate),{profileId:'profile-1',tabId:f.tab.id,url:PROFILE});assert.equal(f.calls.length,2);assert.equal(f.w.vintedDraftController,null);await assert.rejects(f.account.clickOwnProfileLink('profile-1',candidate),{code:'ACCOUNT_UNVERIFIED'});assert.equal(getClosedAccountEvidence(f.adapter,{profileId:'profile-1',tab:f.tab,documentKey:candidate.documentKey}),null);
+ }
+});
+test('same-address SPA compatibility cannot authorize another member, unknown address, URL change-and-back, or a repeated full navigation',async()=>{
+ for(const navigationDetailsOnly of [false,true])for(const extraNavigations of [[{url:PROFILE,sameDocument:false}],[{url:PROFILE+'?unknown=1',sameDocument:true}],[{url:'https://www.vinted.fr/member/999999',sameDocument:true},{url:PROFILE,sameDocument:true}],[{url:'https://unrelated.invalid/member/123456',sameDocument:false}]]){
+  const f=fixture({mobile:true,url:'https://www.vinted.fr/',unrelated:true,profileHeading:false,nativeProfileClicks:true,initialSameDocument:true,navigationDetailsOnly,extraNavigations}),candidate=await f.account.inspectOwnProfileLink('profile-1');await assert.rejects(f.account.clickOwnProfileLink('profile-1',candidate),{code:'PAGE_CHANGED'});assert.equal(f.calls.length,2);assert.equal(f.w.vintedDraftController,null);await assert.rejects(f.account.clickOwnProfileLink('profile-1',candidate),{code:'ACCOUNT_UNVERIFIED'});
+ }
+});
+test('details-shaped subframe navigation cannot stop a mobile candidate or a strict account menu read',async()=>{
+ const subframe=api=>api.tab.view.webContents.emit('did-start-navigation',{url:'https://subframe.invalid/',isMainFrame:false,isSameDocument:false});
+ const candidateFixture=fixture({mobile:true,url:'https://www.vinted.fr/',unrelated:true,profileHeading:false,beforeAction:subframe}),candidate=await candidateFixture.account.inspectOwnProfileLink('profile-1');assert.equal(candidate.consistentReads,2);assert.equal(await candidateFixture.account.validateOwnProfileLink('profile-1',candidate),true);
+ const accountFixture=fixture({beforeAction:subframe}),observed=await accountFixture.account.inspectAccount('profile-1',{closeMenu:true});assert.equal(observed.verified,true);assert.equal(observed.menuClosed,true);
+});
+test('bounded account cancellation preserves only safe typed causes without exposing arbitrary reason text',async()=>{
+ for(const code of ['TAB_CHANGED','PAGE_BUSY','PAGE_CHANGED','WINDOW_CLOSED','PRIVATE_CODE']){
+  const f=fixture(),controller=new AbortController(),reason=Object.assign(Error('PRIVATE_ACCOUNT_NAME https://private.invalid/member/123'),{code});
+  await assert.rejects(f.account.bounded(()=>{controller.abort(reason);return new Promise(()=>{});},{controller,signal:controller.signal}),error=>{assert.equal(error.code,code==='PRIVATE_CODE'?'STOPPED':code);assert.equal(/PRIVATE_ACCOUNT_NAME|private\.invalid/.test(error.message),false);return true;});
  }
 });
 test('native profile clicks reject unknown targets, stale identity epochs, untrusted events and cancellation',async()=>{
@@ -133,12 +156,12 @@ test('pre-cancellation prevents all access, and cancellation during click releas
   const active=fixture({beforeAction:api=>api.w.vintedDraftController.abort()});await assert.rejects(active.account.inspectAccount('profile-1'),{code:'STOPPED'});assert.equal(active.w.vintedDraftController,null);
 });
 test('tab switching or AI takeover during the click stops before dispatch',async()=>{
-  const tab=fixture({beforeAction:api=>api.w.activeTab='different-tab'});await assert.rejects(tab.account.inspectAccount('profile-1'),{code:'STOPPED'});
-  const ai=fixture({beforeAction:api=>api.w.aiAgent.state.running=true});await assert.rejects(ai.account.inspectAccount('profile-1'),{code:'STOPPED'});
+  const tab=fixture({beforeAction:api=>api.w.activeTab='different-tab'});await assert.rejects(tab.account.inspectAccount('profile-1'),{code:'WINDOW_CLOSED'});
+  const ai=fixture({beforeAction:api=>api.w.aiAgent.state.running=true});await assert.rejects(ai.account.inspectAccount('profile-1'),{code:'PAGE_BUSY'});
 });
 test('main-frame navigation and cross-site redirects cannot yield stale account identity',async()=>{
-  const nav=fixture({beforeAction:api=>api.tab.view.webContents.emit('did-start-navigation',{},FORM,false,true)});await assert.rejects(nav.account.inspectAccount('profile-1'),{code:'STOPPED'});
-  const foreign=fixture({beforeAction:api=>api.setURL('https://evil.invalid/')});await assert.rejects(foreign.account.inspectAccount('profile-1'),{code:'STOPPED'});
+  const nav=fixture({beforeAction:api=>api.tab.view.webContents.emit('did-start-navigation',{},FORM,false,true)});await assert.rejects(nav.account.inspectAccount('profile-1'),{code:'PAGE_CHANGED'});
+  const foreign=fixture({beforeAction:api=>api.setURL('https://evil.invalid/')});await assert.rejects(foreign.account.inspectAccount('profile-1'),{code:'WRONG_SITE'});
   const reload=fixture({beforeProbe:(api,count)=>{if(count===2)api.reload();}});await assert.rejects(reload.account.inspectAccount('profile-1'),{code:'PAGE_CHANGED'});
 });
 test('account changes between the first and final read invalidate the receipt',async()=>{

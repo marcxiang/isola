@@ -113,6 +113,28 @@ test('stopping during a prepared listing prevents publication after the awaited 
   const entered=deferred(),release=deferred();const f=await fixture(t,{adapter:{prepareListing:async(p,{claim})=>{entered.resolve();await release.promise;return {productId:p.productId,priceCents:p.listingPriceCents,currency:'EUR',imageCount:claim.images.length,imagesVerified:true,claimId:claim.id,imageIds:claim.images.map(i=>i.id)};}}});const running=f.engine.runOnce();await entered.promise;f.engine.setRunning(false);release.resolve();await running;assert.equal(f.counts.listing,0);assert.equal(f.engine.active.size,0);
 });
 
+test('an internal stopped read pauses its original job instead of endlessly reopening the environment',async t=>{
+ let reads=0,interrupt=true;const f=await fixture(t,{adapter:{readiness:()=>({capabilities:{publish:true}}),executeJob:async({job,signal})=>{reads++;assert.equal(signal.aborted,false);job.step='check_catalog';if(interrupt)throw Object.assign(Error('Fixture account reader lost its original document'),{code:'STOPPED'});job.result={externalId:'fixture-original-job-completed'};}}});
+ await f.engine.runOnce();const job=f.engine.db.jobs[0],id=job.id,key=job.dedupeKey,payload=JSON.stringify(job.payload);assert.equal(job.state,'needs_review');assert.equal(job.blockedReason,'OPERATION_INTERRUPTED');assert.match(job.error,/lost its original document/);assert.equal(job.retryAt,null);assert.equal(job.operation,null);assert.equal(job.mutationPending,false);assert.equal(f.counts.claim,0);assert.equal(f.counts.listing,0);
+ for(let i=0;i<4;i++)await f.engine.runOnce();assert.equal(reads,1);assert.equal(f.engine.db.jobs.length,1);assert.equal(job.id,id);assert.equal(job.dedupeKey,key);assert.equal(JSON.stringify(job.payload),payload);assert.equal(JSON.parse(fs.readFileSync(f.engine.file,'utf8')).jobs[0].blockedReason,'OPERATION_INTERRUPTED');
+ interrupt=false;await f.engine.resolve(id,'retry');await f.engine.runOnce();assert.equal(reads,2);assert.equal(job.state,'completed');assert.equal(job.id,id);assert.equal(job.dedupeKey,key);assert.equal(f.engine.db.jobs.length,1);
+});
+
+test('concrete account-reader failure codes survive without being mistaken for external cancellation',async t=>{
+ let reads=0;const f=await fixture(t,{adapter:{readiness:()=>({capabilities:{publish:true}}),executeJob:async({job,signal})=>{reads++;assert.equal(signal.aborted,false);job.step='check_catalog';throw Object.assign(Error('Fixture unexpected own-profile navigation'),{code:'PAGE_CHANGED'});}}});
+ await f.engine.runOnce();const job=f.engine.db.jobs[0];assert.equal(job.state,'needs_review');assert.equal(job.blockedReason,'PAGE_CHANGED');assert.equal(job.error,'Fixture unexpected own-profile navigation');await f.engine.runOnce();assert.equal(reads,1);assert.equal(f.counts.claim,0);
+});
+
+test('a real outer scheduler cancellation preserves the no-cost stopped state',async t=>{
+ const entered=deferred(),release=deferred();const f=await fixture(t,{adapter:{readiness:()=>({capabilities:{publish:true}}),executeJob:async({signal})=>{entered.resolve(signal);await release.promise;assert.equal(signal.aborted,true);throw Object.assign(Error('Fixture outer cancellation'),{code:'STOPPED'});}}});
+ const run=f.engine.runOnce();const signal=await entered.promise;f.engine.setRunning(false);assert.equal(signal.aborted,true);release.resolve();await run;const job=f.engine.db.jobs[0];assert.equal(job.state,'queued');assert.equal(job.blockedReason,'STOPPED');assert.equal(job.attempts,0);assert.equal(job.retryAt,null);assert.equal(f.counts.claim,0);
+});
+
+test('an interrupted read after mutation evidence remains uncertain and never becomes a retryable pause',async t=>{
+ let calls=0;const f=await fixture(t,{adapter:{readiness:()=>({capabilities:{publish:true}}),executeJob:async({job})=>{calls++;job.step='publish_listing';job.operation={kind:'publish',idempotencyKey:'fixture-original-submit'};job.mutationPending=true;throw Object.assign(Error('Fixture reader stopped after dispatch'),{code:'STOPPED'});}}});
+ await f.engine.runOnce();const job=f.engine.db.jobs[0];assert.equal(job.state,'uncertain');assert.equal(job.blockedReason,'RECONCILE_REQUIRED');assert.equal(job.operation.idempotencyKey,'fixture-original-submit');assert.equal(job.mutationPending,true);assert.equal(f.engine.canRetry(job),false);await f.engine.runOnce();assert.equal(calls,1);
+});
+
 test('closing an idle profile while background runs holds its pending plans without affecting another profile',async t=>{
  const f=await fixture(t),second=f.engine.savePlan(planInput({productId:'product-2'})),other=f.engine.savePlan(planInput({profileId:'profile-2'}));f.engine.seed();
  const held=f.engine.db.jobs.find(job=>job.planId===f.plan.id),same=f.engine.db.jobs.find(job=>job.planId===second.id),unaffected=f.engine.db.jobs.find(job=>job.planId===other.id),beforeOther=JSON.stringify(unaffected);f.engine.running=true;

@@ -97,6 +97,19 @@ test('mobile discovery never promotes a candidate to a binding when its current 
  }
 });
 
+test('account reads distinguish child interruption from the original job cancellation and preserve concrete causes',async()=>{
+ const f=fixture(),internal=failure('STOPPED','Fixture account menu document invalidated');
+ await assert.rejects(f.runtime.accountRead(async()=>{throw internal;},f.context.signal),error=>error.code==='ACCOUNT_READ_INTERRUPTED'&&error.cause===internal&&/document invalidated/.test(error.message));assert.equal(f.context.signal.aborted,false);
+ const specific=failure('PAGE_CHANGED','Fixture exact own-profile route changed');await assert.rejects(f.runtime.accountRead(async()=>{throw specific;},f.context.signal),error=>error===specific);
+ const unknown=Object.assign(failure('STOPPED'),{ambiguous:true});await assert.rejects(f.runtime.accountRead(async()=>{throw unknown;},f.context.signal),error=>error.code==='ACCOUNT_READ_INTERRUPTED'&&error.ambiguous===true);
+ f.context.controller.abort();await assert.rejects(f.runtime.accountRead(async()=>{throw internal;},f.context.signal),error=>error===internal&&error.code==='STOPPED');
+});
+
+test('a native mobile candidate interruption pauses before another tab, photo claim or identity binding',async()=>{
+ const f=fixture(),tab=f.tabs.get('profile-1');f.engine.db.marketAccounts=[];f.runtime.read=async()=>({elements:[{tag:'button',label:'Menu ouvert'}]});f.runtime.accountReader=()=>({inspectOwnProfileLink:async()=>{throw failure('STOPPED','Fixture mobile navigation epoch changed');},clickOwnProfileLink:async()=>{throw Error('Must not click after invalidation');}});
+ await assert.rejects(VintedSalesRuntime.prototype.inspectInitialAccount.call(f.runtime,'profile-1',{signal:f.context.signal,guard:()=>{},tab}),error=>error.code==='ACCOUNT_READ_INTERRUPTED'&&/navigation epoch changed/.test(error.message));assert.equal(f.calls.length,0);assert.equal(f.engine.db.marketAccounts.length,0);assert.equal(f.context.job.accountMemberId,undefined);assert.equal(f.clicks,0);
+});
+
 test('simultaneous different profiles cannot both acquire visible browser control',async()=>{
  const entered=deferred(),release=deferred(),f=fixture({hooks:{catalog:async(_f,{profileId})=>{if(profileId==='profile-1'){entered.resolve();await release.promise;}}}}),second=f.add(2);
  const first=f.run(),other=f.runtime.executeJob(second).then(()=>null,error=>error);await entered.promise;const blocked=await other;assert.equal(blocked?.code,'WORKSPACE_BUSY');assert.equal(f.calls.some(row=>row.profileId==='profile-2'),false);release.resolve();await first;assert.equal(f.clicks,1);assert.equal(f.runtime.uiOwner,null);

@@ -52,9 +52,19 @@ class VintedSalesRuntime extends VintedAdapter {
  }
  step(context,name,expected){const {job}=this.assertOwned(context,expected);job.step=name;job.updatedAt=new Date().toISOString();context.engine.persist();context.engine.emit();}
  async inspectCatalog(profileId,options){return new VintedCatalog(this).inspect(profileId,options);}
- async inspectCurrentAccount(profileId,options){return new VintedAccount(this).inspectAccount(profileId,options);}
+ async accountRead(operation,signal){
+  try{return await operation();}
+  catch(error){
+   // The reader owns a child controller. Its invalidated page/menu is not a
+   // cancellation of the scheduler's original job and must not reopen tabs.
+   if(error?.code==='STOPPED'&&!signal?.aborted){const interrupted=fail('ACCOUNT_READ_INTERRUPTED','账号读取在任务未取消时中断，原任务已暂停：'+String(error.message||'页面或菜单发生变化').slice(0,500),error.ambiguous===true);interrupted.cause=error;throw interrupted;}
+   throw error;
+  }
+ }
+ async inspectCurrentAccount(profileId,options){return this.accountRead(()=>new VintedAccount(this).inspectAccount(profileId,options),options?.signal);}
  accountReader(){return new VintedAccount(this);}
  async inspectInitialAccount(profileId,{signal,guard,tab,expectedAccount,expectedMemberId=expectedAccount?.memberId}){
+  return this.accountRead(async()=>{
   const page=await this.read(profileId,{signal,tab});guard();
   const mobile=page.elements.some(row=>row.tag==='button'&&['Menu ouvert','Menu fermé'].includes(String(row.label||'').trim()));
   if(!mobile)return this.inspectCurrentAccount(profileId,{signal,expectedAccount,closeMenu:true});
@@ -67,6 +77,7 @@ class VintedSalesRuntime extends VintedAdapter {
   const observed=await this.inspectCurrentAccount(profileId,{signal,expectedAccount,requireOwnProfileHeading:true,closeMenu:true});guard();
   if(candidate.expiresAt<=Date.now()||observed.memberId!==candidate.memberId||observed.profileURL!==candidate.profileURL)throw fail('ACCOUNT_CHANGED','本人主页与原手机菜单身份不一致');
   return observed;
+  },signal);
  }
  async prepareJobPhotos(engine,job,signal){return preparePhotosForJob(engine,job,{signal,validateImage:this.validateImage});}
  async trustedManifest(manifest){return createTrustedPhotoManifest(manifest);}

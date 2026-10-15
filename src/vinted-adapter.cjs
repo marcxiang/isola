@@ -72,7 +72,7 @@ class VintedAdapter {
     if (tab && current !== tab) throw problem('TAB_CHANGED','当前标签已切换，商品准备已停止');
     frenchPage(current.view.webContents.getURL(),form);
     return {w,tab:current};
-    } catch(error) {controller?.abort();throw error;}
+    } catch(error) {controller?.abort(error);throw error;}
   }
   options(signal,guard) {
     return {signal,allowedOrigins:new Set([ORIGIN]),approve:async()=>{throw problem('UNEXPECTED_ACTION','此步骤需要额外确认，自动页面准备已停止');},onProgress:async()=>guard()};

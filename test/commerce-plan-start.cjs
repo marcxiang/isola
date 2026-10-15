@@ -68,6 +68,13 @@ test('explicitly starting resumes a safe manual stop or cancelled original task 
  }
 });
 
+test('an internally interrupted native read waits for explicit start and resumes the same unsubmitted job',async t=>{
+ let interrupted=true;const f=await fixture(t,{executeJob:async({job,signal,plan})=>{assert.equal(signal.aborted,false);job.step='check_catalog';if(interrupted)throw Object.assign(Error('Fixture original native reader interrupted'),{code:'STOPPED'});plan.activeListingId='fixture-resumed-item';job.result={externalId:'fixture-resumed-item'};}}),plan=f.add();
+ f.engine.startPlan(plan.id);await f.settled(1);const job=f.engine.db.jobs[0],id=job.id,key=job.dedupeKey,payload=clone(job.payload);assert.equal(job.state,'needs_review');assert.equal(job.blockedReason,'OPERATION_INTERRUPTED');assert.equal(job.retryAt,null);
+ for(let i=0;i<3;i++)await f.engine.runOnce();assert.equal(f.executed.length,1);assert.equal(f.engine.db.jobs.length,1);
+ interrupted=false;const result=f.engine.startPlan(plan.id);assert.deepEqual(result.resumedJobIds,[id]);await f.settled(2);assert.equal(job.state,'completed');assert.equal(job.id,id);assert.equal(job.dedupeKey,key);assert.deepEqual(job.payload,payload);assert.equal(f.engine.db.jobs.length,1);assert.equal(plan.activeListingId,'fixture-resumed-item');
+});
+
 test('save and start rejects incomplete edited data atomically and preserves the original plan snapshot',async t=>{
  const f=await fixture(t),plan=f.add(),before=clone(plan);assert.throws(()=>f.engine.saveAndStartPlan({...plan,listing:{...listing,description:''}}),{code:'LISTING_INCOMPLETE'});assert.deepEqual(plan,before);assert.equal(f.engine.running,false);assert.equal(f.engine.db.jobs.length,0);
 });

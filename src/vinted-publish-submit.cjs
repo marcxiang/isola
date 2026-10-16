@@ -2,9 +2,12 @@
 
 const {createHash}=require('node:crypto');
 const {performance:clock}=require('node:perf_hooks');
-const {PublicationJournal,buildPublicationProof,FORM_URL}=require('./vinted-publication.cjs');
-const {VintedPublicationEvidence,FIELD_SPECS,probePublicationForm}=require('./vinted-publication-evidence.cjs');
-const {probeAccountDOM,memberURL}=require('./vinted-account.cjs');
+const {PublicationJournal,buildPublicationProof,listingRevision,FORM_URL}=require('./vinted-publication.cjs');
+const {VintedPublicationEvidence,FIELD_SPECS,probePublicationForm,publicationBlockerDetails}=require('./vinted-publication-evidence.cjs');
+const {projectPublicationReconciliation}=require('./commerce-publication-reconcile.cjs');
+const {probeAccountDOM,memberURL,getClosedAccountEvidence,probeClosedAccountDOM,validateClosedAccountDOM}=require('./vinted-account.cjs');
+const {getDisplayState,assertDisplayVersion,mapPoint}=require('./display-transform.cjs');
+const {isEnvironmentSessionAccount,assertEnvironmentSessionAuthority}=require('./commerce-session-authority.cjs');
 const journals=new WeakMap();
 const clone=value=>JSON.parse(JSON.stringify(value));
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
@@ -17,9 +20,56 @@ function ensure(ok,code,message){if(!ok)throw error(code,message);}
 function publicationJournal(engine){
  let owned=journals.get(engine);
  if(owned){ensure(equal(engine.db.publications,owned.snapshot),'PUBLICATION_STORAGE_CHANGED','刊登记录已被另一操作改变，已停止提交');return owned.journal;}
- owned={journal:null,snapshot:null};
- const journal=new PublicationJournal({state:engine.db.publications,persist:async state=>{owned.snapshot=clone(state);engine.db.publications=state;await engine.persist();engine.emit?.();},dispatchEnabled:true});
+ owned={journal:null,snapshot:null,saleCommits:new Map(),deletionCommits:new Map()};
+ const journal=new PublicationJournal({state:engine.db.publications,persist:async state=>{
+  const before=engine.db,closures=state.submissions.filter(row=>row.closedSale&&!before.publications.submissions.find(old=>old.id===row.id)?.closedSale),withdrawals=state.submissions.filter(row=>row.closedWithdrawal&&!before.publications.submissions.find(old=>old.id===row.id)?.closedWithdrawal);
+  let staged;
+  if(withdrawals.length){
+   ensure(withdrawals.length===1&&!closures.length,'PUBLICATION_DELETION_PROJECTION_REQUIRED','删除关闭必须与原任务和重新刊登版本一起保存');
+   const record=withdrawals[0],transaction=owned.deletionCommits.get(record.id);
+   ensure(transaction&&record.closedWithdrawal.reviewId===transaction.reviewId&&record.closedWithdrawal.listingId===transaction.listingId,'PUBLICATION_DELETION_PROJECTION_REQUIRED','删除关闭缺少主进程完整事务');
+   transaction.guard();staged=transaction.stage(before,state);
+   ensure(staged&&typeof staged==='object'&&typeof staged.then!=='function'&&equal(staged.publications,state),'PUBLICATION_DELETION_PROJECTION_REQUIRED','删除事务必须同步保存同一份原刊登状态');
+   const oldPlan=before.plans?.find(plan=>plan.id===record.proof.facts.planId),plan=staged.plans?.find(plan=>plan.id===record.proof.facts.planId);
+   ensure(oldPlan&&plan&&oldPlan.completedCount===plan.completedCount&&equal(before.sales,staged.sales)&&listingRevision(plan.listingRevision)===listingRevision(oldPlan.listingRevision)+1,'PUBLICATION_DELETION_PROJECTION_REQUIRED','删除恢复不能增加销量，且必须生成下一重新刊登版本');
+   staged=projectPublicationReconciliation(staged,state,{activeLeases:engine.leases?.snapshot?.()||[]}).db;
+  }else if(closures.length){
+   ensure(closures.length===1,'PUBLICATION_SALE_PROJECTION_REQUIRED','成交必须与原任务、销量和刊登占用一起保存');
+   const record=closures[0],transaction=owned.saleCommits.get(record.id);
+   ensure(transaction&&record.closedSale.orderId===transaction.orderId,'PUBLICATION_SALE_PROJECTION_REQUIRED','成交关闭缺少主进程完整事务');
+   staged=transaction.stage(before,state);
+   ensure(staged&&typeof staged==='object'&&typeof staged.then!=='function'&&equal(staged.publications,state),'PUBLICATION_SALE_PROJECTION_REQUIRED','成交事务必须同步保存同一份已验证刊登状态');
+   staged=projectPublicationReconciliation(staged,state,{activeLeases:engine.leases?.snapshot?.()||[]}).db;
+  }else staged=state.submissions.some(row=>row.state==='published')?projectPublicationReconciliation(before,state,{activeLeases:engine.leases?.snapshot?.()||[]}).db:{...before,publications:state};
+  engine.db=staged;
+  try{await engine.persist();}catch(error){engine.db=before;engine.faulted=true;throw error;}
+  owned.snapshot=clone(state);engine.emit?.();
+ },dispatchEnabled:true});
  engine.db.publications=journal.state();owned.journal=journal;owned.snapshot=clone(engine.db.publications);journals.set(engine,owned);return journal;
+}
+
+// Main-only transaction bridge. The journal validates the paid-sale evidence;
+// the engine stages its matching sale/task/count in the same durable snapshot.
+// A closure cannot be committed by mutating engine.db or bypassing the journal.
+async function commitPublicationSale(engine,id,evidence,stage){
+ ensure(typeof stage==='function','PUBLICATION_SALE_PROJECTION_REQUIRED','成交缺少完整销售事务');
+ const journal=publicationJournal(engine),owned=journals.get(engine);
+ ensure(!owned.saleCommits.has(id)&&!owned.deletionCommits.has(id),'PUBLICATION_SALE_BUSY','原刊登正在核对成交或删除，请等待原事务结束');
+ const transaction={orderId:evidence?.orderId,stage};owned.saleCommits.set(id,transaction);
+ try{return await journal.releaseAfterSale(id,evidence);}
+ finally{if(owned.saleCommits.get(id)===transaction)owned.saleCommits.delete(id);}
+}
+
+// Main-only operator confirmation transaction. The existing submit record is
+// retained verbatim apart from its separate withdrawal audit; no paid sale or
+// verified website-deletion evidence is synthesized.
+async function commitPublicationDeletion(engine,id,evidence,stage,{guard=()=>{}}={}){
+ ensure(typeof stage==='function'&&typeof guard==='function','PUBLICATION_DELETION_PROJECTION_REQUIRED','删除恢复缺少完整事务或操作锁');
+ const journal=publicationJournal(engine),owned=journals.get(engine);
+ ensure(!owned.deletionCommits.has(id)&&!owned.saleCommits.has(id),'PUBLICATION_DELETION_BUSY','原刊登正在核对，请等待原事务结束');
+ const confirmation=clone(evidence),transaction={stage,guard,reviewId:confirmation.reviewId,listingId:confirmation.listingId};owned.deletionCommits.set(id,transaction);
+ try{return await journal.releaseAfterDeletion(id,confirmation,{guard});}
+ finally{if(owned.deletionCommits.get(id)===transaction)owned.deletionCommits.delete(id);}
 }
 
 // Run only in the adapter isolated world, against the most recent snapshot map.
@@ -54,14 +104,14 @@ function resolvePublishTarget(specs,expectedDocument){
 // evaluation the renderer cannot run page tasks between the account, fields,
 // photo nodes and hit-point reads. Raw sources return only to this main-process
 // caller for synchronous hashing; never persist them or send them to the UI.
-function probeFinalPublicationDOM(specs,expectedDocument,probeForm,probeAccount,resolveTarget){
+function probeFinalPublicationDOM(specs,expectedDocument,probeForm,probeAccount,resolveTarget,closedReceipt=null,probeClosedAccount=null,sessionMode=false){
  const d=globalThis.__isolaDOM,map=globalThis.__isolaElements,clean=value=>String(value||'').replace(/\s+/g,' ').trim();
  const failure=reason=>({error:reason});
  if(location.href!=='https://www.vinted.fr/items/new'||String(performance.timeOrigin)!==expectedDocument||!d||!map)return failure('page-changed');
  const entries=[...map],menuLabels=['Mon profil','Paramètres','Mes commandes','Se déconnecter'];
  const buttonIds=entries.filter(([,node])=>node?.tagName==='BUTTON'&&!d.disabled(node)).map(([id])=>id);
  const menuIds=entries.filter(([,node])=>['A','BUTTON'].includes(node?.tagName)&&menuLabels.includes(clean(d.label(node)))).map(([id,node])=>({id,label:clean(d.label(node))}));
- const account=probeAccount(buttonIds,menuIds),form=probeForm(specs);
+ const account=sessionMode||closedReceipt?null:probeAccount(buttonIds,menuIds),closedAccount=!sessionMode&&closedReceipt&&probeClosedAccount?probeClosedAccount(closedReceipt):null,form=probeForm(specs);
  const outside=e=>!!d.closest(e,'header,nav,[role=navigation],[role=tablist]');
  const inputs=[...document.querySelectorAll('input[type=file]')].filter(e=>!outside(e));
  if(inputs.length!==1||inputs[0].getAttribute('data-testid')!=='add-photos-input')return failure('photo-input-changed');
@@ -76,17 +126,30 @@ function probeFinalPublicationDOM(specs,expectedDocument,probeForm,probeAccount,
  const statuses=[...scope.querySelectorAll('[role=alert],[role=status],[aria-live],[aria-busy=true],progress,[role=progressbar]')].filter(d.visible);
  const busy=scope.getAttribute('aria-busy')==='true'||statuses.some(e=>e.getAttribute('aria-busy')==='true'||e.tagName==='PROGRESS'||e.getAttribute('role')==='progressbar'||clean(d.safeText(e,500)));
  const challenge=[...document.querySelectorAll('iframe')].some(e=>d.visible(e)&&/captcha|challenges\.cloudflare|challenge-platform/i.test((e.getAttribute('src')||'')+' '+(e.getAttribute('title')||'')))||[...document.querySelectorAll('[role=dialog],[aria-modal=true],dialog[open]')].some(e=>d.visible(e)&&/captcha|vérifi.{0,30}humain|vérification de sécurité|pas un robot/i.test(d.safeText(e,500)));
- return {documentKey:expectedDocument,url:location.href,account,form,photos:{images,controls,busy},challenge,target:resolveTarget(specs,expectedDocument)};
+ return {documentKey:expectedDocument,url:location.href,account,closedAccount,form,photos:{images,controls,busy},challenge,target:resolveTarget(specs,expectedDocument)};
 }
 
-function verifyFinalPublication(state,proof,input,adapter,tab,targetId){
+function verifyFinalPublication(state,proof,input,adapter,tab,targetId,closedReceipt=null){
  const fail=(ok,message)=>ensure(ok,'PUBLICATION_EVIDENCE_CHANGED',message||'原生点击前商品、账号或照片发生变化，未发布');
  fail(state&&!state.error&&state.documentKey===proof.facts.documentKey&&state.url===FORM_URL&&state.challenge===false);
- const account=state.account;fail(account?.documentKey===proof.facts.documentKey&&account.buttons?.length===1&&account.menus?.length===1&&account.menus[0].valid,'原生点击前当前账号菜单无法唯一核对，未发布');
- let identity;try{identity=memberURL(account.menus[0].href);}catch{fail(false,'原生点击前当前账号地址发生变化，未发布');}
- fail(identity.memberId===proof.facts.account.memberId&&identity.profileURL===proof.facts.account.profileURL,'原生点击前当前登录账号发生变化，未发布');
+ let identity;
+ if(isEnvironmentSessionAccount(proof.facts.account,input.plan.profileId)){
+  assertEnvironmentSessionAuthority(input.expectedAccount,input.plan.profileId);
+  fail(equal(input.expectedAccount,proof.facts.account),'原自动化环境会话绑定发生变化，未发布');
+ }else if(closedReceipt){
+  // A DOM flag never supplies authority. The same unexpired main-process
+  // receipt must still belong to this adapter/tab/document after the final
+  // synchronous page read, and its native closed toggle must remain intact.
+  fail(getClosedAccountEvidence(adapter,{profileId:input.plan.profileId,tab,documentKey:proof.facts.documentKey})===closedReceipt&&validateClosedAccountDOM(state.closedAccount,closedReceipt),'原生点击前账号核验已过期或菜单状态改变，未发布');
+  identity=closedReceipt;
+ }else{
+  const account=state.account;fail(account?.documentKey===proof.facts.documentKey&&account.buttons?.length===1&&account.menus?.length===1&&account.menus[0].valid,'原生点击前当前账号菜单无法唯一核对，未发布');
+  try{identity=memberURL(account.menus[0].href);}catch{fail(false,'原生点击前当前账号地址发生变化，未发布');}
+ }
+ if(identity)fail(identity.memberId===proof.facts.account.memberId&&identity.profileURL===proof.facts.account.profileURL,'原生点击前当前登录账号发生变化，未发布');
  const form=state.form;
- fail(form?.url===FORM_URL&&form.documentKey===proof.facts.documentKey&&!form.error&&form.publication?.count===1&&form.publication.enabled&&form.unknownFields?.length===0&&form.invalidFields?.length===0&&form.alerts?.length===0&&form.dialogs===0);
+ const blockers=publicationBlockerDetails(form);
+ fail(form?.url===FORM_URL&&form.documentKey===proof.facts.documentKey&&!form.error&&form.publication?.count===1&&form.publication.enabled&&form.unknownFields?.length===0&&form.invalidFields?.length===0&&form.alerts?.length===0&&form.dialogs===0,blockers.length?'原生点击前发布核对未通过：'+blockers.join('；')+'；未发布':undefined);
  fail(Array.isArray(form.fields));
  const fields=form.fields.filter(field=>!(field.field==='size'&&proof.facts.fields.size===undefined&&field.value===''&&!field.required&&!field.invalid&&!field.disabled));
  const expectedKeys=Object.keys(proof.facts.fields).filter(key=>key!=='parcel').sort();
@@ -115,11 +178,11 @@ function verifyFinalPublication(state,proof,input,adapter,tab,targetId){
 
 function passEvidence(pass,observedAt){
  ensure(pass&&Array.isArray(pass.fields)&&pass.fields.every(field=>!field.disabled&&!field.invalid),'PUBLICATION_EVIDENCE_BLOCKED','商品字段缺失或不可用，未点击发布');
- ensure(['unknownFields','invalidFields','alerts'].every(key=>Array.isArray(pass[key])&&pass[key].length===0)&&pass.dialogs===0,'PUBLICATION_EVIDENCE_BLOCKED','商品页出现未知内容、错误或弹窗，未点击发布');
+ ensure(['unknownFields','invalidFields','alerts'].every(key=>Array.isArray(pass[key])&&pass[key].length===0)&&pass.dialogs===0,'PUBLICATION_EVIDENCE_BLOCKED','发布前核对未通过：'+publicationBlockerDetails(pass).join('；')+'；未点击发布');
  return {profileId:pass.profileId,tabId:pass.tabId,url:pass.url,documentKey:pass.documentKey,observedAt,challenge:pass.challenge,account:pass.account,
   form:{documentKey:pass.documentKey,complete:true,fields:pass.fields.map(field=>({field:field.field,value:field.value,verified:true})),unknownFields:[],invalidFields:[]},photos:pass.photos,publication:pass.publication};
 }
-function planBinding(plan){return {id:plan.id,profileId:plan.profileId,productId:plan.productId,sku:plan.sku,enabled:plan.enabled,activeListingId:plan.activeListingId||null,completedCount:plan.completedCount,targetCount:plan.targetCount,currency:plan.currency,listingPriceCents:plan.listingPriceCents,listing:plan.listing};}
+function planBinding(plan){return {id:plan.id,profileId:plan.profileId,productId:plan.productId,sku:plan.sku,enabled:plan.enabled,activeListingId:plan.activeListingId||null,completedCount:plan.completedCount,listingRevision:listingRevision(plan.listingRevision),targetCount:plan.targetCount,currency:plan.currency,listingPriceCents:plan.listingPriceCents,listing:plan.listing};}
 function candidateURL(value){
  let url;try{url=new URL(value);}catch{return null;}
  const match=/^\/items\/([1-9]\d{0,29})(?:-[^/]+)?\/?$/.exec(url.pathname);
@@ -160,7 +223,8 @@ class VintedPublishSubmit{
  async submit({engine,planId,input,signal,guard=()=>{}}){
   ensure(this.enabled,'PUBLICATION_NOT_ENABLED','真实发布步骤尚未启用');
   ensure(engine?.adapter&&engine.db&&typeof engine.persist==='function'&&typeof engine.plan==='function'&&input?.plan?.id===planId,'PUBLICATION_INPUT_INVALID','发布必须使用主进程保存的销售计划及页面证据');
-  const saved=clone(input),profileId=saved.plan.profileId,adapter=engine.adapter,reader=this.evidenceFactory(adapter),journal=publicationJournal(engine);
+  const saved=clone(input),profileId=saved.plan.profileId,adapter=engine.adapter,reader=this.evidenceFactory(adapter),journal=publicationJournal(engine),sessionAccount=isEnvironmentSessionAccount(input.expectedAccount,profileId);
+  if(sessionAccount)saved.expectedAccount=assertEnvironmentSessionAuthority(input.expectedAccount,profileId);
   ensure(saved.manifest?.claimId===saved.claim?.id&&saved.manifest?.profileId===profileId&&saved.manifest?.productId===saved.plan.productId&&saved.manifest?.setId===saved.claim?.setId&&Array.isArray(saved.manifest.files)&&saved.manifest.files.length===saved.manifest.count&&saved.manifest.files.every(file=>/^[a-f0-9]{64}$/.test(file.sha256||'')),'PUBLICATION_INPUT_INVALID','照片清单无法与原计划和认领记录核对');
   const controller=new AbortController(),cancel=()=>controller.abort(),context={controller,signal:controller.signal,form:true};let w,contents,timer,dispatchTimer,dispatchDeadline=null,record,clickIssued=false,timedOut=false,postClick=false;
   const captures=new Set();let navigationResolve,latestNavigation=null,navigationClosed=false,captureError=null;
@@ -169,10 +233,10 @@ class VintedPublishSubmit{
    if(dispatchDeadline!==null&&clock.now()>=dispatchDeadline){timedOut=true;controller.abort();}
    guard();ensure(!engine.faulted&&!engine.closing,'PUBLICATION_STOPPED','运营存储或窗口已停止');ensure(!controller.signal.aborted,'STOPPED','刊登提交已停止');
    ensure(equal(planBinding(engine.plan(planId)),planBinding(saved.plan)),'PUBLICATION_PLAN_CHANGED','销售计划已改变，未继续提交');
-   const accounts=engine.db.marketAccounts?.filter(account=>account.profileId===profileId)||[];
-   ensure(accounts.length===1&&accounts[0].memberId===saved.expectedAccount.memberId&&accounts[0].profileURL===saved.expectedAccount.profileURL,'PUBLICATION_ACCOUNT_CHANGED','环境绑定账号已改变，未继续提交');
+   if(sessionAccount)assertEnvironmentSessionAuthority(saved.expectedAccount,profileId);
+   else {const accounts=engine.db.marketAccounts?.filter(account=>account.profileId===profileId)||[];ensure(accounts.length===1&&accounts[0].memberId===saved.expectedAccount.memberId&&accounts[0].profileURL===saved.expectedAccount.profileURL,'PUBLICATION_ACCOUNT_CHANGED','环境绑定账号已改变，未继续提交');}
   };
-  context.guard=()=>{checkEngine();if(postClick){ensure(w&&!w.isDestroyed()&&w.tabs.find(tab=>tab.id===w.activeTab)===context.tab&&!contents.isDestroyed(),'PUBLICATION_PAGE_CHANGED','原发布窗口已改变');ensure(!w.aiAgent?.state?.running,'PAGE_BUSY','当前窗口已有其他控制任务');}else adapter.current(profileId,context);};
+  context.guard=()=>{checkEngine();if(postClick){ensure(w&&!w.isDestroyed()&&w.tabs.find(tab=>tab.id===w.activeTab)===context.tab&&!contents.isDestroyed(),'PUBLICATION_PAGE_CHANGED','原发布窗口已改变');ensure(!w.aiAgent?.state?.running,'PAGE_BUSY','当前窗口已有其他控制任务');}else{adapter.current(profileId,context);if(contents){assertDisplayVersion(contents,context.displayVersion);ensure(context.tab.isInputVisible?.()!==false,'INPUT_SURFACE_UNAVAILABLE','请先显示原发布窗口并切换到当前标签页');}}};
   const capture=(kind,url,mainFrame=true)=>{
    if(mainFrame===false)return;if(!clickIssued){controller.abort();return;}if(navigationClosed)return;
    const identity=candidateURL(url);if(!identity){if(url!==FORM_URL){navigationClosed=true;navigationResolve(null);}return;}
@@ -183,7 +247,7 @@ class VintedPublishSubmit{
   const started=(_event,url,_inPlace,mainFrame)=>capture('did-start-navigation',url,mainFrame),committed=(_event,url)=>capture('did-navigate',url,true),inPage=(_event,url,mainFrame)=>capture('did-navigate-in-page',url,mainFrame);
   try{
    if(signal?.aborted)throw error('STOPPED','刊登提交已停止');signal?.addEventListener('abort',cancel,{once:true});
-   checkEngine();const selected=adapter.current(profileId,context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;w.vintedDraftController=controller;
+   checkEngine();const selected=adapter.current(profileId,context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;context.displayVersion=getDisplayState(contents).version;context.guard();w.vintedDraftController=controller;
    timer=setTimeout(()=>{timedOut=true;controller.abort();},this.timeoutMs);
    contents.on?.('did-start-navigation',started);contents.on?.('did-navigate',committed);contents.on?.('did-navigate-in-page',inPage);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);
    const initialProof=await this.proof(saved,reader,context);record=await journal.prepare(initialProof);context.guard();
@@ -203,12 +267,16 @@ class VintedPublishSubmit{
     context.guard();const finalProof=await this.proof(saved,reader,context);ensure(finalProof.fingerprint===intent.fingerprint,'PUBLICATION_EVIDENCE_CHANGED','提交前最后核对发生变化，未点击发布');
     target=await this.target(adapter,profileId,finalProof,context,{scroll:false});context.guard();
     context.guard();contents.focus();context.guard();
-    const finalState=await this.wait(()=>adapter.control.isolated(context.tab,'('+probeFinalPublicationDOM.toString()+')('+JSON.stringify(FIELD_SPECS)+','+JSON.stringify(finalProof.facts.documentKey)+','+probePublicationForm.toString()+','+probeAccountDOM.toString()+','+resolvePublishTarget.toString()+')'),context);
+    const closedReceipt=sessionAccount?null:getClosedAccountEvidence(adapter,{profileId,tab:context.tab,documentKey:finalProof.facts.documentKey});
+    const finalState=await this.wait(()=>adapter.control.isolated(context.tab,'('+probeFinalPublicationDOM.toString()+')('+JSON.stringify(FIELD_SPECS)+','+JSON.stringify(finalProof.facts.documentKey)+','+probePublicationForm.toString()+','+probeAccountDOM.toString()+','+resolvePublishTarget.toString()+','+JSON.stringify(closedReceipt)+','+probeClosedAccountDOM.toString()+','+JSON.stringify(sessionAccount)+')'),context);
     // No awaits, snapshot refreshes, target lookups, focus or visual callbacks
     // after this single final read: verify synchronously and dispatch input.
-    const point=verifyFinalPublication(finalState,finalProof,saved,adapter,context.tab,target.elementId);context.guard();
-    const x=Math.round(point.x),y=Math.round(point.y);contents.sendInputEvent({type:'mouseMove',x,y});context.guard();
-    clickIssued=true;postClick=true;contents.sendInputEvent({type:'mouseDown',x,y,button:'left',clickCount:1});contents.sendInputEvent({type:'mouseUp',x,y,button:'left',clickCount:1});
+    const point=verifyFinalPublication(finalState,finalProof,saved,adapter,context.tab,target.elementId,closedReceipt);context.guard();
+    const displayPoint=mapPoint(contents,point,context.displayVersion),x=Math.round(displayPoint.x),y=Math.round(displayPoint.y);contents.sendInputEvent({type:'mouseMove',x,y});context.guard();
+    if(closedReceipt)ensure(getClosedAccountEvidence(adapter,{profileId,tab:context.tab,documentKey:finalProof.facts.documentKey})===closedReceipt,'PUBLICATION_EVIDENCE_CHANGED','原生按下前账号核验已过期或改变，未发布');
+    clickIssued=true;postClick=true;
+    try{contents.sendInputEvent({type:'mouseDown',x,y,button:'left',clickCount:1});}
+    finally{if(!contents.isDestroyed())contents.sendInputEvent({type:'mouseUp',x,y,button:'left',clickCount:1});}
    },{signal:context.signal,timeoutMs:this.dispatchTimeoutMs});}
    finally{clearTimeout(dispatchTimer);dispatchDeadline=null;}
    await this.feedback(context,'performed',target);
@@ -230,4 +298,4 @@ class VintedPublishSubmit{
  }
 }
 
-module.exports={VintedPublishSubmit,publicationJournal,resolvePublishTarget,probeFinalPublicationDOM};
+module.exports={VintedPublishSubmit,publicationJournal,commitPublicationSale,commitPublicationDeletion,resolvePublishTarget,probeFinalPublicationDOM};

@@ -85,10 +85,85 @@ test('a publication created after queueing blocks both direct and batch listing 
 test('pausing one product leaves another product operation in the same account running',async t=>{
   const entered=deferred(),release=deferred(),f=fixture(t,{requireReady:async()=>{entered.resolve();await release.promise;}});
   f.engine.db.products.push({id:'product-2',sku:'FIXTURE-2',name:'Other fixture product',stock:10,priceCents:1000,photoSetsAvailable:1});
-  const other=f.engine.savePlan({...f.plan,id:undefined,productId:'product-2'});other.activeListingId='987654';const job=f.enqueue('other-product',other),running=f.engine.runJob(job);await entered.promise;
+  const other=f.engine.savePlan({...f.plan,id:undefined,productId:'product-2',sku:'FIXTURE-2'});other.activeListingId='987654';const job=f.enqueue('other-product',other),running=f.engine.runJob(job);await entered.promise;
   const controller=f.engine.active.get(f.plan.profileId);f.engine.setPlanEnabled(f.plan.id,false);assert.equal(controller.signal.aborted,false);assert.equal(other.enabled,true);release.resolve();await running;assert.equal(job.state,'completed');assert.equal(f.calls.sends,1);
 });
 test('pausing the plan that owns the lease stops its unsubmitted operation',async t=>{
   const entered=deferred(),release=deferred(),f=fixture(t,{requireReady:async()=>{entered.resolve();await release.promise;}}),job=f.enqueue(),running=f.engine.runJob(job);await entered.promise;
   const controller=f.engine.active.get(f.plan.profileId);f.engine.setPlanEnabled(f.plan.id,false);assert.equal(controller.signal.aborted,true);release.resolve();await running;assert.equal(job.state,'queued');assert.equal(f.calls.sends,0);assert.equal(f.plan.enabled,false);assert.equal(f.engine.active.size,0);
+});
+
+test('runtime receives the task scope and completes against the current database snapshot',async t=>{
+ const f=fixture(t),job=f.enqueue();let readyScope,executeScope;
+ f.adapter.requireReady=async(profileId,context)=>{readyScope=context;assert.equal(profileId,f.plan.profileId);assert.equal(context.engine,f.engine);assert.equal(context.job,job);assert.equal(context.plan,f.plan);assert.ok(context.signal instanceof AbortSignal);};
+ f.adapter.executeJob=async context=>{executeScope=context;f.engine.db=JSON.parse(JSON.stringify(f.engine.db));f.engine.db.jobs.find(row=>row.id===job.id).result={verified:true,externalId:'runtime-reply'};};
+ await f.engine.runOnce();assert.equal(executeScope.signal,readyScope.signal);assert.equal(f.engine.db.jobs.find(row=>row.id===job.id).state,'completed');assert.equal(f.engine.db.jobs.find(row=>row.id===job.id).result.externalId,'runtime-reply');assert.equal(f.calls.sends,0);assert.equal(f.engine.active.size,0);
+});
+
+test('session listing schedules and executes with no account binding or identity observation',async t=>{
+ const f=fixture(t);f.plan.activeListingId=null;f.adapter.readiness=()=>({capabilities:{publish:true,sessionListing:true,autoOpenProfile:true}});
+ const job=f.engine.enqueue('listing',f.plan,{cycle:0},'listing:session-first');let executions=0;
+ f.adapter.executeJob=async({job,plan})=>{executions++;assert.equal(plan.profileId,'profile-1');assert.equal(job.accountMemberId,undefined);assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(f.engine.accountObservations.size,0);job.result={verified:true,externalId:'session-listing-fixture'};};
+ const scheduled=f.engine.state().jobs.find(row=>row.id===job.id);assert.equal(scheduled.scheduling.reasonCode,'SESSION_LISTING_READY');assert.equal(scheduled.scheduling.state,'ready');
+ await f.engine.runOnce();assert.equal(job.state,'completed');assert.equal(executions,1);assert.equal(f.calls.ready,1);assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(f.engine.accountObservations.size,0);assert.equal(job.accountMemberId,undefined);assert.equal(f.calls.sends,0);
+});
+
+test('session listing leaves legacy conflicting identity records intact instead of gating execution',async t=>{
+ for(const accounts of [
+  [{platform:'vinted-fr',profileId:'profile-1',memberId:'123',username:'old_seller',profileURL:'https://www.vinted.fr/member/123'}],
+  [{platform:'vinted-fr',profileId:'profile-1',memberId:'123'},{platform:'vinted-fr',profileId:'profile-1',memberId:'456'}],
+  [{platform:'vinted-fr',profileId:'profile-1',memberId:'123'},{platform:'vinted-fr',profileId:'profile-2',memberId:'123'}]
+ ]){
+  const f=fixture(t);f.plan.activeListingId=null;f.adapter.readiness=()=>({capabilities:{publish:true,sessionListing:true,autoOpenProfile:true}});f.engine.db.marketAccounts=accounts;
+  f.engine.accountObservations.set('profile-1',{profileId:'profile-1',memberId:'999',verified:true,documentKey:'old-document',checkedAt:'2020-01-01T00:00:00Z'});
+  const job=f.engine.enqueue('listing',f.plan,{cycle:0},'listing:session-existing');job.accountMemberId='777';const before=JSON.stringify(f.engine.db.marketAccounts),observedBefore=JSON.stringify([...f.engine.accountObservations]);let executions=0;
+  f.adapter.executeJob=async({job})=>{executions++;job.result={verified:true,externalId:'session-fixture'};};
+  assert.equal(f.engine.state().jobs.find(row=>row.id===job.id).scheduling.reasonCode,'SESSION_LISTING_READY');await f.engine.runOnce();assert.equal(job.state,'completed');assert.equal(executions,1);assert.equal(f.calls.ready,1);assert.equal(JSON.stringify(f.engine.db.marketAccounts),before);assert.equal(JSON.stringify([...f.engine.accountObservations]),observedBefore);assert.equal(job.accountMemberId,'777');
+ }
+});
+
+test('starting session listing resumes the original unsubmitted identity failure without binding',async t=>{
+ const f=fixture(t);f.engine.kickRun=()=>{};f.engine.ensureRunnerTimer=()=>{};f.engine.db.settings.backgroundEnabled=true;f.engine.db.encryptedToken='fixture-not-a-real-token';f.engine.db.supplierAccountId='fixture-supplier';
+ f.plan.activeListingId=null;f.plan.listing={title:'Fixture own product',description:'Fixture description',categoryPath:['Maison','Accessoires'],condition:'Neuf sans étiquette',brand:'Sans marque',color:'Noir',parcel:'Moyen'};f.adapter.readiness=()=>({salesOnly:true,capabilities:{publish:true,sessionListing:true,autoOpenProfile:true}});
+ f.engine.seed();const job=f.engine.db.jobs[0];Object.assign(job,{state:'needs_review',step:'check_catalog',accountMemberId:'123',blockedReason:'ACCOUNT_USERNAME_UNVERIFIED',error:'Fixture old username prerequisite',attempts:2});f.engine.persist();
+ const id=job.id,key=job.dedupeKey,payload=JSON.stringify(job.payload),started=f.engine.startPlan(f.plan.id);
+ assert.equal(started.started,true);assert.deepEqual(started.resumedJobIds,[id]);assert.equal(f.engine.db.jobs.length,1);assert.equal(f.engine.db.jobs[0],job);assert.equal(job.id,id);assert.equal(job.dedupeKey,key);assert.equal(JSON.stringify(job.payload),payload);assert.equal(job.accountMemberId,'123');assert.equal(job.state,'queued');assert.equal(job.step,'pending');assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(f.engine.accountObservations.size,0);
+ f.adapter.executeJob=async({job})=>{job.result={verified:true,externalId:'resumed-session-fixture'};};await f.engine.runOnce();assert.equal(job.state,'completed');assert.equal(job.id,id);assert.equal(job.dedupeKey,key);assert.equal(f.engine.db.jobs.length,1);assert.deepEqual(f.engine.db.marketAccounts,[]);assert.equal(job.accountMemberId,'123');
+ const disk=JSON.parse(fs.readFileSync(f.engine.file,'utf8'));assert.equal(disk.jobs.length,1);assert.equal(disk.jobs[0].id,id);assert.equal(disk.jobs[0].dedupeKey,key);assert.deepEqual(disk.marketAccounts,[]);
+});
+
+test('session listing capability does not bypass legacy identity gates for message operations',async t=>{
+ const f=fixture(t),job=f.enqueue();f.adapter.readiness=()=>({capabilities:{publish:true,sessionListing:true,messages:true}});f.engine.db.marketAccounts=[{platform:'vinted-fr',profileId:'profile-1',memberId:'123'},{platform:'vinted-fr',profileId:'profile-1',memberId:'456'}];
+ await assert.rejects(f.engine.runJob(job),{code:'ACCOUNT_CONFLICT'});assert.equal(job.state,'queued');assert.equal(f.calls.ready,0);assert.equal(f.calls.sends,0);
+});
+
+test('an unimplemented capability remains queued without burning retries or invoking the runtime',async t=>{
+ const f=fixture(t),job=f.enqueue();f.adapter.readiness=()=>({capabilities:{messages:false}});let calls=0;f.adapter.executeJob=async()=>{calls++;};
+ assert.equal(await f.engine.runJob(job),false);await f.engine.runOnce();await f.engine.runOnce();assert.equal(job.state,'queued');assert.equal(job.attempts,undefined);assert.equal(f.calls.ready,0);assert.equal(calls,0);assert.equal(f.engine.state().jobs[0].scheduling.reasonCode,'CAPABILITY_UNVERIFIED');
+});
+
+test('polling owns the same profile lease as jobs and passes detached plan and account snapshots',async t=>{
+ const f=fixture(t),job=f.enqueue(),entered=deferred(),release=deferred();f.engine.bindMarketAccount(f.plan.profileId,{verified:true,memberId:'123',username:'seller',profileURL:'https://www.vinted.fr/member/123'});
+ let observed;f.adapter.poll=async(profileId,context)=>{observed=context;assert.equal(profileId,f.plan.profileId);assert.ok(f.engine.active.has(profileId));assert.match(f.engine.leases.snapshot()[0].jobId,/^poll:/);context.plans[0].activeListingId='mutated-snapshot';context.expectedAccount.username='mutated-snapshot';entered.resolve();await release.promise;return [];};
+ f.engine.running=true;const polling=f.engine.poll();await entered.promise;assert.equal(await f.engine.runJob(job),false);await assert.rejects(f.engine.configure(async()=>{}),/停止后台/);assert.equal(f.plan.activeListingId,'123456');assert.equal(f.engine.db.marketAccounts[0].username,'seller');assert.ok(observed.signal instanceof AbortSignal);release.resolve();await polling;f.engine.running=false;assert.equal(f.engine.active.size,0);assert.equal(f.engine.leases.activeProfileIds().length,0);assert.equal(job.state,'queued');
+});
+
+test('an unknown or cross-profile event prevents the complete poll batch from being ingested',async t=>{
+ const f=fixture(t);f.adapter.poll=async()=>[{verified:true,type:'message',id:'valid-message',profileId:f.plan.profileId,listingId:f.plan.activeListingId,buyerUsername:'buyer'}, {verified:true,type:'unknown',id:'unrecognized',profileId:f.plan.profileId}];
+ f.engine.running=true;await f.engine.poll();f.engine.running=false;assert.equal(f.engine.db.jobs.length,0);assert.match(f.engine.db.events.at(-1).text,/无法识别/);assert.equal(f.engine.active.size,0);
+});
+
+test('conflicting duplicate events quarantine the original queue before any new batch event is accepted',async t=>{
+ const f=fixture(t),original=f.enqueue(),event={verified:true,type:'message',id:'incoming',profileId:f.plan.profileId,listingId:f.plan.activeListingId,buyerUsername:'buyer',text:'First question'};
+ f.adapter.poll=async()=>[event,{...event,buyerUsername:'other-buyer'}];f.engine.running=true;await f.engine.poll();f.engine.running=false;
+ assert.equal(f.engine.db.jobs.length,1);assert.equal(original.state,'needs_review');assert.equal(original.blockedReason,'EVENT_CONFLICT');assert.equal(original.payload.id,'fixture-message-1');await f.engine.runOnce();assert.equal(f.calls.sends,0);
+});
+
+test('maintenance receives the tick abort scope before polling and a read failure does not stop unrelated jobs',async t=>{
+ const f=fixture(t),job=f.enqueue(),steps=[];f.adapter.maintenance=async({engine,signal})=>{assert.equal(engine,f.engine);assert.ok(signal instanceof AbortSignal);steps.push('maintenance');throw Error('Supplier association awaits review');};f.adapter.poll=async()=>{steps.push('poll');return [];};f.engine.running=true;await f.engine.runOnce();f.engine.running=false;
+ assert.deepEqual(steps,['maintenance','poll']);assert.equal(job.state,'completed');assert.equal(f.calls.sends,1);assert.ok(f.engine.db.events.some(row=>row.text==='Supplier association awaits review'));
+});
+
+test('stopping during maintenance prevents the same tick from polling or starting any task',async t=>{
+ const f=fixture(t),job=f.enqueue(),entered=deferred(),release=deferred();let signal,polls=0;f.adapter.maintenance=async context=>{signal=context.signal;entered.resolve();await release.promise;};f.adapter.poll=async()=>{polls++;return [];};f.engine.running=true;const cycle=f.engine.runOnce();await entered.promise;f.engine.setRunning(false);assert.equal(signal.aborted,true);release.resolve();await cycle;assert.equal(polls,0);assert.equal(job.state,'queued');assert.equal(f.calls.sends,0);
 });

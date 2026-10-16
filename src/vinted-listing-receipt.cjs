@@ -2,6 +2,7 @@
 const {createHash}=require('node:crypto');
 const {VintedAccount,memberURL}=require('./vinted-account.cjs');
 const {restorePublicationState}=require('./vinted-publication.cjs');
+const {isEnvironmentSessionAccount}=require('./commerce-session-authority.cjs');
 const ORIGIN='https://www.vinted.fr';
 const clone=value=>JSON.parse(JSON.stringify(value));
 const hash=value=>createHash('sha256').update(value).digest('hex');
@@ -56,7 +57,7 @@ function probeListingDOM(expectedTitle,username){
   if(parent===scope)break;
  }
  result.priceTexts=priceNodes.map(e=>clean(d.safeText(e,100)));
- const sellers=links.filter(e=>clean(d.label(e))===username).filter(e=>{try{return /^\/member\/[1-9]\d*(?:-[^/]+)?\/?$/.test(new URL(e.href).pathname);}catch{return false;}});
+ const sellers=links.filter(e=>username&&clean(d.label(e))===username).filter(e=>{try{return /^\/member\/[1-9]\d*(?:-[^/]+)?\/?$/.test(new URL(e.href).pathname);}catch{return false;}});
  result.sellers=sellers.map(e=>({label:clean(d.label(e)),href:String(e.href)}));
  const images=[...document.querySelectorAll('img')].filter(e=>visible(e)&&!outside(e)&&beforeRelated(e)&&clean(e.getAttribute('alt'))===title);
  result.images=images.map(img=>{
@@ -80,8 +81,10 @@ function surface(raw,account,record){
  const amount=raw.priceTexts?.length===1?priceCents(raw.priceTexts[0]):null,priceOK=amount===facts.fields.priceCents;
  check('单品价格',priceOK,priceOK?'已核对独立单品售价，未使用含平台费的买家总价':'独立单品价格缺失、重复或与原提交不一致');
  let seller=null;if(raw.sellers?.length===1){try{seller=memberURL(raw.sellers[0].href);}catch{}}
- const sellerOK=seller?.memberId===facts.account.memberId&&seller?.profileURL===facts.account.profileURL&&raw.sellers[0].label===account.username;
- check('实际卖家',sellerOK,sellerOK?'详情页卖家与当前账号及原提交一致':'详情页卖家链接不唯一或与原账号不一致');
+ if(!isEnvironmentSessionAccount(facts.account,facts.profileId)){
+  const sellerOK=seller?.memberId===facts.account.memberId&&seller?.profileURL===facts.account.profileURL&&raw.sellers[0].label===account.username;
+  check('实际卖家',sellerOK,sellerOK?'详情页卖家与当前账号及原提交一致':'详情页卖家链接不唯一或与原账号不一致');
+ }
  const images=Array.isArray(raw.images)?raw.images:[],loaded=images.length===facts.photos.count&&images.every(img=>img.alt===facts.fields.title&&img.inNamedButton&&img.loaded&&typeof img.source==='string'&&img.source.length<=65536&&/^https?:\/\//.test(img.source));
  check('商品主图',loaded,loaded?'主图数量、标题关联与加载状态已核对':'主图数量、标题关联或加载状态未完全匹配');
  const fingerprints=loaded?images.map(img=>hash(img.source)):[],unique=loaded&&new Set(fingerprints).size===fingerprints.length,signature=unique?hash(JSON.stringify(fingerprints)):null;
@@ -100,6 +103,15 @@ class VintedListingReceipt {
  }
  async readPass(input,context,initial){
   const profileId=input.record.proof.facts.profileId;
+  if(isEnvironmentSessionAccount(input.record.proof.facts.account,profileId)){
+   // This authority follows the original isolated session and native submit
+   // navigation. Item ownership controls are observed without opening an
+   // account menu or inventing a verified member identity.
+   const raw=await this.wait(()=>this.adapter.control.isolated(context.tab,'('+probeListingDOM.toString()+')('+JSON.stringify(input.record.proof.facts.fields.title)+',null)'),context);
+   ensure(typeof raw?.documentKey==='string'&&raw.documentKey.length>0,'LISTING_PAGE_CHANGED','商品详情缺少当前页面标识');
+   if(initial.documentKey)ensure(raw.documentKey===initial.documentKey,'LISTING_PAGE_CHANGED','商品详情在核对期间发生跳转');
+   return {...surface(raw,null,input.record),documentKey:raw.documentKey};
+  }
   const before=await this.wait(()=>this.account.state(profileId,context,{documentKey:initial.documentKey,username:initial.username}),context);
   ensure(before.account?.memberId===initial.memberId,'LISTING_ACCOUNT_CHANGED','详情核对期间当前账号发生变化');
   const raw=await this.wait(()=>this.adapter.control.isolated(context.tab,'('+probeListingDOM.toString()+')('+JSON.stringify(input.record.proof.facts.fields.title)+','+JSON.stringify(initial.username)+')'),context);
@@ -108,31 +120,47 @@ class VintedListingReceipt {
   ensure(after.account?.memberId===initial.memberId&&after.documentKey===raw.documentKey,'LISTING_ACCOUNT_CHANGED','读取商品详情期间当前账号发生变化');
   return {...view,documentKey:raw.documentKey};
  }
- async collect({record,expectedAccount},{signal}={}){
+ async collect({record,expectedAccount},{signal,withEvidence,reviewOriginalSubmission=false}={}){
   const summary={checks:[],blockers:[],listingId:null,url:null,photoSignatureMatched:false,verified:false,needsOriginAssociation:true,reconciled:false,menuOpened:false,menuClosed:false};
   let controller,w,contents,timer,timedOut=false;const cancel=()=>controller?.abort(),navigation=(_event,_url,_inPlace,mainFrame)=>{if(mainFrame!==false)cancel();};
   try{
    const checked=restorePublicationState({version:1,submissions:[record]}).state.submissions[0];
    ensure(['uncertain','dispatching','published'].includes(record.state)&&record.attemptCount===1,'LISTING_NOT_SUBMITTED','仅能核对已经尝试提交的原刊登记录');
-   const facts=checked.proof.facts,expected=memberURL(expectedAccount?.profileURL);
-   ensure(expectedAccount.profileId===facts.profileId&&expectedAccount.memberId===facts.account.memberId&&expected.memberId===facts.account.memberId,'LISTING_ACCOUNT_CHANGED','环境绑定账号与原提交不一致');
+   const facts=checked.proof.facts,sessionScoped=isEnvironmentSessionAccount(facts.account,facts.profileId);
+   if(sessionScoped){
+    ensure(expectedAccount===undefined||isEnvironmentSessionAccount(expectedAccount,facts.profileId),'LISTING_ACCOUNT_CHANGED','详情回执所属环境会话与原提交不一致');
+    summary.accountVerification='not-requested';
+   }else{
+    const expected=memberURL(expectedAccount?.profileURL);
+    ensure(expectedAccount.profileId===facts.profileId&&expectedAccount.memberId===facts.account.memberId&&expected.memberId===facts.account.memberId,'LISTING_ACCOUNT_CHANGED','环境绑定账号与原提交不一致');
+   }
    if(signal?.aborted)throw failure('STOPPED','刊登详情核对已停止');
    controller=new AbortController();signal?.addEventListener('abort',cancel,{once:true});
-   const context={controller,signal:controller.signal,form:false};context.guard=()=>{ensure(!controller.signal.aborted,'STOPPED','刊登详情核对已停止');const selected=this.adapter.current(facts.profileId,context);listingURL(selected.tab.view.webContents.getURL());};
-   const selected=this.adapter.current(facts.profileId,context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;const identity=listingURL(contents.getURL());Object.assign(summary,identity);w.vintedDraftController=controller;
+   const context={controller,signal:controller.signal,form:false,expectedAccount};context.guard=()=>{ensure(!controller.signal.aborted,'STOPPED','刊登详情核对已停止');const selected=this.adapter.current(facts.profileId,context);listingURL(selected.tab.view.webContents.getURL());};
+   const selected=this.adapter.current(facts.profileId,context);w=selected.w;context.tab=selected.tab;contents=selected.tab.view.webContents;const identity=listingURL(contents.getURL());Object.assign(summary,identity);
+   // Automatic completion follows its original submit tab. The main-process
+   // association service may review a reopened detail tab after restart; its
+   // one-use review token and stable document binding authorize association.
+   if(sessionScoped&&reviewOriginalSubmission!==true)ensure(context.tab.id===facts.tabId,'LISTING_PAGE_CHANGED','刊登详情不在原提交标签页中');
+   w.vintedDraftController=controller;
    contents.on?.('did-start-navigation',navigation);contents.on?.('destroyed',cancel);contents.on?.('render-process-gone',cancel);timer=setTimeout(()=>{timedOut=true;controller.abort();},this.timeoutMs);
-   const initial=await this.wait(()=>this.account.inspectAccount(facts.profileId,{controller,signal:controller.signal,tab:context.tab}),context);summary.menuOpened=initial.menuOpened===true;
-   ensure(initial.verified===true&&initial.memberId===facts.account.memberId&&initial.profileURL===facts.account.profileURL,'LISTING_ACCOUNT_CHANGED','当前账号与原刊登提交的账号不一致');
-   summary.checks.push({name:'当前登录账号',ok:true,detail:'账号菜单与原提交和环境绑定一致'});
-   const input={record:checked,expectedAccount},first=await this.readPass(input,context,initial),second=await this.readPass(input,context,initial);
-   const stable=equal(first,second);summary.checks.push({name:'连续两次详情核对',ok:stable,detail:stable?'账号、商品、卖家、价格和图片摘要保持一致':'两次读取之间详情发生变化'});
+   let initial={};
+   if(!sessionScoped){
+    initial=await this.wait(()=>this.account.inspectAccount(facts.profileId,{controller,signal:controller.signal,tab:context.tab,expectedAccount,closeMenu:true}),context);summary.menuOpened=initial.menuOpened===true;summary.menuClosed=initial.menuClosed===true;
+    ensure(initial.verified===true&&initial.menuClosed===true&&initial.memberId===facts.account.memberId&&initial.profileURL===facts.account.profileURL,'LISTING_ACCOUNT_CHANGED','当前账号与原刊登提交的账号不一致');
+    summary.checks.push({name:'当前登录账号',ok:true,detail:'账号菜单与原提交和环境绑定一致'});
+   }
+   const input={record:checked,expectedAccount},first=await this.readPass(input,context,initial),second=await this.readPass(input,context,sessionScoped?{documentKey:first.documentKey}:initial);
+   const stable=equal(first,second);summary.checks.push({name:'连续两次详情核对',ok:stable,detail:stable?'商品、本人管理控件、价格和图片摘要保持一致':'两次读取之间详情发生变化'});
    summary.checks.push(...second.checks);summary.photoSignatureMatched=second.photoSignatureMatched;summary.verified=stable&&second.verified&&second.identity.listingId===identity.listingId;
    if(second.identity.listingId!==identity.listingId)summary.checks.push({name:'同一商品页面',ok:false,detail:'当前商品编号在核对期间发生变化'});
    summary.blockers=summary.checks.filter(check=>!check.ok).map(check=>check.detail);summary.checkedAt=new Date(this.now()).toISOString();
    ensure(Date.parse(summary.checkedAt)>=Date.parse(record.submittedAt),'LISTING_RECORD_TIME','详情核对时间早于原提交记录');
-   const evidence=summary.verified?{verified:true,mappingVerified:true,publicationStatus:'published',observedAt:summary.checkedAt,profileId:facts.profileId,listingId:identity.listingId,url:identity.url,title:facts.fields.title,priceKind:'item',priceCents:second.priceCents,currency:'EUR',account:{profileId:facts.profileId,memberId:initial.memberId,profileURL:initial.profileURL,verified:true},seller:{profileId:facts.profileId,...second.seller,verified:true},ownedByCurrentAccount:true,photos:{verified:true,count:facts.photos.count,signature:second.signature}}:null;
+   const evidence=summary.verified?{verified:true,mappingVerified:true,publicationStatus:'published',observedAt:summary.checkedAt,profileId:facts.profileId,listingId:identity.listingId,url:identity.url,title:facts.fields.title,priceKind:'item',priceCents:second.priceCents,currency:'EUR',...(sessionScoped?{account:clone(facts.account)}:{account:{profileId:facts.profileId,memberId:initial.memberId,profileURL:initial.profileURL,verified:true},seller:{profileId:facts.profileId,...second.seller,verified:true}}),ownedByCurrentAccount:true,photos:{verified:true,count:facts.photos.count,signature:second.signature}}:null;
    summary.message=summary.verified?'详情表面已核对；尚未关联原提交，也未更新运营记录。':'详情核对未通过；没有关联刊登或改动页面。';
-   return {summary,evidence};
+   const binding={documentKey:second.documentKey,tabId:context.tab.id};
+   if(evidence&&withEvidence){context.guard();return await withEvidence({summary,evidence,binding},context.guard);}
+   return {summary,evidence,binding};
   }catch(error){summary.verified=false;summary.code=timedOut?'LISTING_RECEIPT_TIMEOUT':error.code||'LISTING_RECEIPT_FAILED';const detail=timedOut?'商品详情读取超时，未关联原提交':String(error.message||'详情核对失败').slice(0,700);summary.checks.push({name:'详情核验',ok:false,detail});summary.blockers=summary.checks.filter(check=>!check.ok).map(check=>check.detail);summary.checkedAt=new Date(this.now()).toISOString();summary.message='详情核对未通过；没有关联刊登或改动页面。';return {summary,evidence:null};}
   finally{controller?.abort();clearTimeout(timer);signal?.removeEventListener('abort',cancel);contents?.removeListener?.('did-start-navigation',navigation);contents?.removeListener?.('destroyed',cancel);contents?.removeListener?.('render-process-gone',cancel);if(w&&controller&&w.vintedDraftController===controller)w.vintedDraftController=null;}
  }

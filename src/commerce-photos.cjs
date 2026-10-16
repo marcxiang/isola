@@ -1,4 +1,5 @@
 'use strict';
+const {listingRevision}=require('./vinted-publication.cjs');
 const fs=require('node:fs'),path=require('node:path'),{randomUUID,createHash}=require('node:crypto');
 const MAX_IMAGE_BYTES=5*1024*1024,READ_TIMEOUT_MS=30000;
 const STATES=new Set(['prepared','claiming','uncertain','receipt_saved','downloading','ready','needs_review']);
@@ -80,20 +81,26 @@ function matchingClaim(engine,record,{required=false}={}){
  if(required&&related.length!==1||related.length>1||related.some(c=>c.id!==record.claimId||c.setId!==record.setId||c.profileId!==record.profileId||c.productId!==record.productId||c.supplierAccountId!==undefined&&c.supplierAccountId!==record.supplierAccountId||!Array.isArray(c.listings)||!Array.isArray(c.images)||JSON.stringify(c.images.map(i=>imageURL(i.url,record.baseURL)))!==JSON.stringify(record.images)))throw failure('PHOTO_CONFLICT','本套照片的本地领取记录、环境或商品不一致，已停止');
  return related[0];
 }
-function privateDirectory(directory){
- if(!fs.existsSync(directory))fs.mkdirSync(directory,{mode:0o700});
- const stat=fs.lstatSync(directory);if(!stat.isDirectory()||stat.isSymbolicLink())throw failure('PHOTO_STORAGE','照片目录不是私有常规目录');fs.chmodSync(directory,0o700);
+function privateDirectory(directory,create){
+ if(create&&!fs.existsSync(directory))fs.mkdirSync(directory,{mode:0o700});
+ const stat=fs.lstatSync(directory);if(!stat.isDirectory()||stat.isSymbolicLink())throw failure('PHOTO_STORAGE','照片目录不是私有常规目录');if(create)fs.chmodSync(directory,0o700);
+ // Keep upload manifests canonical even when a macOS parent is exposed through
+ // /var rather than /private/var; owned cache directories must still be real.
+ const canonical=fs.realpathSync(directory),resolved=fs.lstatSync(canonical);if(!resolved.isDirectory()||resolved.isSymbolicLink()||resolved.dev!==stat.dev||resolved.ino!==stat.ino)throw failure('PHOTO_STORAGE','照片目录已改变');return canonical;
 }
 function cacheDirectory(engine,record,create=false){
- const root=path.join(engine.dir,'prepared-photos'),dir=path.join(root,record.id);
- if(create){privateDirectory(root);privateDirectory(dir);}else for(const entry of [root,dir]){const stat=fs.lstatSync(entry);if(!stat.isDirectory()||stat.isSymbolicLink())throw failure('PHOTO_STORAGE','照片目录已改变');}
- return dir;
+ const root=privateDirectory(path.join(engine.dir,'prepared-photos'),create);
+ return privateDirectory(path.join(root,record.id),create);
 }
-function syncDirectory(directory){const fd=fs.openSync(directory,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
+// Windows cannot FlushFileBuffers on a directory handle. The file itself is
+// still fsynced before rename; POSIX additionally flushes the parent directory.
+function syncDirectory(directory){if(process.platform==='win32')return;const fd=fs.openSync(directory,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
 function assetPath(dir,asset,index){if(!object(asset)||asset.index!==index||!/^[a-f0-9]{64}$/.test(asset.sha256||'')||asset.fileName!==String(index).padStart(2,'0')+'-'+asset.sha256+'.jpg'||!Number.isSafeInteger(asset.size)||asset.size<1||asset.size>MAX_IMAGE_BYTES||![asset.width,asset.height].every(n=>Number.isInteger(n)&&n>0&&n<=1200))throw failure('PHOTO_STORAGE','照片文件清单无效');return path.join(dir,asset.fileName);}
 function readAsset(dir,asset,index){
- const name=assetPath(dir,asset,index),fd=fs.openSync(name,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
- try{const stat=fs.fstatSync(fd);if(!stat.isFile()||stat.size!==asset.size||(stat.mode&0o077)!==0)throw failure('PHOTO_STORAGE','照片文件大小或私有权限已改变');const bytes=fs.readFileSync(fd);if(hash(bytes)!==asset.sha256)throw failure('PHOTO_STORAGE','本地照片内容校验失败');const size=jpegSize(bytes);if(size.width!==asset.width||size.height!==asset.height)throw failure('PHOTO_STORAGE','照片尺寸与清单不一致');return name;}finally{fs.closeSync(fd);}
+ const name=assetPath(dir,asset,index),before=fs.lstatSync(name);
+ if(!before.isFile()||before.isSymbolicLink())throw failure('PHOTO_STORAGE','照片文件不是常规文件');
+ const fd=fs.openSync(name,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);
+ try{const stat=fs.fstatSync(fd);if(!stat.isFile()||stat.dev!==before.dev||stat.ino!==before.ino||stat.size!==asset.size||(process.platform!=='win32'&&(stat.mode&0o077)!==0))throw failure('PHOTO_STORAGE','照片文件大小或私有权限已改变');const bytes=fs.readFileSync(fd);if(hash(bytes)!==asset.sha256)throw failure('PHOTO_STORAGE','本地照片内容校验失败');const size=jpegSize(bytes);if(size.width!==asset.width||size.height!==asset.height)throw failure('PHOTO_STORAGE','照片尺寸与清单不一致');return name;}finally{fs.closeSync(fd);}
 }
 function writeAsset(dir,asset,index,bytes){
  const target=assetPath(dir,asset,index),tmp=path.join(dir,'.'+randomUUID()+'.tmp');let fd;
@@ -106,6 +113,7 @@ function jpegSize(bytes){
 }
 async function validateBytes(bytes,validateImage,signal){const size=jpegSize(bytes),decoded=await bounded(()=>validateImage(bytes),signal);if(!decoded||decoded.width!==size.width||decoded.height!==size.height)throw failure('PHOTO_IMAGE','JPEG 无法完整解码或尺寸不一致');return {...size,size:bytes.length,sha256:hash(bytes)};}
 function readPreparedPhotos(engine,planId){
+ if(engine.plan(planId).source==='local')return require('./commerce-local-products.cjs').readLocalPreparedPhotos(engine,planId);
  const record=findRecord(engine,engine.plan(planId));if(!record)return {summary:null,manifest:null};
  const summary=summarizePreparation(record);if(record.state!=='ready')return {summary,manifest:null};
  try{
@@ -130,15 +138,32 @@ async function chooseSet(client,plan,setId,signal,guard,reserved){
 }
 async function preparePhotos(engine,planId,{setId,signal:callerSignal,validateImage}={}){
  if(typeof validateImage!=='function')throw failure('PHOTO_DECODER','照片解码校验器未配置，未领取照片');
- return engine.configure(async(configSignal,configGuard)=>{
+ return engine.configure((configSignal,configGuard)=>preparePhotoWork(engine,planId,{setId,callerSignal,validateImage},configSignal,configGuard));
+}
+// Main-process job entry. A renderer cannot manufacture the active controller
+// or profile lease. Manual preparation still uses the configuration lock.
+async function preparePhotosForJob(engine,job,{signal,validateImage}={}){
+ if(typeof validateImage!=='function')throw failure('PHOTO_DECODER','照片解码校验器未配置，未领取照片');
+ const identity={id:job?.id,planId:job?.planId,profileId:job?.profileId,productId:job?.productId,cycle:job?.payload?.cycle,listingRevision:listingRevision(job?.payload?.listingRevision)};
+ const guard=()=>{
+  const rows=engine.db.jobs.filter(row=>row.id===identity.id),current=rows[0],plan=engine.db.plans.find(row=>row.id===identity.planId);
+  if(!signal||signal.aborted||engine.active.get(identity.profileId)?.signal!==signal||!engine.leases.snapshot().some(row=>row.profileId===identity.profileId&&row.jobId===identity.id)||rows.length!==1||current.state!=='running'||current.type!=='listing'||current.planId!==identity.planId||current.profileId!==identity.profileId||current.productId!==identity.productId||current.payload?.cycle!==identity.cycle||listingRevision(current.payload?.listingRevision)!==identity.listingRevision||listingRevision(plan?.listingRevision)!==identity.listingRevision||!plan?.enabled||plan.profileId!==identity.profileId||plan.productId!==identity.productId||plan.completedCount!==identity.cycle||engine.closing||engine.configPending)throw stopped();
+ };
+ guard();return preparePhotoWork(engine,identity.planId,{validateImage},signal,guard);
+}
+async function preparePhotoWork(engine,planId,{setId,callerSignal,validateImage},configSignal,configGuard){
   const controller=new AbortController(),abort=()=>controller.abort();for(const signal of [configSignal,callerSignal]){signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();}
   const signal=controller.signal,guard=()=>{if(signal.aborted)throw stopped();configGuard();if(engine.faulted)throw failure('PHOTO_STORAGE','运营存储不可用，照片准备已停止');};
   let record,started=false;
   const save=()=>{record.updatedAt=stamp();engine.persist();engine.emit();};
   try{
    guard();const plan=engine.plan(planId);if(!engine.profiles().some(p=>p.id===plan.profileId))throw failure('PHOTO_PROFILE','照片计划的环境不存在');
+   if(plan.source==='local'){
+    if(setId!==undefined)throw failure('PHOTO_SET','本地商品仅使用已导入的原照片，不领取货盘套组');
+    return require('./commerce-local-products.cjs').prepareLocalPhotos(engine,planId,{signal,guard});
+   }
    record=findRecord(engine,plan);if(record&&setId!==undefined&&setId!==record.setId)throw failure('PHOTO_CONFLICT','原照片任务已固定套组，不能改成另一套重新领取');
-   const client=engine.client(),me=await bounded(s=>client.me({signal:s}),signal);guard();const accountId=engine.accountIdentity(me);
+   const client=await engine.client(signal);guard();const me=await bounded(s=>client.me({signal:s}),signal);guard();const accountId=engine.accountIdentity(me);
    if(!accountId||!engine.db.supplierAccountId||accountId!==engine.db.supplierAccountId||record&&accountId!==record.supplierAccountId)throw failure('PHOTO_IDENTITY','货盘账号与原连接或照片记录不一致');
    const response=await bounded(s=>client.product(plan.productId,{signal:s}),signal);guard();const product=response?.product??response;
    if(!object(product)||String(product.id)!==plan.productId||product.sku!==plan.sku)throw failure('PHOTO_PRODUCT','货盘商品编号或 SKU 与照片计划不一致');
@@ -172,6 +197,5 @@ async function preparePhotos(engine,planId,{setId,signal:callerSignal,validateIm
    if(started&&record&&!engine.faulted){record.state=Object.hasOwn(record,'receipt')?'needs_review':record.firstAttemptAt?'uncertain':'prepared';record.error=error?.code==='STOPPED'?'照片准备已停止，原领取与文件记录已保留':error?.code==='PHOTO_TIMEOUT'?'请求超时，保留原编号与套组等待恢复':'照片准备未完成，请核对原领取与本地照片后重试';save();}
    throw error;
   }finally{for(const signal of [configSignal,callerSignal])signal?.removeEventListener('abort',abort);}
- });
 }
-module.exports={preparePhotos,readPreparedPhotos,summarizePreparation,restorePhotoPreparations,MAX_IMAGE_BYTES,READ_TIMEOUT_MS};
+module.exports={preparePhotos,preparePhotosForJob,readPreparedPhotos,summarizePreparation,restorePhotoPreparations,jpegSize,MAX_IMAGE_BYTES,READ_TIMEOUT_MS};

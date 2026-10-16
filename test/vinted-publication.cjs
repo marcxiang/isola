@@ -1,8 +1,9 @@
 'use strict';
 
 const test=require('node:test'),assert=require('node:assert/strict');
-const {buildPublicationProof,validatePublicationReceipt,restorePublicationState,PublicationJournal,FORM_URL,MAX_PROOF_AGE_MS}=require('../src/vinted-publication.cjs');
+const {buildPublicationProof,validatePublicationReceipt,restorePublicationState,PublicationJournal,listingRevision,listingJobKey,isPublicationOpen,FORM_URL,MAX_PROOF_AGE_MS}=require('../src/vinted-publication.cjs');
 const START=Date.parse('2026-10-14T10:00:00.000Z');
+const {createEnvironmentSessionAuthority}=require('../src/commerce-session-authority.cjs');
 const clone=value=>JSON.parse(JSON.stringify(value));
 const iso=value=>new Date(value).toISOString();
 function inputs(){
@@ -15,6 +16,40 @@ function inputs(){
   publication:{documentKey,count:1,observed:true,label:'Ajouter',enabled:true}};
  return {plan,product:{id:plan.productId,sku:'TEST',stock:5},claim:{id:'claim-1',profileId,productId:plan.productId,setId:'set-1',images:[{id:'image-1'}]},expectedAccount,evidence};
 }
+function sessionInputs(profileId='environment-1'){
+ const input=inputs();input.plan.profileId=profileId;input.claim.profileId=profileId;input.evidence.profileId=profileId;input.evidence.photos.profileId=profileId;
+ input.expectedAccount=createEnvironmentSessionAuthority(profileId);input.evidence.account={kind:'environment-session',profileId};return input;
+}
+
+test('environment session proof requires a main-process capability and contains no invented member identity',()=>{
+ const input=sessionInputs(),proof=buildPublicationProof(input,{now:START});assert.deepEqual(proof.facts.account,{kind:'environment-session',profileId:'environment-1'});assert.equal(Object.hasOwn(proof.facts.account,'memberId'),false);
+ for(const replacement of [clone(input.expectedAccount),{...input.expectedAccount,memberId:'123'},{...input.expectedAccount,verified:true},createEnvironmentSessionAuthority('other')]){
+  assert.throws(()=>buildPublicationProof({...input,expectedAccount:replacement},{now:START}));
+ }
+ for(const replacement of [{kind:'environment-session',profileId:'other'},{...input.evidence.account,memberId:'123'},{...input.evidence.account,verified:true}])assert.throws(()=>buildPublicationProof({...input,evidence:{...input.evidence,account:replacement}},{now:START}));
+});
+
+test('session publications retain one-submit durability, unknown-result stop and environment-scoped duplicate protection',async()=>{
+ const f=fixture(),input=sessionInputs(),proof=buildPublicationProof(input,{now:START}),record=await f.journal.prepare(proof);let calls=0;
+ await f.journal.dispatchOnce(record.id,proof,async()=>{calls++;assert.equal(f.disk.submissions[0].attemptCount,1);});
+ assert.equal(f.journal.get(record.id).state,'uncertain');await assert.rejects(f.journal.dispatchOnce(record.id,proof,async()=>calls++),{code:'PUBLICATION_UNKNOWN_RESULT'});assert.equal(calls,1);
+ const duplicate=sessionInputs();duplicate.plan.id='another-plan';duplicate.evidence.documentKey='other';duplicate.evidence.form.documentKey='other';duplicate.evidence.photos.documentKey='other';duplicate.evidence.publication.documentKey='other';
+ await assert.rejects(f.journal.prepare(buildPublicationProof(duplicate,{now:START})),{code:'PUBLICATION_EXISTS'});
+ const other=sessionInputs('environment-2');other.plan.id='other-plan';await f.journal.prepare(buildPublicationProof(other,{now:START}));assert.equal(f.journal.state().submissions.length,2);
+ assert.equal(restorePublicationState(f.journal.state(),{now:START}).state.submissions[0].state,'uncertain');
+});
+
+test('session receipt verifies original submission and item evidence without claiming a member was verified',async()=>{
+ const f=fixture(),proof=buildPublicationProof(sessionInputs(),{now:START}),record=await f.journal.prepare(proof);await f.journal.dispatchOnce(record.id,proof,async()=>{});
+ const evidence=evidenceFor(record);evidence.account={...proof.facts.account};delete evidence.seller;
+ evidence.origin={...evidence.origin,profileId:proof.facts.profileId,tabId:proof.facts.tabId,listingId:evidence.listingId,url:'https://www.vinted.fr/items/'+evidence.listingId,event:'did-navigate',committed:true,observedAt:iso(START)};
+ await assert.rejects(f.journal.reconcile(record.id,evidence),{code:'PUBLICATION_RECEIPT_UNATTRIBUTED'});
+ await f.journal._atomic(state=>{state.submissions.find(row=>row.id===record.id).navigation=[clone(evidence.origin)];});
+ const published=await f.journal.reconcile(record.id,evidence);assert.deepEqual(published.receipt.account,proof.facts.account);assert.equal(Object.hasOwn(published.receipt,'memberId'),false);assert.equal(restorePublicationState(f.journal.state(),{now:START}).state.submissions[0].state,'published');
+ for(const change of [value=>value.account.profileId='other',value=>value.account.memberId='123',value=>value.origin.submissionId='other',value=>value.origin.tabId='other',value=>value.origin.committed=false,value=>value.photos.signature='b'.repeat(64),value=>value.ownedByCurrentAccount=false]){const value=clone(evidence);change(value);assert.throws(()=>validatePublicationReceipt(published,value,{now:START}));}
+ const state=f.journal.state();state.submissions[0].receipt.memberId='123';assert.throws(()=>restorePublicationState(state,{now:START}),{code:'PUBLICATION_CORRUPT'});
+ await assert.rejects(f.journal.releaseAfterSale(record.id,saleFor(record)),{code:'PUBLICATION_SALE_UNVERIFIED'});
+});
 function fixture(options={}){
  let clock=START,disk=options.state,writes=0,failWrites=false;const written=[];
  const journal=new PublicationJournal({state:options.state,now:()=>clock,dispatchEnabled:options.enabled??true,persist:async state=>{writes++;if(failWrites)throw Error('disk full');await options.beforePersist?.(state);disk=clone(state);written.push(clone(state));}});
@@ -207,4 +242,77 @@ test('corrupt durable records fail closed without silently starting a new journa
   const state=f.disk;change(state);assert.throws(()=>restorePublicationState(state,{now:START}),undefined,String(change));
  }
  const state=f.journal.state();state.submissions[0].proof.facts.sku='changed';assert.equal(f.journal.state().submissions[0].proof.facts.sku,'TEST');
+});
+
+function deletionFor(record,overrides={}){return {kind:'operator_confirmed_deletion',confirmed:true,reason:'deleted_not_sold',reviewId:'deletion-review-1',profileId:record.proof.facts.profileId,memberId:record.proof.facts.account.memberId,listingId:'98765',url:'https://www.vinted.fr/items/98765-old-item',confirmedAt:iso(START),...overrides};}
+function relistingProof(revision){const input=inputs();input.plan.listingRevision=revision;input.evidence.documentKey='new-document';for(const key of ['form','photos','publication'])input.evidence[key].documentKey='new-document';return buildPublicationProof(input,{now:START});}
+
+test('legacy revision zero preserves proof fingerprint and job keys while positive relisting revisions are distinct',()=>{
+ const input=inputs(),legacy=buildPublicationProof(input,{now:START});input.plan.listingRevision=0;const explicitZero=buildPublicationProof(input,{now:START});
+ assert.equal(legacy.fingerprint,explicitZero.fingerprint);assert.equal(Object.hasOwn(explicitZero.facts,'listingRevision'),false);assert.equal(listingRevision(),0);assert.equal(listingJobKey('plan-1',0),'listing:plan-1:0');assert.equal(listingJobKey('plan-1',0,1),'listing:plan-1:0:r1');
+ input.plan.listingRevision=1;const newer=buildPublicationProof(input,{now:START});assert.equal(newer.facts.listingRevision,1);assert.notEqual(newer.fingerprint,legacy.fingerprint);
+ for(const invalid of [null,-1,1.1,'1',NaN,Infinity])assert.throws(()=>listingRevision(invalid),{code:'PUBLICATION_INVALID'});
+});
+
+test('operator-confirmed deletion closes an uncertain attempt without creating a receipt, sale or resetting the attempt',async()=>{
+ const {f,record}=await sent(),original=clone(record),closed=await f.journal.releaseAfterDeletion(record.id,deletionFor(record));
+ assert.equal(closed.state,'uncertain');assert.equal(closed.attemptCount,1);assert.equal(closed.receipt,null);assert.equal(closed.closedSale,undefined);assert.deepEqual(closed.proof,original.proof);assert.equal(closed.submittedAt,original.submittedAt);
+ assert.equal(closed.closedWithdrawal.url,'https://www.vinted.fr/items/98765');assert.equal(Object.hasOwn(closed.closedWithdrawal,'verified'),false);assert.equal(isPublicationOpen(closed),false);assert.equal(isPublicationOpen(original),true);
+ assert.deepEqual(restorePublicationState(f.disk,{now:START}).state.submissions[0],closed);
+ await assert.rejects(f.journal.releaseAfterDeletion(record.id,deletionFor(record)),{code:'PUBLICATION_DELETION_CLOSED'});
+ await assert.rejects(f.journal.reconcile(record.id,evidenceFor(record)),{code:'PUBLICATION_WITHDRAWN'});
+ await assert.rejects(f.journal.releaseAfterSale(record.id,saleFor(record)),{code:'PUBLICATION_WITHDRAWN'});
+});
+
+test('published item deletion retains its verified original receipt but cannot be recounted as a sale',async()=>{
+ const {f,record}=await sent(),published=await f.journal.reconcile(record.id,evidenceFor(record)),closed=await f.journal.releaseAfterDeletion(record.id,deletionFor(record));
+ assert.equal(closed.state,'published');assert.deepEqual(closed.receipt,published.receipt);assert.deepEqual(closed.proof,published.proof);assert.equal(closed.closedSale,undefined);
+ await assert.rejects(f.journal.reconcile(record.id,evidenceFor(record)),{code:'PUBLICATION_WITHDRAWN'});
+ await assert.rejects(f.journal.releaseAfterSale(record.id,saleFor(record)),{code:'PUBLICATION_WITHDRAWN'});
+ const restored=fixture({state:f.disk});assert.deepEqual(restored.journal.get(record.id).closedWithdrawal,closed.closedWithdrawal);
+});
+
+test('only a new revision can relist a deleted item in the unchanged sales cycle; restore retains both immutable attempts',async()=>{
+ const {f,record}=await sent();await f.journal.releaseAfterDeletion(record.id,deletionFor(record));
+ await assert.rejects(f.journal.prepare(relistingProof(0)),{code:'PUBLICATION_EXISTS'});
+ const proof=relistingProof(1),replacement=await f.journal.prepare(proof);await f.journal.dispatchOnce(replacement.id,proof,async()=>{});
+ assert.equal(replacement.proof.facts.cycle,record.proof.facts.cycle);assert.equal(replacement.proof.facts.listingRevision,1);assert.notEqual(replacement.id,record.id);assert.equal(f.journal.state().submissions.length,2);
+ const state=restorePublicationState(f.disk,{now:START}).state;assert.equal(state.submissions.length,2);assert.equal(isPublicationOpen(state.submissions[0]),false);assert.equal(isPublicationOpen(state.submissions[1]),true);
+ await assert.rejects(f.journal.reconcile(replacement.id,evidenceFor(replacement)),{code:'PUBLICATION_RECEIPT_CONFLICT'});
+ const receipt=evidenceFor(replacement);receipt.listingId='98766';receipt.url='https://www.vinted.fr/items/98766';assert.equal((await f.journal.reconcile(replacement.id,receipt)).receipt.listingId,'98766');
+});
+
+test('revision changes cannot bypass an open original publication occupancy',async()=>{
+ const {f}=await sent();await assert.rejects(f.journal.prepare(relistingProof(1)),{code:'PUBLICATION_EXISTS'});
+});
+
+test('deletion rejects invalid confirmation, identity, time and attempts to claim website verification without writing',async()=>{
+ const {f,record}=await sent(),changes=[{kind:'web_deletion'},{confirmed:false},{reason:'sold'},{reviewId:''},{profileId:'other'},{memberId:'999'},{listingId:'invalid'},{url:'https://www.vinted.fr/items/999'},{confirmedAt:iso(START-1)},{confirmedAt:iso(START+1)},{verified:true},{webVerified:true}];
+ for(const patch of changes){const before=f.writes;await assert.rejects(f.journal.releaseAfterDeletion(record.id,deletionFor(record,patch)));assert.equal(f.writes,before);assert.equal(f.journal.get(record.id).closedWithdrawal,undefined);}
+ await assert.rejects(f.journal.releaseAfterDeletion(record.id,deletionFor(record),{guard:()=>{throw Object.assign(Error('busy'),{code:'BUSY'});}}),{code:'BUSY'});assert.equal(f.journal.get(record.id).closedWithdrawal,undefined);
+ await f.journal.reconcile(record.id,evidenceFor(record));await assert.rejects(f.journal.releaseAfterDeletion(record.id,deletionFor(record,{listingId:'999',url:'https://www.vinted.fr/items/999'})),{code:'PUBLICATION_DELETION_INVALID'});
+});
+
+test('never-submitted, dispatching and paid-sale publications cannot be released through deletion',async()=>{
+ const f=fixture(),proof=f.proof(),record=await f.journal.prepare(proof);await assert.rejects(f.journal.releaseAfterDeletion(record.id,deletionFor(record)),{code:'PUBLICATION_DELETION_BLOCKED'});
+ await f.journal.dispatchOnce(record.id,proof,async()=>{await assert.rejects(f.journal.releaseAfterDeletion(record.id,deletionFor(record)),{code:'PUBLICATION_DELETION_BLOCKED'});});
+ await f.journal.reconcile(record.id,evidenceFor(record));await f.journal.releaseAfterSale(record.id,saleFor(record));await assert.rejects(f.journal.releaseAfterDeletion(record.id,deletionFor(record)),{code:'PUBLICATION_DELETION_BLOCKED'});
+});
+
+test('deletion persistence failure preserves the original uncertain record and disables later journal writes',async()=>{
+ const {f,record}=await sent(),before=f.journal.state();f.failWrites();await assert.rejects(f.journal.releaseAfterDeletion(record.id,deletionFor(record)),{code:'PUBLICATION_STORAGE_FAILED'});assert.deepEqual(f.journal.state(),before);assert.equal(f.journal.faulted,true);
+});
+
+test('restored withdrawals reject forged sale coexistence, changed identities and duplicate review identifiers',async()=>{
+ const {f,record}=await sent();await f.journal.reconcile(record.id,evidenceFor(record));await f.journal.releaseAfterDeletion(record.id,deletionFor(record));
+ for(const change of [row=>row.closedSale=saleFor(record),row=>row.closedWithdrawal.memberId='999',row=>row.closedWithdrawal.confirmed=false,row=>row.closedWithdrawal.confirmedAt=iso(START-1),row=>row.closedWithdrawal.verified=true,row=>row.closedWithdrawal.url='https://www.vinted.fr/items/999']){const state=f.disk;change(state.submissions[0]);assert.throws(()=>restorePublicationState(state,{now:START}),undefined,String(change));}
+ const proof=relistingProof(1),replacement=await f.journal.prepare(proof);await f.journal.dispatchOnce(replacement.id,proof,async()=>{});
+ await assert.rejects(f.journal.releaseAfterDeletion(replacement.id,deletionFor(replacement,{listingId:'98766',url:'https://www.vinted.fr/items/98766'})),{code:'PUBLICATION_DELETION_CONFLICT'});
+ await f.journal.releaseAfterDeletion(replacement.id,deletionFor(replacement,{reviewId:'deletion-review-2',listingId:'98766',url:'https://www.vinted.fr/items/98766'}));const state=f.disk;state.submissions[1].closedWithdrawal.reviewId='deletion-review-1';assert.throws(()=>restorePublicationState(state,{now:START}),{code:'PUBLICATION_CORRUPT'});
+});
+
+test('deletion identity must match an observed committed submission navigation when available',async()=>{
+ const {f,record}=await sent(),state=f.disk;state.submissions[0].navigation=[{committed:true,listingId:'55555'}];const restored=fixture({state});
+ await assert.rejects(restored.journal.releaseAfterDeletion(record.id,deletionFor(record)),{code:'PUBLICATION_DELETION_INVALID'});
+ const closed=await restored.journal.releaseAfterDeletion(record.id,deletionFor(record,{listingId:'55555',url:'https://www.vinted.fr/items/55555'}));assert.equal(closed.closedWithdrawal.listingId,'55555');
 });

@@ -1,7 +1,8 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const vm=require('node:vm');
-const {EventEmitter}=require('node:events');
+const {EventEmitter,getEventListeners}=require('node:events');
+const {performance}=require('node:perf_hooks');
 const {VintedAdapter}=require('../src/vinted-adapter.cjs');
 const FORM='https://www.vinted.fr/items/new';
 const parcelDescriptions={Petit:'Petit Convient pour un article qui tient dans une grande enveloppe.',Moyen:'Recommandé Moyen Convient pour un article qui tient dans une boîte à chaussures. Voir les détails des dimensions et indemnisations',Grand:'Grand Convient pour un article qui tient dans un carton de déménagement.'};
@@ -9,7 +10,8 @@ const listing={title:'Test garment',description:'Test listing description.',cate
 
 function fixture(options={}){
   const values={title:'',description:'',categoryPath:'',priceCents:'',condition:'',brand:'',color:'',brandSearch:'',parcel:'Moyen',categorySearch:options.stickySearch||'',...(options.values||{})},calls=[];
-  let url=options.url||FORM,version=0,documentKey=1,menu=options.openCategory?'categoryPath':null,level=0,currentIds=new Map();
+  let url=options.url||FORM,version=0,documentKey=1,menu=options.openCategory?'categoryPath':null,level=0,currentIds=new Map(),pendingChoice=null;
+  const isolatedState={},choosers=new Map();
   const definitions=[
     {key:'title',tag:'input',type:'text',label:'Titre'},
     {key:'description',tag:'textarea',type:'textarea',label:'Description'},
@@ -25,12 +27,12 @@ function fixture(options={}){
   const parcelGroup={tagName:'DIV',contains:e=>e.parcelOption===true,querySelectorAll:selector=>selector==='input[type=radio]'?parcelNodes:[],get _text(){return parcelNodes.map(e=>e._wrapper._text).join(' ');}};
   const tab={id:'tab-1',view:{webContents:contents}};
   const w={isDestroyed:()=>false,tabs:[tab],activeTab:tab.id,aiAgent:{state:{running:false}}};
-  const api={values,calls,tab,w,definitions,setURL(value){url=value;},reload(){documentKey++;},currentIds:null};
+  const api={values,calls,tab,w,definitions,confirmedMenus:[],setURL(value){url=value;},reload(){documentKey++;},currentIds:null};
   async function snapshot(){
     version++;currentIds=new Map();parcelNodes=[];let rows=definitions.map(e=>({...e}));
     rows.push({tag:'button',role:'tab',label:'Femmes',nav:true});
     if(menu==='categoryPath'){
-      if(options.stickySearch!==undefined)rows.push({key:'categorySearch',tag:'input',type:'search',label:'Trouver une catégorie',placeholder:'Trouver une catégorie'});
+      if(options.stickySearch!==undefined||options.mobileCategory)rows.push({key:'categorySearch',tag:'input',type:'search',label:'Trouver une catégorie',placeholder:'Trouver une catégorie'});
       if(!values.categorySearch&&level===0)rows.push({tag:'button',label:'Femmes',option:true,advance:1});
       if(!values.categorySearch&&level===1)rows.push({tag:'button',label:'Accessoires',option:true,advance:2});
       if(!values.categorySearch&&level===2)rows.push({tag:'input',type:'radio',role:'radio',label:'Autres accessoires',option:true,selectedValue:'Autres accessoires'});
@@ -38,12 +40,24 @@ function fixture(options={}){
     if(menu==='brand'){rows.push({key:'brandSearch',tag:'input',type:'text',label:'Rechercher une marque'});if(values.brandSearch==='Sans marque')rows.push({tag:'input',type:'radio',role:'radio',label:'Sans marque',option:true,selectedValue:'Sans marque'});rows.push({tag:'input',type:'radio',role:'radio',label:'The Unbranded Brand',option:true,selectedValue:'The Unbranded Brand'});}
     if(menu==='color'){if(options.colorSuggestions)rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Noir',option:true,selectedValue:'Noir',colorGroup:'suggestions',checked:values.color==='Noir'});rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Noir',option:true,selectedValue:'Noir',colorGroup:options.colorSuggestions?'all':undefined,checked:values.color==='Noir'});rows.push({tag:'input',type:'checkbox',role:'checkbox',label:'Blanc',option:true,selectedValue:'Blanc',colorGroup:options.colorSuggestions?'all':undefined,checked:options.otherColorChecked===true});}
     if(menu==='condition')rows.push({tag:'input',type:'radio',role:'radio',label:'Neuf avec étiquette Article neuf et jamais porté',option:true,selectedValue:'Neuf avec étiquette'});
+    if(options.partialMobileDone&&api.confirmedMenus.includes(menu))rows=rows.filter(row=>!row.option||row.selectedValue!==values[menu]);
+    if(menu==='categoryPath'&&options.mobileCategory||menu==='brand'&&options.mobileBrand||menu==='condition'&&options.mobileCondition||menu==='color'&&options.mobileColor){
+      rows=rows.map(row=>row.option||['categorySearch','brandSearch'].includes(row.key)?{...row,chooser:true,checked:(row.selectedValue===pendingChoice||row.checked===true)&&!options.uncheckedMobileChoice}:row);
+      const done={tag:'button',type:options.mobileDoneType||'button',label:'Fait',confirm:true,chooser:!options.outsideMobileDone};
+      rows.push(done);if(options.duplicateMobileDone)rows.push({...done});
+    }
     if(options.includeParcel)rows.push(...['Petit','Moyen','Grand'].map(name=>({tag:'input',type:'radio',role:'radio',label:options.rawParcelLabels?'radio':parcelDescriptions[name],parcelOption:true,selectedValue:name,checked:values.parcel===name})));
     if(options.rows)rows=options.rows(rows,api,{menu,level});
-    const elements=[],colorGroups=new Map();
+    const elements=[],colorGroups=new Map(),chooserNodes=[],chooserLabel=({categoryPath:'Catégorie',brand:'Marque',condition:'État',color:'Couleur'})[menu];
+    const titleLeaf={tagName:'SPAN',_text:chooserLabel,querySelectorAll:()=>[],contains:other=>other===titleLeaf},heading={tagName:'H2',_text:chooserLabel,querySelectorAll:()=>[],contains:other=>other===heading||other===titleLeaf};
+    const titleNodes=options.duplicateChooserTitle?[heading,titleLeaf,{...titleLeaf,contains:()=>false}]:[heading,titleLeaf];
+    let chooser=choosers.get(menu);
+    if(!chooser){const chooserMenu=menu;chooser={tagName:'DIV',get isConnected(){return menu===chooserMenu&&choosers.get(chooserMenu)===chooser;},contains:e=>chooser.nodes.includes(e),querySelectorAll:selector=>selector.startsWith('h1,')?options.nestedChooserTitle?chooser.titleNodes:[]:selector.includes('textarea,select,button')?chooser.nodes:chooser.nodes.filter(e=>['radio','checkbox'].includes(e.role)||['radio','checkbox'].includes(e.type))};choosers.set(menu,chooser);}
+    Object.assign(chooser,{label:options.nestedChooserTitle?'':chooserLabel,getAttribute:name=>name==='aria-label'&&!options.nestedChooserTitle?chooserLabel:null,nodes:chooserNodes,titleNodes});
     for(const row of rows){
       const id='e'+version+'-'+elements.length,node={...row,tagName:row.tag.toUpperCase(),isConnected:true,get value(){return String(values[row.key]||'');},autocomplete:'',nav:row.nav,form:row.nav?null:form,getAttribute:name=>row[name]||null,contains(other){return this===other;},querySelectorAll:()=>[]};
-      if(row.colorGroup){if(!colorGroups.has(row.colorGroup)){const title=row.colorGroup==='suggestions'?'Suggestions':'Toutes les couleurs',heading={tagName:'DIV',_text:title,querySelectorAll:()=>[]};colorGroups.set(row.colorGroup,{tagName:'DIV',label:options.plainColorHeading?'':title,children:options.plainColorHeading?[heading]:[],contains:other=>other.colorGroup===row.colorGroup});}node._colorGroup=colorGroups.get(row.colorGroup);}
+      if(row.chooser){node._chooser=chooser;chooserNodes.push(node);}
+      if(row.colorGroup){if(!colorGroups.has(row.colorGroup)){const title=row.colorGroup==='suggestions'?'Suggestions':'Toutes les couleurs',heading={tagName:'DIV',_text:title,querySelectorAll:()=>[]};colorGroups.set(row.colorGroup,{tagName:'DIV',label:options.plainColorHeading?'':title,children:options.plainColorHeading?[heading]:[],contains:other=>other.colorGroup===row.colorGroup,querySelectorAll:selector=>selector.startsWith('h1,')?[heading]:[]});}node._colorGroup=colorGroups.get(row.colorGroup);}
       if(row.parcelOption){
         const wrapper={tag:'button',role:'button',tagName:'BUTTON',type:'button',isConnected:true,parcelOption:true,selectedValue:row.selectedValue,_text:parcelDescriptions[row.selectedValue],contains:e=>e===wrapper||e===node,querySelectorAll:selector=>selector==='input[type=radio]'?[node]:[],getAttribute:()=>null};
         node._wrapper=wrapper;parcelNodes.push(node);
@@ -58,7 +72,8 @@ function fixture(options={}){
     checkedSnapshot:async(_tab,{signal})=>{assert.equal(_tab,tab);if(signal?.aborted)throw Error('stopped');if(options.beforeSnapshot)await options.beforeSnapshot(api);return snapshot();},
     isolated:async(_tab,expression)=>{
       assert.equal(_tab,tab);
-      return vm.runInNewContext(expression,{globalThis:{__isolaElements:currentIds,__isolaDOM:{closest:node=>node.nav?{}:null,parents:node=>node.parcelOption?[node,...(node._wrapper?[node._wrapper]:[]),parcelGroup,form]:[node,...(node._colorGroup?[node._colorGroup]:[]),form],label:node=>node.label||node._text||'',safeText:node=>node.tagName==='INPUT'?'':node._text||node.label||'',visible:node=>!node.hidden,disabled:node=>!!node.disabled}},performance:{timeOrigin:documentKey}});
+      Object.assign(isolatedState,{__isolaElements:currentIds,__isolaDOM:{closest:node=>node.nav?{}:null,parents:node=>node.parcelOption?[node,...(node._wrapper?[node._wrapper]:[]),parcelGroup,form]:[node,...(node._colorGroup?[node._colorGroup]:[]),...(node._chooser?[node._chooser]:[]),form],label:node=>node.label||node._text||'',safeText:node=>node.tagName==='INPUT'?'':node._text||node.label||'',visible:node=>!node.hidden,disabled:node=>!!node.disabled}});
+      return vm.runInNewContext(expression,{globalThis:isolatedState,performance:{timeOrigin:documentKey},document:{querySelectorAll:()=>[...currentIds.values()]}});
     },
     performAction:async(_tab,args,opts)=>{
       assert.equal(_tab,tab);calls.push(args);
@@ -71,8 +86,9 @@ function fixture(options={}){
       const node=currentIds.get(args.elementId);assert.ok(node,'Every action uses a fresh snapshot ID');
       if(args.action==='type')values[node.key]=options.coerceValue?options.coerceValue(node.key,args.text):args.text;
       else if(['categoryPath','condition','brand','color'].includes(node.key)){menu=node.key;level=0;}
+      else if(node.confirm){api.confirmedMenus.push(menu);if(!options.stuckMobileDone){values[menu]=options.selectedValue||pendingChoice;if(!options.partialMobileDone)menu=null;else if(options.replaceMobileChooser)choosers.delete(menu);pendingChoice=null;}}
       else if(node.parcelOption)values.parcel=node.selectedValue;
-      else if(node.option){if(node.advance)level=node.advance;else{values[menu]=options.selectedValue||node.selectedValue;if(menu!=='color')menu=null;}}
+      else if(node.option){if(node.advance)level=node.advance;else if(menu==='categoryPath'&&options.mobileCategory||menu==='brand'&&options.mobileBrand||menu==='condition'&&options.mobileCondition||menu==='color'&&options.mobileColor)pendingChoice=node.selectedValue;else{values[menu]=options.selectedValue||node.selectedValue;if(menu!=='color')menu=null;}}
       else throw Error('Unexpected click target '+node.label);
       const page=await snapshot();return {...page,observation:{inputMatched:options.inputMatched!==false}};
     }
@@ -80,6 +96,252 @@ function fixture(options={}){
   api.adapter=new VintedAdapter({windows:new Map([['profile-1',w]]),control,isBusy:options.isBusy||(()=>false),menuWaitMs:options.menuWaitMs??40,pollIntervalMs:10});
   return api;
 }
+
+function optionalMaterialFixture(options={}){
+  let open=false,material='',documentKey=1,version=0,ids=new Map(),pending=0;
+  const values={title:'',description:'',categoryPath:'',priceCents:'',condition:''},calls=[],world={};
+  const contents=Object.assign(new EventEmitter(),{isDestroyed:()=>false,getURL:()=>FORM}),tab={id:'material-tab',view:{webContents:contents}},w={isDestroyed:()=>false,tabs:[tab],activeTab:tab.id,aiAgent:{state:{running:false}}};
+  const node=(tag,label,extra={})=>Object.defineProperties({tagName:tag.toUpperCase(),label,isConnected:true,children:[],getAttribute(name){return this[name]??null;},contains(other){return this===other;},querySelectorAll:()=>[]},Object.getOwnPropertyDescriptors(extra));
+  const fields=Object.entries({title:'Titre',description:'Description',categoryPath:'Catégorie',priceCents:'Prix',condition:'État'}).map(([key,label])=>node(key==='description'?'textarea':'input',label,{key,type:'text',readOnly:!['title','description','priceCents'].includes(key),get value(){return values[key];}}));
+  const input=node('input','Matériau (recommandé)',{type:'text',readOnly:true,required:options.required===true||options.required==='true',invalid:options.invalid===true||options.invalid==='true',get value(){return material;},placeholder:'Sélectionne un matériau'});
+  const auxiliary=node('input','Fixture empty unknown input',{type:'text',value:'',semanticHeader:options.semanticHeader===true}),originalChoice=node('input','Fixture business choice',{type:'radio',checked:true,hidden:options.hiddenOriginalChoice===true});
+  const form=node('form','',{contains:other=>fields.includes(other)||other===input||options.auxiliary&&!options.semanticHeader&&other===auxiliary||options.originalChoice&&other===originalChoice,querySelectorAll:()=>options.originalChoice?[originalChoice]:[]});for(const field of [...fields,input,...(options.auxiliary&&!options.semanticHeader?[auxiliary]:[])])field.form=form;
+  const heading=node('span','',{_text:'Matériau (recommandé)'}),allHeading=node('p','',{_text:'Toutes'}),suggestionHeading=node('p','',{_text:'Suggestions'});
+  const all=node('div','',{children:[allHeading],contains:other=>other.group==='all'}),suggestions=node('div','',{children:[suggestionHeading],contains:other=>other.group==='suggestions'});
+  const canonical=node('input','Plastique',{type:'checkbox',role:'checkbox',group:'all',checked:true}),mirror=node('input','Plastique',{type:'checkbox',role:'checkbox',group:'suggestions',checked:true}),other=node('input','Acier',{type:'checkbox',role:'checkbox',group:'suggestions',checked:false});
+  const doneProperties={type:'button',get disabled(){return canonical.checked||mirror.checked||options.disabledDone===true;}};let done=node('button','Fait',doneProperties);
+  const duplicate=node('input','Plastique',{type:'checkbox',role:'checkbox',group:options.unknownGroup?'unknown':'all',checked:true});
+  const header=node('header','',{contains:other=>other===heading||other===done});
+  const duplicateHeading=node('span','',{_text:'Matériau (recommandé)'}),duplicateDone=node('button','Fait',{type:'button'}),customRole=node('div','Acier',{role:'checkbox',group:'all',checked:true});
+  const chooserNodes=[heading,canonical,mirror,other,done,...(options.duplicate||options.unknownGroup?[duplicate]:[]),...(options.duplicateHeading?[duplicateHeading]:[]),...(options.duplicateDone?[duplicateDone]:[]),...(options.unregisteredRole?[customRole]:[])];
+  const scope=node('div','',{get isConnected(){return open;},get hidden(){return !open;},contains:other=>chooserNodes.includes(other)||[all,suggestions].includes(other)||options.scopeOwnsForm&&(other===input||fields.includes(other)),querySelectorAll:selector=>selector.startsWith('input,textarea,select')?chooserNodes.filter(n=>n.tagName==='INPUT'||n.role==='checkbox'||n.role==='radio'):chooserNodes.filter(n=>n.tagName!=='SPAN')});
+  const api={calls,dispatched:[],values,tab,w,setMaterial(value){material=value;},reload(){documentKey++;},canonical,mirror,other,input,fields,auxiliary,originalChoice,chooserNodes,heading,duplicateHeading,duplicateDone,customRole,get done(){return done;}};
+  async function snapshot(){
+    version++;ids=new Map();
+    if(pending>0&&!options.desync&&--pending===0)mirror.checked=false;
+    const nodes=[...fields,...(options.auxiliary?[auxiliary]:[]),...(options.absent?[]:[input,...(options.duplicateMaterial?[input]:[])]),...(open?chooserNodes.filter(n=>n!==heading&&n!==duplicateHeading&&!(n===customRole&&options.unregisteredRole)&&!(n===done&&(options.omitDone||options.omitDisabledDone&&done.disabled))):[])];
+    const elements=nodes.map(n=>{const id='e'+version+'-'+ids.size;ids.set(id,n);return {id,tag:n.tagName.toLowerCase(),type:n.type,role:n.role,label:n.label,readOnly:n.readOnly,required:n===input?options.required??false:n.required,invalid:n===input?options.invalid??false:n.invalid,disabled:n.disabled,checked:n.checked};});
+    return {url:FORM,title:'Vendre un article',elements};
+  }
+  const control={
+    checkedSnapshot:async()=>{await options.beforeSnapshot?.(api);return snapshot();},
+    isolated:async(_tab,expression)=>{
+      await options.beforeIsolated?.(api,expression);
+      Object.assign(world,{__isolaElements:ids,__isolaDOM:{visible:n=>!n.hidden,disabled:n=>!!n.disabled,label:n=>n.label||'',safeText:n=>n._text||n.label||'',closest:(n,selector)=>selector==='form'?n.form||null:n.semanticHeader&&selector.includes('header')||(options.pickerHeader&&selector.includes('header')||options.pickerNav&&selector.includes('nav'))&&[heading,done].includes(n)?header:null,parents:n=>[n,...(options.pickerHeader&&[heading,done].includes(n)?[header]:[]),...(n.group==='all'?[all]:n.group==='suggestions'?[suggestions]:[]),...(chooserNodes.includes(n)||[all,suggestions].includes(n)?[scope]:[form])]}});
+      return vm.runInNewContext(expression,{globalThis:world,performance:{timeOrigin:documentKey},document:{querySelectorAll:selector=>!open?[]:selector==='button'?chooserNodes.filter(n=>n.tagName==='BUTTON'):[...chooserNodes.filter(n=>n._text==='Matériau (recommandé)'),allHeading,suggestionHeading]}});
+    },
+    performAction:async(_tab,args,opts)=>{
+      calls.push(args);await options.beforeAction?.(api,args);await opts.onProgress?.({stage:'acting'});if(opts.signal.aborted)throw Error('stopped');
+      const target=ids.get(args.elementId);assert.ok(target,'material operation uses a fresh semantic id');
+      api.dispatched.push(target);
+      if(args.action==='type')values[target.key]=args.text;
+      else if(target===input){open=true;await options.afterOpen?.(api);}
+      else if(target===canonical){canonical.checked=false;pending=options.pendingSnapshots||1;if(options.extraSelected)other.checked=true;if(options.replaceDone){const old=done;old.isConnected=false;done=node('button','Fait',doneProperties);chooserNodes[chooserNodes.indexOf(old)]=done;}}
+      else if(target===done){if(!options.stuckDone){open=false;material='';}}
+      else throw Error('Unexpected optional-material action');
+      await opts.onProgress?.({stage:'verifying'});return {...await snapshot(),observation:{inputMatched:true}};
+    }
+  };
+  api.adapter=new VintedAdapter({windows:new Map([['profile-1',w]]),control,menuWaitMs:options.menuWaitMs??40,pollIntervalMs:10});
+  api.prepare=async()=>{await api.adapter.prepareFields('profile-1',{title:'Owned test'});calls.length=0;api.dispatched.length=0;};
+  return api;
+}
+
+test('optional material clearing uses the owned canonical checkbox, waits for its suggestion mirror, and confirms empty Fait',async()=>{
+  const f=optionalMaterialFixture({pendingSnapshots:3});await f.prepare();f.setMaterial('Plastique');
+  const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.verified,true);assert.equal(result.cleared,true);assert.equal(result.published,false);assert.equal(f.values.title,'Owned test');assert.equal(f.calls.length,3);assert.ok(f.calls.every(call=>call.action==='click'));
+  const count=f.calls.length;const repeated=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(repeated.unchanged,true);assert.equal(repeated.cleared,false);assert.equal(f.calls.length,count);assert.equal(f.w.vintedDraftController,null);
+});
+
+test('original material guards distinguish fixed failure reasons without returning any page data',async()=>{
+  const variants=[
+    {reason:'material_input',change(api){api.input.readOnly=false;}},
+    {reason:'material_input_disabled',change(api){api.input.disabled=true;}},
+    {reason:'material_input_changed',change(api){api.setMaterial('private-fixture changed material');}},
+    {reason:'watched_disconnected',change(api){api.fields[0].isConnected=false;}},
+    {reason:'watched_value',change(api){api.values.title='private-fixture changed title';}},
+    {reason:'original_choice_disconnected',change(api){api.originalChoice.isConnected=false;}},
+    {reason:'original_choice_checked',change(api){api.originalChoice.checked=false;}}
+  ];
+  for(const variant of variants){
+    const f=optionalMaterialFixture({originalChoice:true,afterOpen:variant.change});await f.prepare();f.setMaterial('Plastique');
+    await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason===variant.reason&&!error.message.includes('private-fixture'));
+    assert.equal(f.calls.length,1);assert.equal(f.dispatched.length,1);assert.equal(f.canonical.checked,true);assert.equal(f.mirror.checked,true);assert.equal(f.dispatched.filter(node=>node.label==='Fait').length,0);assert.equal(f.w.vintedDraftController,null);
+  }
+});
+
+test('guard installation diagnoses a last-moment disabled material before opening its picker',async()=>{
+  let armed=false;const f=optionalMaterialFixture({beforeIsolated(api,expression){if(armed&&expression.includes('const originalChoices=')){armed=false;api.input.disabled=true;}}});await f.prepare();f.setMaterial('Plastique');armed=true;
+  await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='material_input_disabled');assert.equal(f.calls.length,0);assert.equal(f.dispatched.length,0);assert.equal(f.input.value,'Plastique');assert.equal(f.w.vintedDraftController,null);
+});
+
+test('a rebuilt ordinary header search is excluded while a rebuilt empty unknown business input remains guarded',async()=>{
+  const header=optionalMaterialFixture({auxiliary:true,semanticHeader:true,afterOpen(api){api.auxiliary.isConnected=false;}});await header.prepare();header.setMaterial('Plastique');const result=await header.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,true);assert.equal(header.dispatched.length,3);
+  const unknown=optionalMaterialFixture({auxiliary:true,afterOpen(api){api.auxiliary.isConnected=false;}});await unknown.prepare();unknown.setMaterial('Plastique');await assert.rejects(unknown.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='watched_disconnected');assert.equal(unknown.dispatched.length,1);assert.equal(unknown.canonical.checked,true);assert.equal(unknown.mirror.checked,true);
+});
+
+test('hidden original business choices remain guarded and report a disconnect instead of silently ignoring it',async()=>{
+  const f=optionalMaterialFixture({originalChoice:true,hiddenOriginalChoice:true,afterOpen(api){api.originalChoice.isConnected=false;}});await f.prepare();f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='original_choice_disconnected');assert.equal(f.dispatched.length,1);assert.equal(f.canonical.checked,true);assert.equal(f.mirror.checked,true);
+});
+
+test('a changed original field after open verification is diagnosed before any material is unchecked',async()=>{
+  let armed=false,changed=false;const f=optionalMaterialFixture({beforeSnapshot(api){if(armed&&!changed&&api.dispatched.length===1){changed=true;api.values.priceCents='private-fixture changed price';}}});await f.prepare();f.setMaterial('Plastique');armed=true;await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='watched_value'&&!error.message.includes('private-fixture'));assert.equal(f.dispatched.length,1);assert.equal(f.canonical.checked,true);assert.equal(f.mirror.checked,true);
+});
+
+test('optional material discovers an omitted disabled Fait and its own mobile header without granting an action id',async()=>{
+  for(const options of [{omitDisabledDone:true},{pickerHeader:true},{omitDisabledDone:true,pickerHeader:true}]){const f=optionalMaterialFixture({...options,pendingSnapshots:3});await f.prepare();f.setMaterial('Plastique');const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.verified,true);assert.equal(result.cleared,true);assert.equal(f.calls.length,3);assert.equal(f.canonical.checked,false);assert.equal(f.mirror.checked,false);assert.equal(f.input.value,'');}
+});
+
+test('optional material waits for its disabled Fait while the suggestion mirror is still selected',async()=>{
+  const f=optionalMaterialFixture({omitDisabledDone:true,pendingSnapshots:3});await f.prepare();f.setMaterial('Plastique');const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,true);assert.equal(f.calls.length,3);assert.equal(f.input.value,'');
+});
+
+test('a native Fait without a fresh registered enabled id, or a replaced Fait node, cannot be committed',async()=>{
+  for(const options of [{omitDone:true},{replaceDone:true}]){const f=optionalMaterialFixture({...options,menuWaitMs:0});await f.prepare();f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='picker_done');assert.equal(f.calls.length,2);assert.equal(f.input.value,'Plastique');assert.equal(f.w.vintedDraftController,null);}
+});
+
+test('native Fait discovery still rejects navigation, owned-form scopes and duplicate picker anchors',async()=>{
+  for(const [options,reason] of [[{pickerNav:true},'picker_scope'],[{scopeOwnsForm:true},'picker_scope'],[{duplicateHeading:true},'picker_scope'],[{duplicateDone:true},'picker_done']]){const f=optionalMaterialFixture({...options,menuWaitMs:0});await f.prepare();f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason===reason);assert.equal(f.calls.length,1);assert.equal(f.canonical.checked,true);assert.equal(f.mirror.checked,true);}
+});
+
+test('an unregistered custom role checkbox inside the picker blocks before any material is unchecked',async()=>{
+  const f=optionalMaterialFixture({unregisteredRole:true,menuWaitMs:0});await f.prepare();f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason==='picker_choices');assert.equal(f.calls.length,1);assert.equal(f.dispatched.length,1);assert.equal(f.canonical.checked,true);assert.equal(f.mirror.checked,true);assert.equal(f.input.value,'Plastique');
+});
+
+test('the acting guard rejects new selections or replaced picker anchors after the empty snapshot',async()=>{
+  const variants=[
+    {reason:'picker_choices',change(api){api.other.checked=true;assert.equal(api.done.disabled,false);}},
+    {reason:'picker_choices',change(api){api.chooserNodes.push(api.customRole);}},
+    {reason:'picker_choices',change(api){api.canonical.label='private changed material';}},
+    {reason:'picker_choices',change(api){api.mirror.label='private changed material';}},
+    {reason:'picker_done',change(api){api.chooserNodes.push(api.duplicateDone);}},
+    {reason:'picker_scope',change(api){api.chooserNodes.push(api.duplicateHeading);}},
+    {reason:'picker_scope',change(api){api.heading.isConnected=false;api.chooserNodes[api.chooserNodes.indexOf(api.heading)]=api.duplicateHeading;}}
+  ];
+  for(const variant of variants){const f=optionalMaterialFixture({beforeAction(api){if(api.calls.length===3)variant.change(api);}});await f.prepare();f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason===variant.reason);assert.equal(f.calls.length,3);assert.equal(f.dispatched.length,2);assert.equal(f.dispatched.filter(node=>node.label==='Fait').length,0);assert.equal(f.input.value,'Plastique');assert.equal(f.w.vintedDraftController,null);}
+});
+
+test('the uncheck acting guard also preserves a picker changed after its selected snapshot',async()=>{
+  const variants=[{reason:'picker_choices',change(api){api.other.checked=true;}},{reason:'picker_choices',change(api){api.chooserNodes.push(api.customRole);}},{reason:'picker_choices',change(api){api.canonical.label='private changed material';}},{reason:'picker_choices',change(api){api.mirror.label='private changed material';}},{reason:'picker_done',change(api){api.chooserNodes.push(api.duplicateDone);}},{reason:'picker_scope',change(api){api.chooserNodes.push(api.duplicateHeading);}}];
+  for(const variant of variants){const f=optionalMaterialFixture({beforeAction(api){if(api.calls.length===2)variant.change(api);}});await f.prepare();f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&error.materialReason===variant.reason);assert.equal(f.calls.length,2);assert.equal(f.dispatched.length,1);assert.equal(f.canonical.checked,true);assert.equal(f.mirror.checked,true);assert.equal(f.input.value,'Plastique');}
+});
+
+test('optional material is a no-op when absent or empty but never adopts an unowned draft',async()=>{
+  for(const absent of [false,true]){const f=optionalMaterialFixture({absent});await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),{code:'EXISTING_DRAFT'});await f.prepare();const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,false);assert.equal(f.calls.length,0);}
+});
+
+test('optional material refuses required, invalid, duplicate, unknown, unrelated selected or unsynchronized chooser states',async()=>{
+  for(const options of [{required:true},{required:'true'},{invalid:true},{invalid:'true'},{invalid:'grammar'},{invalid:'spelling'},{invalid:''},{duplicate:true},{unknownGroup:true},{extraSelected:true},{desync:true},{disabledDone:true},{stuckDone:true}]){
+    const f=optionalMaterialFixture({...options,menuWaitMs:0});await f.prepare();f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),{code:'OPTIONAL_MATERIAL_UNVERIFIED'});assert.equal(f.values.title,'Owned test');assert.equal(f.w.vintedDraftController,null);assert.ok(f.calls.length<=3);
+  }
+});
+
+test('optional material accepts explicit string false accessibility states',async()=>{
+  const f=optionalMaterialFixture({required:'false',invalid:'false'});await f.prepare();f.setMaterial('Plastique');const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,true);assert.equal(result.verified,true);assert.equal(f.calls.length,3);
+});
+
+test('optional material accepts an equivalent EUR currency suffix rendered after owned price preparation',async()=>{
+  const f=optionalMaterialFixture(),prepared=await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});assert.deepEqual(prepared.filled.map(row=>row.field),['title','priceCents']);
+  assert.equal(f.adapter.drafts.get('profile-1').fields.priceCents,'5,00');f.calls.length=0;f.values.priceCents='5,00\u00a0€';f.setMaterial('Plastique');
+  const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.verified,true);assert.equal(result.cleared,true);assert.equal(f.calls.length,3);assert.equal(f.values.priceCents,'5,00\u00a0€');assert.equal(f.adapter.drafts.get('profile-1').fields.priceCents,'5,00');
+});
+
+test('optional material price equivalence is limited to the same positive EUR cents',async()=>{
+  for(const rendered of ['5,00 €','5.00€','5,00\u202f€','5.00','5']){
+    const f=optionalMaterialFixture();await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});f.calls.length=0;f.values.priceCents=rendered;f.setMaterial('Plastique');const result=await f.adapter.clearOptionalMaterial('profile-1');assert.equal(result.cleared,true);assert.equal(f.calls.length,3);assert.equal(f.values.priceCents,rendered);
+  }
+  for(const rendered of ['50,00 €','5,01 €','5.001','5,00 USD','€ 5,00','5,00\n€','1e2','NaN','0,00','', '-5,00','5,00 € extra']){
+    const f=optionalMaterialFixture();await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});f.calls.length=0;f.values.priceCents=rendered;f.setMaterial('Plastique');await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='EXISTING_DRAFT'&&error.materialReason==='priceCents'&&!error.message.includes(rendered||'private-fixture'));assert.equal(f.calls.length,0);assert.equal(f.values.priceCents,rendered);
+  }
+});
+
+test('equivalent initial price formatting never relaxes other fields or changes during material clicks',async()=>{
+  const title=optionalMaterialFixture();await title.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});title.calls.length=0;title.values.priceCents='5,00 €';title.values.title='private-fixture manual edit';title.setMaterial('Plastique');await assert.rejects(title.adapter.clearOptionalMaterial('profile-1'),error=>error.code==='EXISTING_DRAFT'&&error.materialReason==='title'&&!error.message.includes('private-fixture'));assert.equal(title.calls.length,0);
+  for(const changed of ['5.00 €','6,00 €']){
+    let enabled=false;const f=optionalMaterialFixture({beforeAction(api){if(enabled){enabled=false;api.values.priceCents=changed;}}});await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});f.calls.length=0;f.values.priceCents='5,00\u00a0€';f.setMaterial('Plastique');enabled=true;
+    await assert.rejects(f.adapter.clearOptionalMaterial('profile-1'),{code:'OPTIONAL_MATERIAL_UNVERIFIED'});assert.equal(f.calls.length,1);assert.equal(f.values.priceCents,changed);
+  }
+});
+
+test('optional material observes a delayed photo suggestion before using the original clearing sequence',async()=>{
+  let enabled=false,reads=0;const f=optionalMaterialFixture({beforeSnapshot(api){if(enabled&&++reads===2)api.setMaterial('Plastique');}});await f.prepare();enabled=true;
+  const result=await f.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs:30});assert.equal(result.verified,true);assert.equal(result.cleared,true);assert.ok(reads>=3);assert.equal(f.calls.length,3);assert.equal(f.w.vintedDraftController,null);
+});
+
+test('an empty optional material has a five-second monotonic deadline and no remaining observers',async t=>{
+  const f=optionalMaterialFixture(),controller=new AbortController();await f.prepare();let monotonic=0,finished=false,wall=100000;
+  t.mock.method(performance,'now',()=>monotonic);t.mock.method(Date,'now',()=>wall);t.mock.timers.enable({apis:['setTimeout']});
+  try{
+    const pending=f.adapter.clearOptionalMaterial('profile-1',{signal:controller.signal,settleEmptyMs:5000}).then(result=>{finished=true;return result;});await new Promise(setImmediate);assert.equal(finished,false);
+    monotonic=4999;wall=-100000;t.mock.timers.tick(4999);await new Promise(setImmediate);assert.equal(finished,false);
+    monotonic=5000;wall=10000000;t.mock.timers.tick(1);const result=await pending;assert.equal(result.unchanged,true);assert.equal(result.cleared,false);assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);
+    assert.equal(getEventListeners(controller.signal,'abort').length,0);for(const event of ['did-start-navigation','render-process-gone','destroyed'])assert.equal(f.tab.view.webContents.listenerCount(event),0);
+  }finally{t.mock.timers.reset();}
+});
+
+test('empty-material waiting cancels promptly and consumes its timer without later reads or clicks',async t=>{
+  let reads=0,enabled=false;const f=optionalMaterialFixture({beforeSnapshot(){if(enabled)reads++;}}),controller=new AbortController();await f.prepare();enabled=true;t.mock.timers.enable({apis:['setTimeout']});
+  try{
+    const pending=f.adapter.clearOptionalMaterial('profile-1',{signal:controller.signal,settleEmptyMs:5000}),rejected=assert.rejects(pending,{code:'STOPPED'});await new Promise(setImmediate);assert.ok(reads>0);controller.abort();await rejected;const stoppedReads=reads;
+    t.mock.timers.tick(5000);await new Promise(setImmediate);assert.equal(reads,stoppedReads);assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);assert.equal(getEventListeners(controller.signal,'abort').length,0);assert.equal(f.tab.view.webContents.listenerCount('did-start-navigation'),0);
+  }finally{t.mock.timers.reset();}
+});
+
+test('waiting for a material suggestion rechecks owned fields, unique optional controls and page authority before clicking',async()=>{
+  const variants=[
+    {code:'EXISTING_DRAFT',change(api){api.values.title='private changed title';}},
+    {code:'EXISTING_DRAFT',change(api){api.values.priceCents='5,01 €';}},
+    {code:'EXISTING_DRAFT',change(api){api.fields.push({...api.fields[0],key:'unknown',label:'private unknown label',value:'private unknown value'});}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api,options){options.required='true';}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api,options){options.invalid='grammar';}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api,options){options.duplicateMaterial=true;}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api,options){options.absent=true;}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api){api.input.disabled=true;}},
+    {code:'OPTIONAL_MATERIAL_UNVERIFIED',change(api){api.input.readOnly=false;}},
+    {code:'PAGE_CHANGED',change(api){api.reload();}},
+    {code:'TAB_CHANGED',change(api){api.w.tabs.push({...api.tab,id:'other-tab'});api.w.activeTab='other-tab';}},
+    {code:'STOPPED',change(api){api.tab.view.webContents.emit('did-start-navigation',{},FORM,false,true);}}
+  ];
+  for(const variant of variants){let enabled=false,reads=0;const options={beforeSnapshot(api){if(enabled&&++reads===2)variant.change(api,options);}},f=optionalMaterialFixture(options);await f.adapter.prepareFields('profile-1',{title:'Owned test',priceCents:500});f.calls.length=0;enabled=true;
+    await assert.rejects(f.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs:15}),error=>error.code===variant.code&&!error.message.includes('private'));assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);assert.equal(f.tab.view.webContents.listenerCount('did-start-navigation'),0);
+  }
+});
+
+test('empty-material observation rechecks the originally owned parcel before returning or clearing',async()=>{
+  for(const suggested of [false,true]){let enabled=false,reads=0,parcel='Moyen',parcelReads=0;const f=optionalMaterialFixture({beforeSnapshot(api){if(enabled&&++reads===2){parcel='Grand';if(suggested)api.setMaterial('Plastique');}}});await f.prepare();const owned=f.adapter.drafts.get('profile-1');owned.fields.parcel='Moyen';f.adapter.parcelOptions=async()=>{parcelReads++;return {documentKey:owned.documentKey,options:[{name:parcel,checked:true}]};};enabled=true;
+    await assert.rejects(f.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs:15}),{code:'EXISTING_DRAFT'});assert.equal(parcelReads,2);assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);
+  }
+});
+
+test('missing optional material remains immediate and invalid observation durations never modify the page',async()=>{
+  const absent=optionalMaterialFixture({absent:true});await absent.prepare();assert.equal((await absent.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs:5000})).unchanged,true);assert.equal(absent.calls.length,0);
+  for(const settleEmptyMs of [-1,5001,Infinity,1.5,'5000']){const f=optionalMaterialFixture();await f.prepare();await assert.rejects(f.adapter.clearOptionalMaterial('profile-1',{settleEmptyMs}),{code:'OPTIONAL_MATERIAL_UNVERIFIED'});assert.equal(f.calls.length,0);assert.equal(f.w.vintedDraftController,null);}
+});
+
+test('optional material stops for document, tab, cancellation or manually changed owned fields',async()=>{
+  const changed=optionalMaterialFixture();await changed.prepare();changed.setMaterial('Plastique');changed.values.title='Manual edit';await assert.rejects(changed.adapter.clearOptionalMaterial('profile-1'),{code:'EXISTING_DRAFT'});assert.equal(changed.calls.length,0);
+  const reloaded=optionalMaterialFixture();await reloaded.prepare();reloaded.setMaterial('Plastique');reloaded.reload();await assert.rejects(reloaded.adapter.clearOptionalMaterial('profile-1'),{code:'PAGE_CHANGED'});assert.equal(reloaded.calls.length,0);
+  for(const mode of ['tab','navigate','edit','invalid','abort']){
+    const controller=new AbortController();let enabled=false;const f=optionalMaterialFixture({beforeAction:(api)=>{if(!enabled)return;enabled=false;if(mode==='tab')api.w.activeTab='another';if(mode==='navigate')api.tab.view.webContents.emit('did-start-navigation',{},FORM,false,true);if(mode==='edit')api.values.title='Concurrent edit';if(mode==='invalid')api.input['aria-invalid']='grammar';if(mode==='abort')controller.abort();}});
+    await f.prepare();f.setMaterial('Plastique');enabled=true;await assert.rejects(f.adapter.clearOptionalMaterial('profile-1',{signal:controller.signal}));assert.equal(f.calls.length,1);assert.equal(f.w.vintedDraftController,null);
+  }
+});
+
+test('photo upload preserves its verified receipt while reporting optional material cleanup separately',async()=>{
+  const f=fixture(),receipt={verified:true,uploadReceipt:'fixture-receipt',uploadedCount:1};let uploads=0,clears=0;
+  f.adapter.photos.upload=async()=>{uploads++;return receipt;};
+  f.adapter.clearOptionalMaterial=async(_id,options)=>{clears++;assert.equal(options.settleEmptyMs,5000);return {verified:true,cleared:true};};
+  assert.equal(await f.adapter.uploadPhotos('profile-1',{}),receipt);assert.equal(clears,0);
+  f.adapter.drafts.set('profile-1',{});
+  assert.equal(await f.adapter.uploadPhotos('profile-1',{}, {recheckOnly:true}),receipt);assert.equal(clears,0);
+  const cleaned=await f.adapter.uploadPhotos('profile-1',{});assert.equal(cleaned.verified,true);assert.equal(cleaned.uploadReceipt,receipt.uploadReceipt);assert.equal(cleaned.optionalMaterial.cleared,true);assert.equal(clears,1);
+  f.adapter.clearOptionalMaterial=async()=>{clears++;throw Object.assign(Error('可选材质无法安全清空，已停止后续操作'),{code:'OPTIONAL_MATERIAL_UNVERIFIED'});};
+  const failed=await f.adapter.uploadPhotos('profile-1',{});assert.equal(failed.verified,true);assert.equal(failed.uploadReceipt,receipt.uploadReceipt);assert.equal(failed.optionalMaterial.verified,false);assert.match(failed.message,/照片已上传；可选材质清空未核对/);assert.equal(uploads,4);
+  f.adapter.clearOptionalMaterial=async()=>{throw Object.assign(Error('private-fixture value must not reach the UI'),{code:'EXISTING_DRAFT',materialReason:'priceCents'});};const ownershipFailed=await f.adapter.uploadPhotos('profile-1',{});assert.equal(ownershipFailed.optionalMaterial.code,'EXISTING_DRAFT');assert.match(ownershipFailed.message,/商品价格.*不一致/);assert.equal(ownershipFailed.message.includes('private-fixture'),false);
+  f.adapter.clearOptionalMaterial=async()=>{throw Object.assign(Error('private-fixture unknown label'),{code:'EXISTING_DRAFT',materialReason:'private-fixture label'});};const unknownFailed=await f.adapter.uploadPhotos('profile-1',{});assert.match(unknownFailed.message,/商品字段或包裹规格/);assert.equal(unknownFailed.message.includes('private-fixture'),false);
+  f.adapter.photos.upload=async()=>({verified:false});await f.adapter.uploadPhotos('profile-1',{});assert.equal(clears,2);
+  f.adapter.photos.upload=async()=>receipt;f.adapter.clearOptionalMaterial=async()=>{throw Object.assign(Error('stopped'),{code:'STOPPED'});};await assert.rejects(f.adapter.uploadPhotos('profile-1',{}),{code:'STOPPED'});
+});
 
 test('readiness distinguishes reversible form preparation from all live business capabilities',async()=>{
   const {adapter}=fixture();const readiness=adapter.readiness();assert.equal(readiness.capabilities.inspect,true);assert.equal(readiness.capabilities.prepareCategory,true);
@@ -154,6 +416,76 @@ test('a category without a confirmed leaf radio is not guessed from a similarly 
 
 test('a mismatching category receipt halts before price input',async()=>{
   const f=fixture({selectedValue:'Sacs'});const result=await f.adapter.prepareFields('profile-1',{categoryPath:listing.categoryPath,priceCents:500});assert.equal(result.filled.length,0);assert.match(result.unresolved[0].reason,/不一致/);assert.equal(f.values.priceCents,'');
+});
+
+test('mobile category, brand, condition and color commit through each chooser own Fait before later fields',async()=>{
+  const f=fixture({mobileCategory:true,mobileBrand:true,mobileCondition:true,mobileColor:true,includeBrandColor:true});
+  const result=await f.adapter.prepareFields('profile-1',{...listing,brand:'Sans marque',color:'Noir'});
+  assert.deepEqual(result.filled.map(field=>field.field),['title','description','categoryPath','brand','condition','color','priceCents']);
+  assert.deepEqual(f.confirmedMenus,['categoryPath','brand','condition','color']);
+  assert.equal(f.values.categoryPath,'Autres accessoires');assert.equal(f.values.brand,'Sans marque');assert.equal(f.values.condition,listing.condition);assert.equal(f.values.color,'Noir');assert.equal(f.values.priceCents,'5,00');
+});
+
+test('condition and color Fait accept one nested independent title while duplicate titles halt',async()=>{
+  const f=fixture({mobileCondition:true,mobileColor:true,nestedChooserTitle:true,includeBrandColor:true});
+  const result=await f.adapter.prepareFields('profile-1',{condition:listing.condition,color:'Noir',priceCents:500});
+  assert.deepEqual(result.filled.map(field=>field.field),['condition','color','priceCents']);assert.deepEqual(f.confirmedMenus,['condition','color']);
+  for(const [key,options] of [['condition',{mobileCondition:true}],['color',{mobileColor:true,includeBrandColor:true}]]){
+    const duplicate=fixture({...options,nestedChooserTitle:true,duplicateChooserTitle:true});
+    const stopped=await duplicate.adapter.prepareFields('profile-1',{[key]:key==='color'?'Noir':listing.condition,priceCents:500});
+    assert.equal(stopped.filled.length,0);assert.deepEqual(duplicate.confirmedMenus,[]);assert.equal(duplicate.values.priceCents,'');
+  }
+});
+
+test('mobile color Fait confirms only the all-colors target while accepting its one known Suggestions mirror',async()=>{
+  const f=fixture({includeBrandColor:true,mobileColor:true,colorSuggestions:true,nestedChooserTitle:true,plainColorHeading:true});
+  const result=await f.adapter.prepareFields('profile-1',{color:'Noir',priceCents:500});
+  assert.deepEqual(result.filled.map(field=>field.field),['color','priceCents']);assert.deepEqual(f.confirmedMenus,['color']);assert.equal(f.values.color,'Noir');assert.equal(f.values.priceCents,'5,00');
+});
+
+test('mobile color Fait rejects another selected color and duplicate or unknown same-label controls',async()=>{
+  const scenarios=[
+    {otherColorChecked:true},
+    {rows:rows=>{const all=rows.find(row=>row.colorGroup==='all'&&row.label==='Noir');return all?[...rows,{...all}]:rows;}},
+    {rows:rows=>{const suggested=rows.find(row=>row.colorGroup==='suggestions');return suggested?[...rows,{...suggested}]:rows;}},
+    {rows:rows=>{const all=rows.find(row=>row.colorGroup==='all'&&row.label==='Noir');return all?[...rows,{...all,colorGroup:undefined}]:rows;}}
+  ];
+  for(const scenario of scenarios){
+    const f=fixture({includeBrandColor:true,mobileColor:true,colorSuggestions:true,...scenario});
+    const result=await f.adapter.prepareFields('profile-1',{color:'Noir',priceCents:500});
+    assert.deepEqual(result.filled,[]);assert.equal(result.unresolved.find(field=>field.field==='color').halted,true);assert.deepEqual(f.confirmedMenus,[]);assert.equal(f.values.color,'');assert.equal(f.values.priceCents,'');
+  }
+});
+
+test('Fait must close the observed chooser even if its selected option disappears before the remaining controls',async()=>{
+  for(const replaceMobileChooser of [false,true]){
+    const f=fixture({includeBrandColor:true,mobileColor:true,partialMobileDone:true,replaceMobileChooser,menuWaitMs:0});
+    const result=await f.adapter.prepareFields('profile-1',{color:'Noir',priceCents:500});
+    assert.deepEqual(result.filled,[]);assert.match(result.unresolved.find(field=>field.field==='color').reason,/仍未关闭/);assert.deepEqual(f.confirmedMenus,['color']);assert.equal(f.values.color,'Noir');assert.equal(f.values.priceCents,'');
+  }
+});
+
+test('mobile chooser confirmation rejects an unrelated, duplicate, submit or unchecked Fait target',async()=>{
+  for(const scenario of [{outsideMobileDone:true},{duplicateMobileDone:true},{mobileDoneType:'submit'},{uncheckedMobileChoice:true}]){
+    const f=fixture({mobileCategory:true,...scenario});
+    const result=await f.adapter.prepareFields('profile-1',{categoryPath:listing.categoryPath,priceCents:500});
+    assert.equal(result.filled.length,0);assert.equal(result.unresolved[0].halted,true);assert.deepEqual(f.confirmedMenus,[]);assert.equal(f.values.categoryPath,'');assert.equal(f.values.priceCents,'');
+  }
+});
+
+test('mobile Fait must close its picker and the committed original field must match exactly',async()=>{
+  const stuck=fixture({mobileCategory:true,stuckMobileDone:true,menuWaitMs:0});
+  const waiting=await stuck.adapter.prepareFields('profile-1',{categoryPath:listing.categoryPath,priceCents:500});
+  assert.match(waiting.unresolved[0].reason,/仍未关闭/);assert.deepEqual(stuck.confirmedMenus,['categoryPath']);assert.equal(stuck.values.priceCents,'');
+  const wrong=fixture({mobileCategory:true,selectedValue:'Sacs'});
+  const mismatch=await wrong.adapter.prepareFields('profile-1',{categoryPath:listing.categoryPath,priceCents:500});
+  assert.match(mismatch.unresolved[0].reason,/不一致/);assert.deepEqual(wrong.confirmedMenus,['categoryPath']);assert.equal(wrong.values.priceCents,'');
+});
+
+test('mobile chooser confirmation detects a document change during Fait and blocks later fields',async()=>{
+  const f=fixture({mobileCategory:true,beforeAction(api,args){if(api.currentIds.get(args.elementId)?.confirm)api.reload();}});
+  await assert.rejects(f.adapter.prepareFields('profile-1',{categoryPath:listing.categoryPath,priceCents:500}),{code:'PAGE_CHANGED'});
+  assert.equal(f.values.priceCents,'');
 });
 
 test('rendered price must still equal the requested cents after input confirmation',async()=>{

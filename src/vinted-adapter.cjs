@@ -1,7 +1,9 @@
 const defaultControl = require('./page-control.cjs');
+const {randomUUID}=require('node:crypto');
 const {problem} = require('./commerce-engine.cjs');
 const {VintedPhotoUpload} = require('./vinted-photo-upload.cjs');
 const {rememberCategoryTraversal}=require('./vinted-publication-evidence.cjs');
+const {clearOptionalMaterial}=require('./vinted-optional-material.cjs');
 
 const ORIGIN = 'https://www.vinted.fr';
 const FORM_URL = ORIGIN + '/items/new';
@@ -71,7 +73,7 @@ class VintedAdapter {
     if (tab && current !== tab) throw problem('TAB_CHANGED','当前标签已切换，商品准备已停止');
     frenchPage(current.view.webContents.getURL(),form);
     return {w,tab:current};
-    } catch(error) {controller?.abort();throw error;}
+    } catch(error) {controller?.abort(error);throw error;}
   }
   options(signal,guard) {
     return {signal,allowedOrigins:new Set([ORIGIN]),approve:async()=>{throw problem('UNEXPECTED_ACTION','此步骤需要额外确认，自动页面准备已停止');},onProgress:async()=>guard()};
@@ -99,7 +101,19 @@ class VintedAdapter {
     return {url:page.url,title:page.title,pageType:new URL(page.url).pathname==='/items/new'?'new_listing':'other',controls:page.elements.map(e=>({tag:e.tag,role:e.role,label:e.label,disabled:e.disabled,readOnly:e.readOnly,required:e.required,invalid:e.invalid})),fields,account:{verified:false,profileLinks},verified:false,capabilities:this.readiness().capabilities};
   }
   async inspectPhotoControls(profileId,options={}) {return this.photos.inspect(profileId,options);}
-  async uploadPhotos(profileId,manifest,options={}) {return this.photos.upload(profileId,manifest,options);}
+  async uploadPhotos(profileId,manifest,options={}) {
+    const receipt=await this.photos.upload(profileId,manifest,options);
+    if(receipt.verified!==true||options.recheckOnly===true||!this.drafts.has(profileId))return receipt;
+    try{return {...receipt,optionalMaterial:await this.clearOptionalMaterial(profileId,{...options,settleEmptyMs:5000})};}
+    catch(error){
+      if(options.signal?.aborted||error?.code==='STOPPED')throw error;
+      const materialFields={title:'标题',description:'描述',categoryPath:'分类',priceCents:'价格',condition:'成色',brand:'品牌',size:'尺码',color:'颜色',unknown:'未识别字段'},knownErrors={PAGE_CHANGED:'商品页已重新加载，未清空可选材质',PAGE_BUSY:'商品页正在被其他操作使用，未清空可选材质',EXISTING_DRAFT:'商品字段或包裹规格与本次准备记录不一致，未清空可选材质'};
+      const message=error?.code==='OPTIONAL_MATERIAL_UNVERIFIED'?error.message:error?.code==='EXISTING_DRAFT'&&Object.hasOwn(materialFields,error.materialReason)?'商品'+materialFields[error.materialReason]+'与本次准备记录不一致，未清空可选材质':knownErrors[error?.code]||'可选材质未能完成清空核对，请查看当前页面';
+      const reason=error?.code==='OPTIONAL_MATERIAL_UNVERIFIED'&&['picker_scope','picker_choices','picker_groups','picker_done','original_fields','material_input','material_input_disabled','material_input_changed','watched_disconnected','watched_value','original_choice_disconnected','original_choice_checked'].includes(error.materialReason)?error.materialReason:undefined;
+      return {...receipt,optionalMaterial:{verified:false,code:error?.code||'OPTIONAL_MATERIAL_UNVERIFIED',message,...(reason?{reason}:{})},message:'照片已上传；可选材质清空未核对：'+message};
+    }
+  }
+  async clearOptionalMaterial(profileId,options={}) {return clearOptionalMaterial(this,profileId,options);}
   field(page,spec,{readOnly=false}={}) {
     const matches=page.elements.filter(e=>matchesSpec(e,spec));
     if (matches.length!==1) return {error:matches.length?'页面出现多个同名控件，请人工核对':'未找到已核对的输入控件'};
@@ -265,6 +279,71 @@ class VintedAdapter {
     return {verified:true};
   }
 
+  async finishChoiceSelection(profileId,context,ownership,spec,label) {
+    const searchLabel=spec.key==='categoryPath'?CATEGORY_SEARCH:spec.key==='brand'?BRAND_SEARCH:null;
+    const choiceMatches=e=>spec.key==='condition'?(normalized(e.label)===label||normalized(e.label).startsWith(label+' ')):normalized(e.label)===label;
+    // Mobile category/brand choosers and condition/color dialogs commit through
+    // their own Fait. Desktop pickers without that button keep the existing path.
+    const page=await this.read(profileId,context),searches=page.elements.filter(e=>e.tag==='input'&&!e.disabled&&!e.sensitive&&(normalized(e.label)===searchLabel||normalized(e.placeholder)===searchLabel));
+    const colorSelection=spec.key==='color'?await this.colorOptions(profileId,context,page,label):null;
+    if(colorSelection?.error)return {reason:colorSelection.error,halted:true};
+    const radios=colorSelection?colorSelection.matches:page.elements.filter(e=>!e.disabled&&!e.sensitive&&(e.role==='radio'||e.tag==='input'&&e.type==='radio')&&choiceMatches(e));
+    const buttons=page.elements.filter(e=>!e.sensitive&&(e.role==='button'||e.tag==='button'&&!e.role)&&normalized(e.label)==='Fait');
+    if(!buttons.length)return {verified:true,unchanged:true};
+    const fields=page.elements.filter(e=>ALL_SPECS.some(spec=>matchesSpec(e,spec))).map(e=>e.id);
+    const confirmationToken=randomUUID();
+    const state=await this.control.isolated(context.tab,`(() => {
+      const d=globalThis.__isolaDOM,get=id=>globalThis.__isolaElements?.get(id),normalize=value=>String(value||'').replace(/\\s+/g,' ').trim();
+      const allowed=e=>!!e?.isConnected&&d.visible(e)&&!d.closest(e,'header,nav,[role=navigation],[role=tablist]');
+      const searches=${JSON.stringify(searches.map(e=>e.id))}.map(get).filter(allowed),radios=${JSON.stringify(radios.map(e=>e.id))}.map(get).filter(allowed),mirrors=${JSON.stringify((colorSelection?.mirrors||[]).map(e=>e.id))}.map(get).filter(allowed),buttons=${JSON.stringify(buttons.map(e=>e.id))}.map(id=>({id,node:get(id)})).filter(item=>allowed(item.node));
+      const result={documentKey:String(performance.timeOrigin),open:${!!searchLabel}?searches.length>0:radios.length>0};if(!result.open)return result;
+      if(${!!searchLabel}&&searches.length!==1||radios.length!==1)return {...result,error:${JSON.stringify(spec.label)}+'选择器或叶子选项无法唯一核对，未点击确认'};
+      const radio=radios[0],search=${!!searchLabel}?searches[0]:radio,checked=e=>e.checked===true||e.getAttribute?.('aria-checked')==='true';
+      if(!checked(radio))return {...result,error:${JSON.stringify(spec.label)}+'叶子尚未选中，未点击确认'};
+      const fields=${JSON.stringify(fields)}.map(get).filter(e=>e?.isConnected);
+      const title=p=>{
+        if(normalize(p.getAttribute?.('aria-label'))===${JSON.stringify(spec.label)})return true;
+        // A modal header can wrap its title and a separate close button. Read
+        // the independent text title inside it, never the aggregate wrapper.
+        const matches=[...p.querySelectorAll('h1,h2,h3,h4,h5,h6,[role=heading],span,p,div')].filter(node=>d.visible(node)&&!node.querySelectorAll('input,textarea,button,[role=button],[role=radio],[role=checkbox]').length&&normalize(d.safeText(node,180))===${JSON.stringify(spec.label)});
+        return matches.filter(node=>!matches.some(other=>node!==other&&node.contains(other))).length===1;
+      };
+      const scopes=d.parents(search).filter(p=>!['BODY','HTML','MAIN','FORM'].includes(p.tagName)&&p.contains(radio)&&fields.every(field=>!p.contains(field))&&(${!!searchLabel}||title(p)));
+      const scope=scopes.find(p=>buttons.some(item=>p.contains(item.node)));
+      if(!scope)return {...result,error:'未找到'+${JSON.stringify(spec.label)}+'选择器自身的 Fait 确认按钮'};
+      const matches=buttons.filter(item=>scope.contains(item.node));
+      const selected=[...scope.querySelectorAll(${JSON.stringify(spec.key==='color'?'input[type=checkbox],[role=checkbox]':'input[type=radio],[role=radio]')})].filter(e=>allowed(e)&&checked(e));
+      // The known Suggestions group may mirror the same color. It cannot
+      // supply the target or excuse another color or an unknown duplicate.
+      if(matches.length!==1||!selected.includes(radio)||selected.some(e=>e!==radio&&!mirrors.includes(e))||mirrors.some(e=>!scope.contains(e)))return {...result,error:${JSON.stringify(spec.label)}+'确认按钮或已选叶子不唯一，未继续'};
+      const button=matches[0].node;
+      if(button.tagName!=='BUTTON'||d.disabled(button)||button.getAttribute?.('href')||button.form&&button.type==='submit'||normalize(d.label(button))!=='Fait')return {...result,error:${JSON.stringify(spec.label)}+'确认控件用途无法核对，未继续'};
+      const outsideDone=new Set([...document.querySelectorAll('button,[role=button]')].filter(e=>allowed(e)&&normalize(d.label(e))==='Fait'&&!scope.contains(e)));
+      globalThis.__isolaChoiceConfirmation={token:${JSON.stringify(confirmationToken)},scope,outsideDone};
+      return {...result,buttonId:matches[0].id};
+    })()`);
+    this.current(profileId,context);
+    if(!state||state.documentKey!==ownership.documentKey)throw problem('PAGE_CHANGED','商品页已重新加载，准备已停止');
+    if(state.error)return {reason:state.error,halted:true};
+    if(!state.open)return {verified:true,unchanged:true};
+    if(!state.buttonId)return {reason:spec.label+'选择器尚未确认，已停止',halted:true};
+    const receipt=await this.control.performAction(context.tab,{action:'click',elementId:state.buttonId},this.options(context.signal,()=>this.current(profileId,context)));
+    this.current(profileId,context);frenchPage(receipt.url,true);
+    const readOpen=()=>this.control.isolated(context.tab,`(() => {
+      const guard=globalThis.__isolaChoiceConfirmation,d=globalThis.__isolaDOM,result={documentKey:String(performance.timeOrigin)};
+      if(!guard||guard.token!==${JSON.stringify(confirmationToken)})return {...result,error:true};
+      const scope=guard.scope,remaining=!!scope?.isConnected&&d.visible(scope)&&([...scope.querySelectorAll('input,textarea,select,button,[role=button],[role=radio],[role=checkbox]')].some(e=>e.isConnected&&d.visible(e))||!!d.safeText(scope,180).trim());
+      // Unmounting the old node is insufficient if a replacement picker still
+      // offers Fait. Preserve only the unrelated buttons observed beforehand.
+      const replaced=[...document.querySelectorAll('button,[role=button]')].some(e=>e.isConnected&&d.visible(e)&&String(d.label(e)).replace(/\\s+/g,' ').trim()==='Fait'&&!scope.contains(e)&&!guard.outsideDone.has(e));
+      const open=remaining||replaced;
+      return {...result,open};
+    })()`);
+    const closed=await this.waitForMenu(profileId,context,readOpen,value=>value.documentKey!==ownership.documentKey||value.error||value.open===false);
+    if(closed.documentKey!==ownership.documentKey)throw problem('PAGE_CHANGED','商品页已重新加载，准备已停止');
+    return closed.error||closed.open!==false?{reason:'点击'+spec.label+' Fait 后选择器仍未关闭，已停止',halted:true}:{verified:true};
+  }
+
   async nonNavigationCandidates(profileId,context,candidates) {
     const allowed=await this.control.isolated(context.tab,`(() => {const ids=${JSON.stringify(candidates.map(e=>e.id))},d=globalThis.__isolaDOM;return ids.filter(id=>{const e=globalThis.__isolaElements?.get(id);return !!e?.isConnected&&!d.closest(e,'header,nav,[role=navigation],[role=tablist]');});})()`);
     this.current(profileId,context);
@@ -278,16 +357,20 @@ class VintedAdapter {
       const entries=ids.map(id=>({id,node:globalThis.__isolaElements?.get(id)}));if(entries.some(item=>!item.node?.isConnected))return {stale:true};
       const title=(node,label)=>normalize(d.label(node))===label||Array.from(node.children||[]).some(child=>d.visible(child)&&!child.querySelectorAll('input[type=checkbox],[role=checkbox]').length&&normalize(d.safeText(child,180))===label);
       const nearest=(node,label)=>{for(const parent of d.parents(node)){if(['BODY','HTML','MAIN','FORM'].includes(parent.tagName))break;if(!['INPUT','LABEL'].includes(parent.tagName)&&title(parent,label))return parent;}return null;};
-      const groups=[...new Set(entries.map(item=>nearest(item.node,'Toutes les couleurs')).filter(Boolean))],suggestions=entries.some(item=>nearest(item.node,'Suggestions'));
+      const groups=[...new Set(entries.map(item=>nearest(item.node,'Toutes les couleurs')).filter(Boolean))],suggestionGroups=[...new Set(entries.map(item=>nearest(item.node,'Suggestions')).filter(Boolean))],suggestions=suggestionGroups.length>0;
       if(groups.length>1)return {error:'页面出现多个 Toutes les couleurs 区域，未猜测颜色范围'};
       if(!groups.length&&suggestions)return {error:'页面只有颜色建议，未找到唯一 Toutes les couleurs 区域'};
-      return {ids:groups.length?entries.filter(item=>groups[0].contains(item.node)).map(item=>item.id):ids};
+      if(suggestionGroups.length>1)return {error:'页面出现多个 Suggestions 区域，未猜测颜色范围'};
+      const canonical=groups.length?entries.filter(item=>groups[0].contains(item.node)):entries;
+      const matches=entries.filter(item=>normalize(d.label(item.node))===${JSON.stringify(label)}),mirrors=groups.length&&suggestionGroups.length?matches.filter(item=>suggestionGroups[0].contains(item.node)&&!groups[0].contains(item.node)):[];
+      if(mirrors.length>1||matches.some(item=>!canonical.includes(item)&&!mirrors.includes(item)))return {error:'颜色同名选项位于未知或重复分组，未猜测确认目标'};
+      return {ids:canonical.map(item=>item.id),mirrorIds:mirrors.map(item=>item.id)};
     })()`);
     this.current(profileId,context);
     if(!scoped||scoped.stale)throw problem('ELEMENT_STALE','颜色分组选项已改变');
     if(scoped.error)return {options,matches:[],error:scoped.error};
     if(!Array.isArray(scoped.ids))throw problem('ELEMENT_STALE','颜色选项范围无效');
-    return {options,matches:options.filter(e=>scoped.ids.includes(e.id)&&!e.disabled&&normalized(e.label)===label)};
+    return {options,matches:options.filter(e=>scoped.ids.includes(e.id)&&!e.disabled&&normalized(e.label)===label),mirrors:options.filter(e=>(scoped.mirrorIds||[]).includes(e.id))};
   }
   async readChoiceValue(profileId,context,ownership,spec) {
     const page=await this.read(profileId,context),match=this.field(page,spec,{readOnly:true});
@@ -345,13 +428,14 @@ class VintedAdapter {
     const checked=e=>e.checked===true||e.checked==='true';
     if(spec.key==='color'&&optionsOnPage.some(e=>normalized(e.label)!==label&&checked(e)))return {reason:'页面还选中了其他颜色，未自动取消或叠加颜色',halted:true};
     if(spec.key==='brand'||!checked(matches[0])){await this.control.performAction(context.tab,{action:'click',elementId:matches[0].id},options);guard();}
-    const selected=await this.readChoiceValue(profileId,context,ownership,spec);
-    if(selected.error||selected.value!==label)return {reason:selected.error||'选择后的'+spec.label+'与指定标签不一致',halted:true};
     if(spec.key==='color'){
-      const confirmed=await this.colorOptions(profileId,context,selected.page,label);
+      const confirmed=await this.colorOptions(profileId,context,await this.read(profileId,context),label);
       if(confirmed.error||confirmed.matches.length!==1||!checked(confirmed.matches[0]))return {reason:confirmed.error||'颜色复选框没有确认选中，未继续操作',halted:true};
       if(confirmed.options.some(e=>normalized(e.label)!==label&&checked(e)))return {reason:'选择后页面还选中了其他颜色，未继续操作',halted:true};
     }
+    const finished=await this.finishChoiceSelection(profileId,context,ownership,spec,label);if(finished.halted)return finished;
+    const selected=await this.readChoiceValue(profileId,context,ownership,spec);
+    if(selected.error||selected.value!==label)return {reason:selected.error||'选择后的'+spec.label+'与指定标签不一致',halted:true};
     ownership.fields[spec.key]=selected.value;
     const closed=await this.closeChoiceMenu(profileId,context,spec,label);if(closed.halted)return closed;
     const final=await this.readChoiceValue(profileId,context,ownership,spec);
@@ -455,6 +539,7 @@ class VintedAdapter {
       await this.control.performAction(context.tab,{action:'click',elementId:matches[0].id},options);guard();
       if(spec.key==='categoryPath')steps.push({label,elementId:matches[0].id,role:final?'radio':'button',documentKey:ownership.documentKey,unique:true});
     }
+    const finished=await this.finishChoiceSelection(profileId,context,ownership,spec,labels.at(-1));if(finished.halted)return finished;
     page=await this.read(profileId,context);match=this.field(page,spec,{readOnly:true});
     if(match.error)return {reason:match.error,halted:true};
     const next=await this.values(context.tab,page);guard();const selected=next.values.find(e=>e.id===match.element.id)?.value;

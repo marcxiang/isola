@@ -37,90 +37,106 @@ module.exports = async function commerceSmoke(api, check) {
   });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
   const baseURL = `http://127.0.0.1:${server.address().port}/api/v1`;
-  let window, wrongWindow, profile, engine, originalDB, originalConnection, plan;
+  let view, wrongWindow, profile, engine, originalDB, originalConnection, plan, originalThrottle, fixtureSession;
+  const browserRequests=[];
   const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
   const waitFor = async (predicate,message) => {
     const deadline = Date.now()+8000;
     while(Date.now()<deadline) { if(await predicate()) return; await sleep(30); }
     throw Error('Timed out: '+message);
   };
-  const frames = async () => window.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-  const invoke = (method,...args) => window.webContents.executeJavaScript(`window.commerce[${JSON.stringify(method)}](...${JSON.stringify(args)})`);
+  const frames = async () => {api.getManager().show();api.getManager().focus();view.webContents.focus();let timer;try{await Promise.race([view.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'),new Promise(resolve=>{timer=setTimeout(resolve,500);})]);}finally{clearTimeout(timer);}};
+  const invoke = (method,...args) => view.webContents.executeJavaScript(`window.commerce[${JSON.stringify(method)}](...${JSON.stringify(args)})`);
   try {
     engine = api.getCommerce();
     assert.equal(engine.running,false,'Commerce smoke requires an idle engine');
     assert.equal(engine.db.plans.length,0,'Commerce smoke requires an empty test commerce store');
     assert.equal(engine.db.jobs.length,0,'Commerce smoke requires an empty test commerce queue');
     originalDB = JSON.parse(JSON.stringify(engine.db)); originalConnection = {...engine.connection};
-    profile = api.saveProfile({name:'QA 运营法国环境',url:'https://www.vinted.fr',fingerprintMode:'native',width:1200,height:760});
+    profile = api.saveProfile({name:'QA 运营法国环境',windowType:'automation',url:'https://www.vinted.fr',fingerprintMode:'native',width:1200,height:760});
 
-    await check('commerce window loads isolated renderer and truthful readiness without console errors',async()=>{
-      const loading = api.openCommerce();window=api.getCommerceWindow();
-      window.webContents.on('console-message',(event,level,message)=>{
+    await check('commerce view loads isolated renderer and truthful readiness without console errors',async()=>{
+      const loading = api.openCommerce();view=api.getCommerceView();
+      // A hidden Windows WebContentsView can defer dialog close/rAF indefinitely.
+      // Only this isolated fixture disables timer throttling; restore it in finally.
+      originalThrottle=view.webContents.getBackgroundThrottling();view.webContents.setBackgroundThrottling(false);
+      view.webContents.on('console-message',(event,level,message)=>{
         const details=event.details || event;
         const severity=typeof level==='number'?level:(typeof level==='object'?level.level:details.level);
         const text=typeof message==='string'?message:(typeof level==='object'?level.message:details.message);
         if(severity===3||severity==='error')consoleErrors.push(String(text || 'Renderer console error'));
       });
-      window.webContents.on('render-process-gone',(_,details)=>consoleErrors.push('Renderer exited: '+details.reason));
+      view.webContents.on('render-process-gone',(_,details)=>consoleErrors.push('Renderer exited: '+details.reason));
       await loading;await frames();
-      const rendered=await window.webContents.executeJavaScript(`({title:document.title,node:typeof require,bridge:typeof window.commerce.state,ready:document.querySelector('#readiness-title').textContent,hidden:document.querySelector('#load-error').hidden})`);
-      assert.equal(rendered.node,'undefined');assert.equal(rendered.bridge,'function');assert.match(rendered.title,/运营工作台/);assert.match(rendered.ready,/联调准备/);assert.equal(rendered.hidden,true);
-      const state=await invoke('state');assert.equal(state.readiness.vinted,'unverified');assert.equal(state.settings.backgroundEnabled,false);assert.equal(state.running,false);assert.deepEqual(consoleErrors,[]);
-      return {isolatedRenderer:true,readiness:state.readiness.vinted};
+      const rendered=await view.webContents.executeJavaScript(`({title:document.title,node:typeof require,bridge:typeof window.commerce.state,ready:document.querySelector('#readiness-title').textContent,capabilities:document.querySelector('#readiness-capabilities').textContent,manualPublish:typeof window.commerce.submitPublication,association:typeof window.commerce.associatePublishedListing,hidden:document.querySelector('#load-error').hidden})`);
+      const state=await invoke('state'),salesOnly=state.readiness.salesOnly===true,listingReady=state.readiness.capabilities?.listingPublish===true||state.readiness.capabilities?.listingPublish===undefined&&state.readiness.capabilities?.publish===true;
+      assert.equal(rendered.node,'undefined');assert.equal(rendered.bridge,'function');assert.match(rendered.title,/运营工作台/);assert.equal(rendered.ready,listingReady?'后台部分流程可用':'手动上架可用 · 后台业务待验证');assert.equal(rendered.hidden,true);
+      assert.equal(rendered.manualPublish,'function');assert.equal(rendered.association,'function');
+      for(const label of ['资料','照片','手动发布','原刊登','自动刊登','消息','报价',...(salesOnly?['成交确认','卖出后补上']:['运单','采购'])])assert.ok(rendered.capabilities.includes(label),'Missing readiness capability: '+label);
+      const capabilityRows=await view.webContents.executeJavaScript(`Array.from(document.querySelectorAll('#readiness-capabilities li'),item=>item.textContent)`);
+      assert.equal(capabilityRows.length,salesOnly?8:7);assert.match(capabilityRows[1],/手动发布.*核对后可用/);assert.match(capabilityRows[2],/原刊登关联.*核对后可用/);assert.match(capabilityRows[3],listingReady?/可用/:/待验证/);for(const row of capabilityRows.slice(4))assert.match(row,/待验证/);
+      assert.equal(state.settings.backgroundEnabled,false);assert.equal(state.running,false);assert.deepEqual(consoleErrors,[]);
+      for(const capability of ['messages','offers','shippingLabel','procurement'])assert.equal(state.readiness.capabilities[capability],false,'Readiness copy must not enable '+capability);
+      if(salesOnly){assert.equal(state.readiness.capabilities.saleConfirmation,false);assert.doesNotMatch(rendered.capabilities,/采购|运单/);}
+      assert.equal(requests.length,0);assert.equal(engine.db.publications.submissions.length,0);
+      return {isolatedRenderer:true,readiness:state.readiness.vinted,manualControlsAvailable:true,automaticListingAvailable:listingReady,salesOnly,externalRequests:0};
     });
 
     await check('commerce settings form encrypts local API token and never returns it through UI state',async()=>{
-      await window.webContents.executeJavaScript(`(()=>{document.querySelector('[data-page="settings"]').click();const form=document.querySelector('#settings-form');form.elements.baseURL.value=${JSON.stringify(baseURL)};form.elements.token.value=${JSON.stringify(token)};form.elements.maxConcurrent.value='2';form.elements.perOrderLimit.value='0.00';form.elements.dailyLimit.value='0.00';form.elements.backgroundEnabled.checked=false;form.elements.fulfillmentMethod.value='wms';form.dispatchEvent(new Event('input',{bubbles:true}));form.requestSubmit();return true;})()`);
+      await view.webContents.executeJavaScript(`(()=>{document.querySelector('[data-page="settings"]').click();const form=document.querySelector('#settings-form');form.elements.baseURL.value=${JSON.stringify(baseURL)};form.elements.token.value=${JSON.stringify(token)};form.elements.maxConcurrent.value='2';form.elements.perOrderLimit.value='0.00';form.elements.dailyLimit.value='0.00';form.elements.backgroundEnabled.checked=false;form.elements.fulfillmentMethod.value='wms';form.dispatchEvent(new Event('input',{bubbles:true}));form.requestSubmit();return true;})()`);
       await waitFor(()=>engine.state().settings.hasToken,'encrypted API settings to save');
-      await waitFor(()=>window.webContents.executeJavaScript(`document.querySelector('#settings-form').elements.token.value===''`),'token form to clear after save');await frames();
+      await waitFor(()=>view.webContents.executeJavaScript(`document.querySelector('#settings-form').elements.token.value===''`),'token form to clear after save');await frames();
       const publicState=await invoke('state'), disk=fs.readFileSync(engine.file,'utf8');
       assert.equal(publicState.settings.hasToken,true);assert.equal(publicState.settings.baseURL,baseURL);assert.equal(publicState.settings.perOrderLimitCents,0);assert.equal(publicState.settings.dailyLimitCents,0);
       assert.equal(JSON.stringify(publicState).includes(token),false);assert.equal(disk.includes(token),false);assert.ok(JSON.parse(disk).encryptedToken);
-      const text=await window.webContents.executeJavaScript('document.body.innerText');assert.equal(text.includes(token),false);assert.match(text,/普通账号/);
+      const text=await view.webContents.executeJavaScript('document.body.innerText');assert.equal(text.includes(token),false);assert.match(text,/普通账号/);
       return {encryptedOnDisk:true,tokenRedacted:true,purchaseLimits:0};
     });
 
     await check('commerce connects and syncs catalog through actual localhost SKU Desk transport',async()=>{
-      await window.webContents.executeJavaScript(`document.querySelector('#connect').click()`);
+      await view.webContents.executeJavaScript(`document.querySelector('#connect').click()`);
       await waitFor(()=>engine.connection.status==='connected','SKU account connection');
       // Connection state is emitted before the renderer's request finally
       // releases its controls. Wait for the actual sync action to be usable.
-      await waitFor(()=>window.webContents.executeJavaScript(`!document.querySelector('#sync').disabled`),'sync control after connection');
-      await window.webContents.executeJavaScript(`document.querySelector('[data-page="inventory"]').click();document.querySelector('#sync').click()`);
+      await waitFor(()=>view.webContents.executeJavaScript(`!document.querySelector('#sync').disabled`),'sync control after connection');
+      await view.webContents.executeJavaScript(`document.querySelector('[data-page="inventory"]').click();document.querySelector('#sync').click()`);
       await waitFor(()=>engine.db.products.length===2&&engine.db.photoSets.length===3,'catalog and photo sets sync');await frames();
       const state=await invoke('state');assert.equal(state.connection.account,'QA SKU Desk');assert.equal(state.products[0].priceCents,790);assert.equal(state.products[0].stock,12);assert.equal(state.photoSets[1].claimedByMe,true);
-      const table=await window.webContents.executeJavaScript(`({products:document.querySelectorAll('#products tr').length,sets:document.querySelectorAll('.photo-set').length,photos:document.querySelector('#photo-sets').innerText})`);
-      assert.equal(table.products,2);assert.equal(table.sets,3);assert.match(table.photos,/可领取/);assert.match(table.photos,/已被你领取/);assert.match(table.photos,/已被他人使用/);
+      const table=await view.webContents.executeJavaScript(`({products:document.querySelectorAll('#products [data-product-id]').length,sets:document.querySelectorAll('.photo-set').length})`);assert.equal(table.products,2);assert.equal(table.sets,0,'The inventory landing must not mix photo sets from different products');
+      await view.webContents.executeJavaScript(`document.querySelector('[data-product-detail-id="commerce-product-1"]').click()`);await waitFor(()=>view.webContents.executeJavaScript('document.querySelector("#product-detail-dialog").open'),'first product detail opens before expanding library');await view.webContents.executeJavaScript(`document.querySelector('#product-photo-library>summary').click()`);const first=await view.webContents.executeJavaScript(`({open:document.querySelector('#product-detail-dialog').open,sets:Array.from(document.querySelectorAll('#photo-sets [data-photo-set-id]'),row=>row.dataset.photoSetId),text:document.querySelector('#photo-sets').innerText})`);assert.equal(first.open,true);assert.deepEqual(first.sets,['commerce-set-1','commerce-set-2']);assert.match(first.text,/可领取/);assert.match(first.text,/已被你领取/);assert.doesNotMatch(first.text,/QA 法国围巾|QA 其他人领取的图片/);await view.webContents.executeJavaScript(`document.querySelector('#product-detail-dialog').close()`);await waitFor(()=>view.webContents.executeJavaScript('!document.querySelector("#product-detail-dialog").open&&document.querySelectorAll(".photo-set").length===0'),'first product detail to clear after close');
+      await view.webContents.executeJavaScript(`document.querySelector('[data-product-detail-id="commerce-product-2"]').click()`);await waitFor(()=>view.webContents.executeJavaScript('document.querySelector("#product-detail-dialog").open'),'second product detail opens before expanding library');await view.webContents.executeJavaScript(`document.querySelector('#product-photo-library>summary').click()`);const second=await view.webContents.executeJavaScript(`({open:document.querySelector('#product-detail-dialog').open,sets:Array.from(document.querySelectorAll('#photo-sets [data-photo-set-id]'),row=>row.dataset.photoSetId),text:document.querySelector('#photo-sets').innerText})`);assert.equal(second.open,true);assert.deepEqual(second.sets,['commerce-set-3']);assert.match(second.text,/已使用/);assert.doesNotMatch(second.text,/QA 法国衬衫|QA 未领取图片|QA 自己领取的图片/);await view.webContents.executeJavaScript(`document.querySelector('#product-detail-dialog').close()`);await waitFor(()=>view.webContents.executeJavaScript('!document.querySelector("#product-detail-dialog").open&&document.querySelectorAll(".photo-set").length===0'),'second product detail to clear after close');
       for(const route of ['/api/v1/me','/api/v1/products','/api/v1/photos/sets'])assert.ok(requests.some(request=>request.path===route&&request.method==='GET'));
       for(const request of requests.filter(request=>request.path!=='/api/v1/me')){assert.equal(request.query.page,'1');assert.equal(request.query.pageSize,'100');}
-      return {products:table.products,photoSets:table.sets,readOnlyRequests:requests.length};
+      return {products:table.products,photoSets:first.sets.length+second.sets.length,productPhotoSetsIsolated:true,readOnlyRequests:requests.length};
     });
 
     await check('commerce plan form rejects fractional cents and requires explicit sale prices',async()=>{
-      const blank=await window.webContents.executeJavaScript(`(()=>{document.querySelector('[data-page="plans"]').click();document.querySelector('#new-plan').click();const form=document.querySelector('#plan-form');form.elements.profileId.value=${JSON.stringify(profile.id)};form.elements.productId.value='commerce-product-1';form.elements.productId.dispatchEvent(new Event('change',{bubbles:true}));return {price:form.elements.listingPrice.value,min:form.elements.minOffer.value,enabled:form.elements.enabled.checked,help:document.querySelector('#plan-product-info').textContent};})()`);
-      assert.equal(blank.price,'');assert.equal(blank.min,'');assert.equal(blank.enabled,false);assert.match(blank.help,/采购价/);
-      await window.webContents.executeJavaScript(`(()=>{const form=document.querySelector('#plan-form');form.elements.targetCount.value='3';form.elements.listingPrice.value='24.905';form.elements.minOffer.value='19.50';form.requestSubmit();return true;})()`);
-      await waitFor(()=>window.webContents.executeJavaScript(`!document.querySelector('#plan-error').hidden`),'fractional-cent validation');
-      assert.equal(engine.db.plans.length,0);assert.match(await window.webContents.executeJavaScript(`document.querySelector('#plan-error').textContent`),/两位小数/);
+      await view.webContents.executeJavaScript(`document.querySelector('[data-page="plans"]').click();document.querySelector('[data-open-environment="${profile.id}"]').click()`);
+      await waitFor(()=>view.webContents.executeJavaScript(`!document.querySelector('#automation-environment-detail').hidden&&document.querySelector('#environment-title').textContent===${JSON.stringify(profile.name)}&&!document.querySelector('#new-plan').disabled`),'selected automation environment to allow a new plan');
+      const blank=await view.webContents.executeJavaScript(`(()=>{document.querySelector('#new-plan').click();const form=document.querySelector('#plan-form');form.elements.productId.value='commerce-product-1';form.elements.productId.dispatchEvent(new Event('change',{bubbles:true}));return {open:document.querySelector('#plan-dialog').open,profile:form.elements.profileId.value,locked:form.elements.profileId.disabled,price:form.elements.listingPrice.value,min:form.elements.minOffer.value,enabled:form.elements.enabled.checked,help:document.querySelector('#plan-product-info').textContent};})()`);
+      assert.equal(blank.open,true);
+      assert.equal(blank.profile,profile.id);assert.equal(blank.locked,true);assert.equal(blank.price,'');assert.equal(blank.min,'');assert.equal(blank.enabled,false);assert.match(blank.help,engine.state().readiness.salesOnly?/货盘价格/:/采购价/);
+      await view.webContents.executeJavaScript(`(()=>{const form=document.querySelector('#plan-form');form.elements.targetCount.value='3';form.elements.listingPrice.value='24.905';form.elements.minOffer.value='19.50';form.requestSubmit();return true;})()`);
+      await waitFor(()=>view.webContents.executeJavaScript(`!document.querySelector('#plan-error').hidden`),'fractional-cent validation');
+      assert.equal(engine.db.plans.length,0);assert.match(await view.webContents.executeJavaScript(`document.querySelector('#plan-error').textContent`),/两位小数/);
     });
 
     await check('commerce saves cumulative sales plan with EUR cents and renders isolated environment rules',async()=>{
-      await window.webContents.executeJavaScript(`(()=>{const form=document.querySelector('#plan-form');form.elements.listingPrice.value='24,90';form.elements.minOffer.value='19.50';form.elements.autoReply.checked=true;form.elements.autoAcceptOffers.checked=true;form.elements.reuseOwnPhotos.checked=true;form.elements.replyPolicy.value='仅根据已确认商品信息回答';form.elements.listingTitle.value='Chemise QA';form.elements.listingDescription.value='Description précise du test';form.elements.listingCategoryPath.value='Femmes / Vêtements';form.elements.listingCondition.value='Très bon état';form.requestSubmit();return true;})()`);
-      await waitFor(()=>engine.db.plans.length===1,'sales plan save');await waitFor(()=>window.webContents.executeJavaScript(`!document.querySelector('#plan-dialog').open`),'plan editor close');await frames();
+      await view.webContents.executeJavaScript(`(()=>{const form=document.querySelector('#plan-form');form.elements.listingPrice.value='24,90';form.elements.minOffer.value='19.50';form.elements.autoReply.checked=true;form.elements.autoAcceptOffers.checked=true;form.elements.reuseOwnPhotos.checked=true;form.elements.replyPolicy.value='仅根据已确认商品信息回答';form.elements.listingTitle.value='Chemise QA';form.elements.listingDescription.value='Description précise du test';form.elements.listingCategoryPath.value='Femmes / Vêtements';form.elements.listingCondition.value='Très bon état';form.requestSubmit();return true;})()`);
+      await waitFor(()=>engine.db.plans.length===1,'sales plan save');await waitFor(()=>view.webContents.executeJavaScript(`!document.querySelector('#plan-dialog').open`),'plan editor close');await frames();
       plan=engine.db.plans[0];assert.equal(plan.profileId,profile.id);assert.equal(plan.productId,'commerce-product-1');assert.equal(plan.targetCount,3);assert.equal(plan.listingPriceCents,2490);assert.equal(plan.minOfferCents,1950);assert.equal(plan.currency,'EUR');assert.equal(plan.enabled,false);assert.equal(plan.reuseOwnPhotos,true);assert.equal(plan.activeListingId,null);assert.equal(plan.listing.title,'Chemise QA');assert.deepEqual(plan.listing.categoryPath,['Femmes','Vêtements']);assert.equal(plan.listing.condition,'Très bon état');
-      const text=await window.webContents.executeJavaScript(`document.querySelector('#plans').innerText`);assert.match(text,/QA 法国衬衫/);assert.match(text,/QA 运营法国环境/);assert.match(text,/累计成交/);assert.match(text,/一个在售商品/);
+      const text=await view.webContents.executeJavaScript(`document.querySelector('#plans').innerText`);assert.match(text,/QA 法国衬衫/);assert.match(text,/QA 运营法国环境/);assert.match(text,/累计成交/);assert.match(text,/一个在售商品/);
       return {targetSales:plan.targetCount,listingPriceCents:plan.listingPriceCents,minOfferCents:plan.minOfferCents,enabled:false};
     });
 
     await check('commerce preflight UI reads product details without writes and names the missing browser step',async()=>{
       const before=requests.length;
-      await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('#plans button')).find(b=>b.textContent==='核对资料').click()`);
-      await waitFor(()=>window.webContents.executeJavaScript(`document.querySelector('#preflight-dialog').open&&document.querySelector('#preflight-detail').innerText.includes('请先打开对应浏览器环境')`),'preflight result to identify closed environment');
-      const report=await window.webContents.executeJavaScript(`({text:document.querySelector('#preflight-detail').innerText,fillDisabled:document.querySelector('#preflight-fill').disabled})`);
+      await view.webContents.executeJavaScript(`Array.from(document.querySelectorAll('#plans button')).find(b=>b.textContent==='核对资料').click()`);
+      await waitFor(()=>view.webContents.executeJavaScript(`document.querySelector('#preflight-dialog').open&&document.querySelector('#preflight-detail').innerText.includes('请先打开对应浏览器环境')`),'preflight result to identify closed environment');
+      const report=await view.webContents.executeJavaScript(`({text:document.querySelector('#preflight-detail').innerText,fillDisabled:document.querySelector('#preflight-fill').disabled})`);
       assert.match(report.text,/Chemise QA/);assert.match(report.text,/Description exacte du fournisseur QA/);assert.match(report.text,/没有|未验证|尚未验证/);assert.equal(report.fillDisabled,true);
       assert.ok(requests.slice(before).some(r=>r.path==='/api/v1/products/commerce-product-1'));assert.ok(requests.slice(before).some(r=>r.query.productId===plan.productId));assert.ok(requests.slice(before).every(r=>r.method==='GET'));
-      await window.webContents.executeJavaScript(`document.querySelector('#preflight-dialog').close()`);
+      await view.webContents.executeJavaScript(`document.querySelector('#preflight-dialog').close()`);
       return {supplierReadOnly:true,missingBrowserReported:true,fieldFillDisabled:true};
     });
 
@@ -149,26 +165,38 @@ module.exports = async function commerceSmoke(api, check) {
       return {wrongAccountRejected:true,sourceChangeRejected:true,sameAccountRotationPreservedPlan:true};
     });
 
-    await check('unverified production Vinted adapter pauses queue with zero supplier or marketplace writes',async()=>{
+    await check('sales runtime opens its original session listing page and pauses a missing form before any identity read, photo claim or publication',async()=>{
+      fixtureSession=api.sesFor(profile);
+      fixtureSession.protocol.handle('https',request=>{
+        const url=new URL(request.url);browserRequests.push({method:request.method,origin:url.origin,path:url.pathname});
+        if(request.method!=='GET'||url.href!=='https://www.vinted.fr/items/new')return new Response('Isolated fixture: no external traffic is forwarded',{status:403});
+        return new Response('<!doctype html><html lang="fr"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Fixture Vinted non connecté</title></head><body><main><h1>Connecte-toi</h1><p>Local unsigned-in fixture. No account menu, images, or publication controls.</p></main></body></html>',{headers:{'content-type':'text/html; charset=utf-8'}});
+      });
+      await invoke('savePlan',{...plan,listing:{...plan.listing,brand:'Sans marque',color:'Noir',parcel:'Moyen'}});plan=engine.db.plans.find(row=>row.id===plan.id);
       await invoke('setPlanEnabled',plan.id,true);
       const before=requests.length;
-      await window.webContents.executeJavaScript(`document.querySelector('#run-once').click()`);
-      await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='needs_review'),'unverified live adapter review state');await frames();
-      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'needs_review');assert.match(job.error,/未联调|未验证/);assert.equal(job.mutationPending,false);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
+      const {VintedAccount}=require('../src/vinted-account.cjs'),originalAccountReaders=new Map();let accountReads=0;
+      for(const name of ['inspectAccount','inspectOwnProfileLink','state']){const original=VintedAccount.prototype[name];originalAccountReaders.set(name,original);VintedAccount.prototype[name]=function(...args){accountReads++;return original.apply(this,args);};}
+      try{
+        await view.webContents.executeJavaScript(`document.querySelector('#run-once').click()`);
+        await waitFor(()=>engine.db.jobs.some(job=>job.planId===plan.id&&job.state==='needs_review'&&job.blockedReason==='LISTING_INCOMPLETE')&&!engine.active.has(profile.id)&&!engine.ticking,'unsigned-in session to pause the original job on its missing listing form');
+      }finally{for(const [name,original] of originalAccountReaders)VintedAccount.prototype[name]=original;}
+      await frames();
+      const job=engine.db.jobs.find(job=>job.planId===plan.id);assert.equal(job.state,'needs_review');assert.equal(job.blockedReason,'LISTING_INCOMPLETE');assert.equal(job.step,'prepare_listing');assert.match(job.error,/^网页商品字段未完成：Titre（未找到已核对的输入控件）/);assert.equal(api.windows.has(profile.id),true);assert.equal(api.windows.get(profile.id).profile.id,profile.id);assert.ok(browserRequests.some(request=>request.method==='GET'&&request.origin==='https://www.vinted.fr'&&request.path==='/items/new'),'The session listing job must read its intercepted listing page');assert.equal(browserRequests.some(request=>request.path==='/'||request.path.startsWith('/member/')||request.path.startsWith('/settings/')),false);assert.ok(browserRequests.every(request=>request.method==='GET'));assert.equal(accountReads,0);assert.equal(engine.accountObservations.has(profile.id),false);assert.equal(job.accountMemberId,undefined);assert.equal(job.mutationPending,false);assert.equal(job.operation,null);assert.equal(job.result,null);assert.equal(engine.db.marketAccounts.length,0);assert.equal(engine.db.claims.length,0);assert.equal(engine.db.photoPreparations.length,0);assert.equal(engine.db.publications.submissions.length,0);assert.equal(engine.db.sales.length,0);assert.equal(engine.db.reservations.length,0);assert.equal(engine.db.plans[0].activeListingId,null);
       assert.equal(requests.length,before);assert.equal(requests.filter(request=>request.method!=='GET').length,0);
-      await window.webContents.executeJavaScript(`document.querySelector('[data-page="jobs"]').click();document.querySelector('#jobs button').click()`);await frames();
-      const receipt=await window.webContents.executeJavaScript(`({text:document.querySelector('#job-detail').innerText,reconcileHidden:document.querySelector('#reconcile-form').hidden})`);
-      assert.match(receipt.text,/需要核对/);assert.match(receipt.text,/未联调|未验证/);assert.equal(receipt.reconcileHidden,true);
-      await window.webContents.executeJavaScript(`document.querySelector('#job-dialog').close()`);
-      await invoke('runOnce');assert.equal(engine.db.jobs.length,1);assert.equal(requests.length,before);
-      return {jobState:job.state,writeRequests:0,duplicateJobs:0};
+      await view.webContents.executeJavaScript(`document.querySelector('[data-page="jobs"]').click();document.querySelector('#jobs button').click()`);await frames();
+      const receipt=await view.webContents.executeJavaScript(`({text:document.querySelector('#job-detail').innerText,reconcileHidden:document.querySelector('#reconcile-form').hidden})`);
+      assert.match(receipt.text,/需要核对/);assert.match(receipt.text,/网页商品字段未完成/);assert.match(receipt.text,/Titre（未找到已核对的输入控件）/);assert.equal(receipt.reconcileHidden,true);
+      await view.webContents.executeJavaScript(`document.querySelector('#job-dialog').close()`);
+      const reads=browserRequests.length;await invoke('runOnce');assert.equal(engine.db.jobs.length,1);assert.equal(engine.db.jobs[0].id,job.id);assert.equal(engine.db.jobs[0].dedupeKey,job.dedupeKey);assert.equal(browserRequests.length,reads);assert.equal(requests.length,before);assert.equal(engine.db.publications.submissions.length,0);
+      return {jobState:job.state,blockedReason:job.blockedReason,automaticOriginalEnvironment:true,missingSessionFormPaused:true,accountReads:0,photoClaims:0,writeRequests:0,publications:0,duplicateJobs:0};
     });
 
     await check('commerce IPC denies identical preload bridges from an unauthorized renderer',async()=>{
       wrongWindow=new BrowserWindow({show:false,width:400,height:300,webPreferences:{preload:path.resolve(__dirname,'../src/commerce-preload.cjs'),contextIsolation:true,sandbox:true,nodeIntegration:false}});
       await wrongWindow.loadURL('about:blank');
       assert.equal(await wrongWindow.webContents.executeJavaScript('typeof window.commerce.state'),'function');
-      for(const method of ['state','runOnce','preflight','prepareDraft','openListing','openActiveListing','inspectAccount','inspectPublication','submitPublication','inspectPhotos','preparePhotos','photoPreview','uploadPhotos'])await assert.rejects(wrongWindow.webContents.executeJavaScript(`window.commerce.${method}()`),/无权访问运营工作台/);
+      for(const method of ['state','runOnce','preflight','prepareDraft','openListing','openActiveListing','inspectAccount','inspectPublication','submitPublication','inspectPublishedListing','associatePublishedListing','inspectPhotos','preparePhotos','photoPreview','uploadPhotos'])await assert.rejects(wrongWindow.webContents.executeJavaScript(`window.commerce.${method}()`),/无权访问运营工作台/);
       await assert.rejects(wrongWindow.webContents.executeJavaScript(`window.commerce.saveSettings({baseURL:'http://127.0.0.1:9',clearToken:true})`),/无权访问运营工作台/);
       assert.equal(engine.db.settings.baseURL,baseURL);assert.equal(engine.unseal(engine.db.encryptedToken),replacement);assert.equal(engine.db.jobs.length,1);
       wrongWindow.destroy();wrongWindow=null;
@@ -178,7 +206,13 @@ module.exports = async function commerceSmoke(api, check) {
     await check('manual publication IPC accepts only a stored plan ID and cannot use renderer-supplied proofs',async()=>{
       const before=requests.length;
       await assert.rejects(invoke('submitPublication',{planId:plan.id,verified:true,manifest:{path:'/private/fixture.jpg'}}),/编号无效/);
-      await assert.rejects(invoke('submitPublication',plan.id),/先核对.*账号/);
+      // The automatic job's main-process session authority is not available to
+      // manual IPC callers, including extra renderer-supplied authority objects.
+      await assert.rejects(invoke('submitPublication',plan.id),/请先核对该环境的 Vinted 账号/);
+      await assert.rejects(invoke('submitPublication',plan.id,{sessionAuthority:{kind:'environment-session',profileId:profile.id}}),/请先核对该环境的 Vinted 账号/);
+      await assert.rejects(invoke('inspectPublishedListing',{planId:plan.id,verified:true}),/编号无效/);
+      await assert.rejects(invoke('associatePublishedListing',plan.id,'forged-review-token'),/凭证/);
+      await assert.rejects(invoke('inspectPublishedListing',plan.id),/已提交/);
       assert.equal(engine.db.publications.submissions.length,0);assert.equal(engine.db.plans[0].activeListingId,null);assert.equal(requests.length,before);
       return {untrustedProofRejected:true,noMutation:true};
     });
@@ -191,9 +225,12 @@ module.exports = async function commerceSmoke(api, check) {
       return {rendererErrors:0,externalWriteRequests:0,backgroundRunning:false};
     });
   } finally {
+    if(view&&!view.webContents.isDestroyed()&&typeof originalThrottle==='boolean')view.webContents.setBackgroundThrottling(originalThrottle);
     if(wrongWindow&&!wrongWindow.isDestroyed())wrongWindow.destroy();
     if(engine){if(engine.running)engine.setRunning(false);if(originalDB){engine.db=originalDB;engine.connection=originalConnection;engine.persist();engine.emit();}}
-    if(window&&!window.isDestroyed())window.close();
+    if(profile){const window=api.windows.get(profile.id);if(window&&!window.isDestroyed()){window.close();await waitFor(()=>!api.windows.has(profile.id),'automatic fixture environment to close');}}
+    if(fixtureSession)fixtureSession.protocol.unhandle('https');
+    await api.showEnvironmentManager();
     if(profile)await api.deleteProfile(profile.id);
     server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
   }

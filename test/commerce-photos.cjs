@@ -2,7 +2,8 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {CommerceEngine}=require('../src/commerce-engine.cjs');
-const {preparePhotos,readPreparedPhotos,MAX_IMAGE_BYTES,READ_TIMEOUT_MS}=require('../src/commerce-photos.cjs');
+const {preparePhotos,preparePhotosForJob,readPreparedPhotos,MAX_IMAGE_BYTES,READ_TIMEOUT_MS}=require('../src/commerce-photos.cjs');
+const {createTrustedPhotoManifest}=require('../src/vinted-photo-upload.cjs');
 const baseURL='https://sku.example.test/api/v1';
 const profiles=[{id:'profile-1',name:'First'},{id:'profile-2',name:'Second'}];
 const product={id:'product-1',sku:'SKU TEST',name:'Fixture item',stock:5,unit_price_cents:500};
@@ -13,11 +14,12 @@ const receipt={claimId:'claim-1',set:{id:set.id,product_id:product.id,images:[{i
 function jpeg(width=10,height=20,tail=0){return Buffer.from([255,216,255,192,0,17,8,height>>8,height&255,width>>8,width&255,3,1,17,0,2,17,1,3,17,1,255,218,0,12,3,1,0,2,17,3,17,0,63,0,tail,255,217]);}
 const decode=()=>({width:10,height:20});
 const deferred=()=>{let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j;});return {promise,resolve,reject};};
-async function fixture(t,{client:overrides={},onChange=()=>{}}={}){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'isola-photos-test-')),calls=[];
+async function fixture(t,{client:overrides={},onChange=()=>{},aliasedParent=false}={}){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'isola-photos-test-')),calls=[];let engineDir=dir;
+ if(aliasedParent){fs.mkdirSync(path.join(dir,'storage'));fs.symlinkSync(path.join(dir,'storage'),path.join(dir,'storage-alias'),'dir');engineDir=path.join(dir,'storage-alias','commerce');}
  const client={me:async()=>({user:{id:'supplier-1'}}),product:async()=>({product}),photoSets:async()=>({sets:[set],total:1}),photoSet:async()=>({set}),claimPhotos:async()=>structuredClone(receipt),download:async()=>jpeg(),...overrides};
  for(const name of Object.keys(client)){const method=client[name];client[name]=async(...args)=>{calls.push({name,args});return method(...args);};}
- const options={dir,profiles:()=>profiles,clientFactory:()=>client,adapter:{readiness:()=>({capabilities:{publish:false}})},seal:s=>s,unseal:s=>s,onChange};
+ const options={dir:engineDir,profiles:()=>profiles,clientFactory:()=>client,adapter:{readiness:()=>({capabilities:{publish:false}})},seal:s=>s,unseal:s=>s,onChange};
  let engine=new CommerceEngine(options);engine.db.settings.baseURL=baseURL;engine.db.encryptedToken='fixture-token';engine.db.supplierAccountId='supplier-1';engine.db.products=[{...product,priceCents:500}];engine.persist();
  const plan=engine.savePlan({profileId:'profile-1',productId:product.id,targetCount:2,listingPriceCents:500,minOfferCents:200,reuseOwnPhotos:true,enabled:false});
  t.after(async()=>{await engine.close();fs.rmSync(dir,{recursive:true,force:true});});
@@ -25,12 +27,36 @@ async function fixture(t,{client:overrides={},onChange=()=>{}}={}){
 }
 function saved(f){return JSON.parse(fs.readFileSync(f.engine.file,'utf8'));}
 
+test('background photos require the exact active job lease and never expose a configuration bypass',async t=>{
+ const f=await fixture(t),engine=f.engine;f.plan.enabled=true;engine.seed();const job=engine.db.jobs[0],controller=new AbortController();job.state='running';
+ await assert.rejects(preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode}),{code:'STOPPED'});assert.equal(f.calls.length,0);
+ const lease=engine.leases.acquire(job.profileId,job.id);engine.active.set(job.profileId,controller);
+ try{
+  await assert.rejects(preparePhotosForJob(engine,job,{signal:new AbortController().signal,validateImage:decode}),{code:'STOPPED'});assert.equal(f.calls.length,0);
+  const result=await preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode});assert.equal(result.summary.ready,true);assert.equal(engine.configPending,0);assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,1);
+  const again=await preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode});assert.deepEqual(again.manifest,result.manifest);assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,1);
+ }finally{engine.active.delete(job.profileId);engine.leases.release(lease);}
+});
+
+test('disabling a background plan during supplier reads prevents the permanent photo claim',async t=>{
+ let f;f=await fixture(t,{client:{me:async()=>{f.plan.enabled=false;return {user:{id:'supplier-1'}};}}});const engine=f.engine;f.plan.enabled=true;engine.seed();const job=engine.db.jobs[0],controller=new AbortController();job.state='running';const lease=engine.leases.acquire(job.profileId,job.id);engine.active.set(job.profileId,controller);
+ try{await assert.rejects(preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode}),{code:'STOPPED'});assert.equal(f.calls.some(c=>c.name==='claimPhotos'),false);assert.equal(engine.db.photoPreparations.length,0);}
+ finally{engine.active.delete(job.profileId);engine.leases.release(lease);}
+});
+
 test('preparation persists exact request before claiming, saves private JPEGs, and returns only a sanitized public summary',async t=>{
  let f;f=await fixture(t,{client:{claimPhotos:async(payload,options)=>{const row=saved(f).photoPreparations[0];assert.equal(row.state,'claiming');assert.deepEqual(row.payload,{productId:product.id,setId:set.id});assert.deepEqual(payload,row.payload);assert.equal(options.idempotencyKey,row.idempotencyKey);assert.ok(fs.existsSync(path.join(f.dir,'prepared-photos',row.id)));return receipt;}}});
  const result=await f.prepare();assert.equal(result.summary.ready,true);assert.equal(result.manifest.count,2);assert.equal(result.manifest.claimId,'claim-1');assert.equal(f.engine.db.claims.length,1);assert.equal(f.engine.db.jobs.length,0);assert.equal(f.plan.enabled,false);
- for(const file of result.manifest.files){assert.equal(fs.statSync(file.path).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(file.path)).mode&0o777,0o700);assert.equal(file.width,10);assert.equal(file.height,20);assert.match(file.sha256,/^[a-f0-9]{64}$/);}
+ for(const file of result.manifest.files){if(process.platform!=='win32'){assert.equal(fs.statSync(file.path).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(file.path)).mode&0o777,0o700);}assert.equal(file.width,10);assert.equal(file.height,20);assert.match(file.sha256,/^[a-f0-9]{64}$/);}
  const publicJSON=JSON.stringify([result.summary,f.engine.state().photoPreparations]);for(const secret of ['fixture-token',baseURL,'/photos/images/','prepared-photos','idempotencyKey','payload','receipt','fileName'])assert.equal(publicJSON.includes(secret),false);
  assert.ok(f.calls.filter(c=>c.name==='download').every(c=>c.args[1].maxBytes===MAX_IMAGE_BYTES));assert.deepEqual(readPreparedPhotos(f.engine,f.plan.id),result);
+});
+
+test('supplier photos under an aliased parent keep canonical trusted paths across restart and reject owned directory links',{skip:process.platform==='win32'?'Creating directory symlinks requires Windows privileges':false},async t=>{
+ const f=await fixture(t,{aliasedParent:true,client:{download:async url=>jpeg(10,20,url.endsWith('image-2')?1:0)}}),result=await f.prepare();
+ for(const file of result.manifest.files){assert.equal(file.path,fs.realpathSync(file.path));assert.equal(file.path.startsWith(fs.realpathSync(f.engine.dir)+path.sep),true);assert.equal(file.path.includes('storage-alias'),false);}
+ assert.equal((await createTrustedPhotoManifest(result.manifest)).count,2);await f.restart();assert.deepEqual(readPreparedPhotos(f.engine,f.plan.id).manifest,result.manifest);assert.equal((await f.prepare()).summary.ready,true);assert.equal(f.calls.filter(call=>call.name==='claimPhotos').length,1);assert.equal(f.calls.filter(call=>call.name==='download').length,2);
+ const owned=path.dirname(result.manifest.files[0].path),moved=owned+'-moved';fs.renameSync(owned,moved);fs.symlinkSync(moved,owned,'dir');assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});await assert.rejects(createTrustedPhotoManifest(result.manifest),{code:'PHOTO_MANIFEST_INVALID'});assert.equal(f.calls.filter(call=>call.name==='claimPhotos').length,1);
 });
 
 test('repeated and concurrent preparation reuses one fixed claim and ordered files through configure serialization',async t=>{
@@ -87,9 +113,17 @@ test('JPEG structure, size, pixel limits and injected decoder failure cannot pro
  const missing=await fixture(t);await assert.rejects(preparePhotos(missing.engine,missing.plan.id),{code:'PHOTO_DECODER'});assert.equal(missing.calls.length,0);
 });
 
-test('modified files, excessive permissions and symlink cache directories never produce trusted files',async t=>{
- for(const mutate of [(file)=>fs.writeFileSync(file,jpeg(10,20,7)),file=>fs.chmodSync(file,0o644),file=>{fs.unlinkSync(file);fs.symlinkSync('/dev/null',file); }]){const f=await fixture(t),result=await f.prepare();mutate(result.manifest.files[0].path);assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,1);}
- const f=await fixture(t);fs.symlinkSync(os.tmpdir(),path.join(f.dir,'prepared-photos'));await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,0);
+test('modified photo bytes never produce trusted files',async t=>{
+ const f=await fixture(t),result=await f.prepare();fs.writeFileSync(result.manifest.files[0].path,jpeg(10,20,7));assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});assert.equal(f.calls.filter(c=>c.name==='claimPhotos').length,1);
+});
+test('excessive POSIX photo permissions never produce trusted files',{skip:process.platform==='win32'?'Windows uses inherited user-data ACLs, not POSIX mode bits':false},async t=>{
+ const f=await fixture(t),result=await f.prepare();fs.chmodSync(result.manifest.files[0].path,0o644);assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});
+});
+test('symlink photo files and cache directories are rejected',async t=>{
+ const f=await fixture(t),result=await f.prepare(),file=result.manifest.files[0].path;fs.unlinkSync(file);
+ try{fs.symlinkSync(process.platform==='win32'?os.tmpdir():'/dev/null',file,process.platform==='win32'?'junction':'file');}catch(e){if(process.platform==='win32'&&e.code==='EPERM'){t.skip('Current Windows sandbox prohibits creating links');return;}throw e;}
+ assert.equal(readPreparedPhotos(f.engine,f.plan.id).manifest,null);await assert.rejects(f.prepare(),{code:'PHOTO_STORAGE'});
+ const g=await fixture(t);fs.symlinkSync(os.tmpdir(),path.join(g.dir,'prepared-photos'),process.platform==='win32'?'junction':'dir');await assert.rejects(g.prepare(),{code:'PHOTO_STORAGE'});assert.equal(g.calls.filter(call=>call.name==='claimPhotos').length,0);
 });
 
 test('cancelling a claim retains a returned receipt before releasing configure, while timeout preserves uncertainty and ignores late completion',async t=>{
@@ -123,4 +157,10 @@ test('restart recovers claiming state and rejects corrupted, duplicate or identi
   const data=structuredClone(good);change(data);const bytes=JSON.stringify(data);fs.writeFileSync(f.engine.file,bytes);assert.throws(()=>new CommerceEngine(f.options));assert.equal(fs.readFileSync(f.engine.file,'utf8'),bytes);
  }
  const uncertain=structuredClone(good),row=uncertain.photoPreparations[0];row.state='claiming';delete row.receipt;delete row.receiptHash;delete row.claimId;delete row.images;row.assets=[];uncertain.claims=[];fs.writeFileSync(f.engine.file,JSON.stringify(uncertain));const restarted=new CommerceEngine(f.options);assert.equal(restarted.db.photoPreparations[0].state,'uncertain');await restarted.close();fs.writeFileSync(f.engine.file,JSON.stringify(good));
+});
+
+test('an old listing revision cannot reuse the live lease to claim or download photos',async t=>{
+ const f=await fixture(t),engine=f.engine;f.plan.enabled=true;engine.seed();const job=engine.db.jobs[0],controller=new AbortController();job.state='running';const lease=engine.leases.acquire(job.profileId,job.id);engine.active.set(job.profileId,controller);f.plan.listingRevision=1;
+ try{await assert.rejects(preparePhotosForJob(engine,job,{signal:controller.signal,validateImage:decode}),{code:'STOPPED'});assert.equal(f.calls.length,0);assert.equal(engine.db.photoPreparations.length,0);}
+ finally{engine.active.delete(job.profileId);engine.leases.release(lease);}
 });

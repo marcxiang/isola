@@ -3,6 +3,7 @@
 const {createHash}=require('node:crypto');
 const {VintedAccount,memberURL}=require('./vinted-account.cjs');
 const {buildPublicationProof,FORM_URL}=require('./vinted-publication.cjs');
+const {isEnvironmentSessionAccount,assertEnvironmentSessionAuthority}=require('./commerce-session-authority.cjs');
 
 const traversals=new WeakMap();
 const FIELD_SPECS=Object.freeze([
@@ -22,6 +23,34 @@ const norm=value=>String(value||'').replace(/\s+/g,' ').trim();
 function problem(code,message){const error=Error(message);error.code=code;return error;}
 function ensure(ok,code,message){if(!ok)throw problem(code,message);}
 function cents(value){const clean=norm(value).replace(/ ?€$/,'');return /^\d+(?:[,.]\d{1,2})?$/.test(clean)?Math.round(Number(clean.replace(',','.'))*100):null;}
+
+// Diagnostics never supply publication authority. Only known static labels and
+// counts leave this function; unknown labels, field values and status text may
+// contain private page content and must not reach task records or the renderer.
+function publicationBlockerDetails(pass){
+ const details=[],source=pass&&typeof pass==='object'?pass:{};
+ const names=new Map([['Titre','标题'],['Description','描述'],['Catégorie','分类'],['Prix','价格'],['État','成色'],['Marque','品牌'],['Couleur','颜色'],['Taille','尺码'],['Matériau','材质'],['Matériau (recommandé)','材质']]);
+ const flags=rows=>'必填 '+rows.filter(row=>row?.required===true).length+' 项、错误 '+rows.filter(row=>row?.invalid===true).length+' 项、已填入 '+rows.filter(row=>row?.populated===true).length+' 项';
+ if(!Array.isArray(source.unknownFields))details.push('未知字段状态无法核对');
+ else {
+  const material=source.unknownFields.filter(row=>row&&names.get(norm(row.label))==='材质');
+  const optionalMaterial=material.filter(row=>row.required===false&&row.populated===true);
+  if(optionalMaterial.length)details.push('可选材质已填入但未在计划确认'+(optionalMaterial.length>1?'（'+optionalMaterial.length+' 项）':'')+'；请先清空该可选字段，或核实材质并在计划中确认后重试');
+  const otherMaterial=material.filter(row=>!optionalMaterial.includes(row));
+  if(otherMaterial.length)details.push('材质字段需核对 '+otherMaterial.length+' 项（'+flags(otherMaterial)+'）');
+  const other=source.unknownFields.filter(row=>!material.includes(row));
+  if(other.length)details.push('其他未知字段 '+other.length+' 项（'+flags(other)+'）');
+ }
+ if(!Array.isArray(source.invalidFields))details.push('字段错误状态无法核对');
+ else if(source.invalidFields.length){
+  const known=source.invalidFields.map(label=>names.get(norm(label))).filter(Boolean),other=source.invalidFields.length-known.length;
+  details.push('字段错误 '+source.invalidFields.length+' 项（'+[...new Set(known),...(other?['其他字段 '+other+' 项']:[])].join('、')+'）');
+ }
+ if(!Array.isArray(source.alerts))details.push('页面状态提示无法核对');
+ else if(source.alerts.length)details.push('页面状态提示 '+source.alerts.length+' 条（错误或未知状态，需在网页核对）');
+ if(source.dialogs!==0)details.push(Number.isSafeInteger(source.dialogs)&&source.dialogs>0?'页面弹窗 '+source.dialogs+' 个':'页面弹窗状态无法核对');
+ return details;
+}
 
 // Adapter hook: call only after every unique category control was actually
 // clicked and the final native input was read back in this same document.
@@ -101,13 +130,15 @@ class VintedPublicationEvidence{
  }
  async readPass(input,context){
   const {plan,claim,manifest}=input,profileId=plan.profileId,guard=()=>this.adapter.current(profileId,context);
-  const account=await this.wait(()=>this.account.state(profileId,context),context);guard();
-  ensure(account.account,'PUBLICATION_ACCOUNT_UNVERIFIED','请先核对并展开当前账号菜单，不能仅凭页面上的普通个人主页链接判断账号');
+  const sessionAccount=isEnvironmentSessionAccount(input.expectedAccount,profileId);
+  if(sessionAccount)assertEnvironmentSessionAuthority(input.expectedAccount,profileId);
+  const account=sessionAccount?null:await this.wait(()=>this.account.state(profileId,context),context);guard();
+  if(!sessionAccount)ensure(account.account,'PUBLICATION_ACCOUNT_UNVERIFIED','请先核对当前账号菜单；关闭菜单后也必须有同一页面的有效核验记录，不能仅凭普通个人主页链接判断账号');
   await this.wait(()=>this.adapter.read(profileId,context),context);guard();
   const form=await this.wait(()=>this.adapter.control.isolated(context.tab,'('+probePublicationForm.toString()+')('+JSON.stringify(FIELD_SPECS)+')'),context);guard();
   ensure(form&&form.url===FORM_URL&&typeof form.documentKey==='string','PUBLICATION_PAGE_CHANGED','刊登表单页面已改变');
   ensure(!form.error,'PUBLICATION_FORM_UNVERIFIED',form.error||'刊登表单无法核对');
-  ensure(account.documentKey===form.documentKey,'PUBLICATION_PAGE_CHANGED','账号与商品表单不属于同一次页面');
+  if(!sessionAccount)ensure(account.documentKey===form.documentKey,'PUBLICATION_PAGE_CHANGED','账号与商品表单不属于同一次页面');
   const photoState=await this.wait(()=>this.adapter.photos.read(profileId,context),context);guard();
   ensure(photoState.documentKey===form.documentKey,'PUBLICATION_PAGE_CHANGED','照片与商品字段不属于同一次页面');
   const record=this.adapter.photos.claims.get(profileId+'\0'+context.tab.id+'\0'+form.documentKey);
@@ -123,10 +154,10 @@ class VintedPublicationEvidence{
   const parcel=form.parcel.filter(option=>option.checked);
   const parcelComplete=['Petit','Moyen','Grand'].every(name=>form.parcel.filter(option=>option.name===name).length===1)&&form.parcel.length===3&&parcel.length===1&&!parcel[0].disabled&&!parcel[0].invalid;
   fields.push({field:'parcel',label:'包裹规格',value:parcelComplete?parcel[0].name:null,disabled:!parcelComplete,invalid:!parcelComplete});
-  const finalAccount=await this.wait(()=>this.account.state(profileId,context),context);guard();
-  ensure(finalAccount.documentKey===form.documentKey&&equal(finalAccount.account,account.account),'PUBLICATION_EVIDENCE_CHANGED','读取商品字段期间当前账号发生变化，请重新核对');
+  if(!sessionAccount){const finalAccount=await this.wait(()=>this.account.state(profileId,context),context);guard();ensure(finalAccount.documentKey===form.documentKey&&equal(finalAccount.account,account.account),'PUBLICATION_EVIDENCE_CHANGED','读取商品字段期间当前账号发生变化，请重新核对');}
+  else {assertEnvironmentSessionAuthority(input.expectedAccount,profileId);guard();}
   return {profileId,tabId:context.tab.id,url:FORM_URL,documentKey:form.documentKey,challenge:photoState.challenge,
-   account:{profileId,verified:true,...account.account},fields,unknownFields:form.unknownFields,invalidFields:form.invalidFields,alerts:form.alerts,dialogs:form.dialogs,
+   account:sessionAccount?{kind:'environment-session',profileId}:{profileId,verified:true,...account.account},fields,unknownFields:form.unknownFields,invalidFields:form.invalidFields,alerts:form.alerts,dialogs:form.dialogs,
    publication:form.publication,photos:{profileId,claimId:claim.id,productId:claim.productId,setId:claim.setId,count:manifest.count,documentKey:form.documentKey,signature:receipt.signature,verified:true,busy:false,errorCount:0}};
  }
  async collect(input,{signal}={},report={checks:[]}){
@@ -144,12 +175,12 @@ class VintedPublicationEvidence{
    timer=setTimeout(()=>{timedOut=true;controller.abort();},this.timeoutMs);const observedAt=new Date(this.now()).toISOString();
    const first=await this.readPass(input,context),second=await this.readPass(input,context);this.adapter.current(plan.profileId,context);
    ensure(check('连续两次页面核对',equal(first,second),equal(first,second)?'账号、商品字段、照片和发布控件保持一致':'两次读取之间页面内容发生变化'),'PUBLICATION_EVIDENCE_CHANGED','连续两次刊登证据不一致，请重新读取');
-   const expectedIdentity=memberURL(input.expectedAccount.profileURL),identity=second.account.memberId===input.expectedAccount.memberId&&second.account.memberId===expectedIdentity.memberId&&second.account.profileURL===expectedIdentity.profileURL;
-   check('当前登录账号',identity,identity?'当前菜单账号与该环境绑定一致':'当前登录账号与该环境绑定不一致');
+   const sessionAccount=isEnvironmentSessionAccount(input.expectedAccount,plan.profileId),expectedIdentity=sessionAccount?null:memberURL(input.expectedAccount.profileURL),identity=sessionAccount?isEnvironmentSessionAccount(second.account,plan.profileId):second.account.memberId===input.expectedAccount.memberId&&second.account.memberId===expectedIdentity.memberId&&second.account.profileURL===expectedIdentity.profileURL;
+   check(sessionAccount?'当前自动化环境':'当前登录账号',identity,sessionAccount?'沿用当前独立环境的登录会话；未要求用户名或账号绑定':identity?'当前菜单账号与该环境绑定一致':'当前登录账号与该环境绑定不一致');
    let fieldsOK=true;
    for(const field of second.fields){const expected=field.field==='priceCents'?plan.listingPriceCents:plan.listing[field.field];const matches=equal(field.value,expected)&&!field.disabled&&!field.invalid;check(field.label,matches,matches?'页面值与保存计划一致':'页面值缺失、不可用或与保存计划不一致');fieldsOK=fieldsOK&&matches;}
    const extra=second.unknownFields.length===0&&second.invalidFields.length===0&&second.alerts.length===0&&second.dialogs===0;
-   check('其余字段和错误提示',extra,extra?'未知可选字段为空，未显示字段错误或弹窗':'需核对：'+[...second.unknownFields.map(field=>field.label),...second.invalidFields,...second.alerts,...(second.dialogs?['页面弹窗']:[])].join('；').slice(0,600));
+   check('其余字段和错误提示',extra,extra?'未知可选字段为空，未显示字段错误或弹窗':'需核对：'+publicationBlockerDetails(second).join('；'));
    check('网页照片',true,'已确认同一 document、原上传记录与当前照片回执');
    const publish=second.publication.count===1&&second.publication.enabled&&second.publication.observed;
    check('发布按钮',publish,publish?'唯一 Ajouter 按钮可用':'Ajouter 按钮缺失、重复或不可用');
@@ -170,4 +201,4 @@ class VintedPublicationEvidence{
  }
 }
 
-module.exports={VintedPublicationEvidence,rememberCategoryTraversal,probePublicationForm,FIELD_SPECS};
+module.exports={VintedPublicationEvidence,rememberCategoryTraversal,probePublicationForm,publicationBlockerDetails,FIELD_SPECS};

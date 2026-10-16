@@ -3,7 +3,7 @@ const {saveSettings,requestModel}=require('../src/ai.cjs');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,ms=5000){const start=Date.now();while(!fn()){if(Date.now()-start>ms)throw Error('Timed out waiting for AI state');await sleep(20);}}
 module.exports=async(api,check)=>{
- let mode='pause',count=0,requests=[],events=[],timers=new Set(),w,p;
+ let mode='pause',count=0,requests=[],events=[],timers=new Set(),w,p,originalThrottling;
  const fixture='<!doctype html><title>Flow fixture</title><style>body{font:18px sans-serif;padding:40px}button{padding:18px;margin:8px}</style><h1>Category selection</h1><button id="choose">Category</button><button id="noop">No change</button><button id="delete">Delete account</button><p id="result">Choose a category</p><script>window.clicks=0;choose.onclick=()=>{clicks++;result.textContent="Category selected"};document.querySelector("#delete").onclick=()=>window.deleted=true;</script>';
  const server=http.createServer(async(req,res)=>{
   if(req.url==='/page'){res.setHeader('Content-Type','text/html');res.end(fixture);return;}
@@ -28,9 +28,9 @@ module.exports=async(api,check)=>{
   res.end(JSON.stringify(out));
  });
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port;
- const reset=async(next,protocol='responses',visionEnabled=false)=>{mode=next;count=0;requests=[];events=[];await w.tabs[0].view.webContents.loadURL(origin+'/page');saveSettings({baseURL:origin+'/v1',protocol,model:'flow-qa',apiKey:'',maxSteps:10,visionEnabled});};
+ const reset=async(next,protocol='responses',visionEnabled=false)=>{mode=next;count=0;requests=[];events=[];const c=w.tabs[0].view.webContents;await c.loadURL(origin+'/page');if(visionEnabled){w.show();w.focus();c.focus();c.setBackgroundThrottling(false);await c.executeJavaScript('new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error("Vision fixture did not paint")),1500);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve(true)}));})');}saveSettings({baseURL:origin+'/v1',protocol,model:'flow-qa',apiKey:'',maxSteps:10,visionEnabled},p.id);};
  try{
-  p=api.saveProfile({name:'QA AI flow',url:origin+'/page',fingerprintMode:'native',width:1100,height:800});await api.launch(p.id);w=api.windows.get(p.id);const c=w.tabs[0].view.webContents;
+  p=api.saveProfile({name:'QA AI flow',url:origin+'/page',fingerprintMode:'native',width:1100,height:800});await api.launch(p.id);w=api.windows.get(p.id);const c=w.tabs[0].view.webContents;originalThrottling=c.getBackgroundThrottling();
   const emit=w.aiAgent.emit.bind(w.aiAgent);w.aiAgent.emit=()=>{events.push(JSON.parse(JSON.stringify(w.aiAgent.state)));emit();};
   await check('pause interrupts model wait; resume refreshes IDs after manual changes',async()=>{
    await reset('pause');const task=w.aiAgent.start('选择分类');await until(()=>requests.length===1);const start=Date.now();w.aiAgent.pause();await until(()=>w.aiAgent.state.status==='paused',1500);assert.ok(Date.now()-start<1500);
@@ -62,6 +62,6 @@ module.exports=async(api,check)=>{
    const image=history.flatMap(x=>Array.isArray(x.content)?x.content:[]).find(x=>x.type===(protocol==='responses'?'input_image':'image_url'));assert.ok(image,'image missing: '+JSON.stringify(result.logs));const url=protocol==='responses'?image.image_url:image.image_url.url;assert.match(url,/^data:image\/jpeg;base64,/);
   });
  }finally{
-  for(const t of timers)clearTimeout(t);if(w&&!w.isDestroyed()){w.aiAgent.stop();w.close();}await sleep(200);if(p)await api.deleteProfile(p.id);server.closeAllConnections();await new Promise(r=>server.close(r));
+  for(const t of timers)clearTimeout(t);if(w&&!w.isDestroyed()){const c=w.tabs[0]?.view.webContents;if(c&&!c.isDestroyed()&&originalThrottling!==undefined)c.setBackgroundThrottling(originalThrottling);w.aiAgent.stop();w.close();}await sleep(200);if(p)await api.deleteProfile(p.id);server.closeAllConnections();await new Promise(r=>server.close(r));
  }
 };

@@ -1,9 +1,8 @@
-const fs = require('node:fs'), path = require('node:path');
 const {app, safeStorage} = require('electron');
 const {checkedSnapshot, performAction} = require('./page-control.cjs');
 const {randomUUID} = require('node:crypto');
+const {readSettingsRecord,writeSettingsRecord}=require('./ai-settings-store.cjs');
 const CONFIG_DEFAULT = {baseURL:'https://api.openai.com/v1', protocol:'responses', model:'', apiKey:'', maxSteps:20, visionEnabled:false};
-const file = () => path.join(app.getPath('userData'), 'ai-settings.json');
 function validateSettings(input, {requireKey=true}={}) {
   const u = new URL(String(input.baseURL || CONFIG_DEFAULT.baseURL));
   const local = ['localhost','127.0.0.1','[::1]'].includes(u.hostname);
@@ -20,22 +19,27 @@ function validateSettings(input, {requireKey=true}={}) {
   if (input.visionEnabled !== undefined && typeof input.visionEnabled !== 'boolean') throw Error('视觉辅助设置无效');
   return {baseURL:u.href.replace(/\/$/,''), protocol:input.protocol, model, apiKey, maxSteps, visionEnabled:input.visionEnabled === true};
 }
-function loadSettings() {
-  if (!fs.existsSync(file())) return {...CONFIG_DEFAULT};
-  const saved = JSON.parse(fs.readFileSync(file(),'utf8'));
-  return {...CONFIG_DEFAULT, ...saved, apiKey:saved.encryptedKey ? safeStorage.decryptString(Buffer.from(saved.encryptedKey,'base64')) : ''};
+function loadSettings(profileId) {
+  const saved=readSettingsRecord({dir:app.getPath('userData'),profileId,defaults:CONFIG_DEFAULT});
+  let apiKey='';try{if(saved.encryptedKey)apiKey=safeStorage.decryptString(Buffer.from(saved.encryptedKey,'base64'));}catch{throw Error('此环境的模型密钥无法解密，请在本机重新保存');}
+  return {...CONFIG_DEFAULT,...saved,apiKey};
 }
-function publicSettings() { const {apiKey, encryptedKey, ...s} = loadSettings(); return {...s, hasKey:!!apiKey}; }
-function saveSettings(input) {
-  const before = loadSettings(), same = input.baseURL?.replace(/\/$/,'') === before.baseURL;
-  const apiKey = input.clearKey ? '' : input.apiKey || (same ? before.apiKey : '');
-  const s = validateSettings({...input, apiKey}, {requireKey:false});
+function publicSettings(profileId) {
+  // Toolbar metadata must not unlock a model key merely to open a browser.
+  const {encryptedKey,...s}=readSettingsRecord({dir:app.getPath('userData'),profileId,defaults:CONFIG_DEFAULT});
+  return {...s,hasKey:!!encryptedKey,scope:profileId===undefined?'legacy-template':'environment'};
+}
+function saveSettings(input,profileId) {
+  const before=readSettingsRecord({dir:app.getPath('userData'),profileId,defaults:CONFIG_DEFAULT});
+  const s=validateSettings({...input,apiKey:input.clearKey?'':input.apiKey||''},{requireKey:false});
   if (s.apiKey && !safeStorage.isEncryptionAvailable()) throw Error('系统密钥加密不可用');
   const {apiKey:secret, ...out} = s;
-  out.encryptedKey = secret ? safeStorage.encryptString(secret).toString('base64') : '';
-  fs.mkdirSync(path.dirname(file()), {recursive:true});
-  const temp = file()+'.tmp'; fs.writeFileSync(temp, JSON.stringify(out,null,2), {mode:0o600}); fs.renameSync(temp,file());
-  return publicSettings();
+  // A settings-only edit retains the exact sealed record. Only a new key
+  // needs encryption; existing keys are decrypted when AI actually starts.
+  const same=s.baseURL===before.baseURL.replace(/\/$/,'');
+  out.encryptedKey=input.clearKey?'':secret?safeStorage.encryptString(secret).toString('base64'):same?before.encryptedKey:'';
+  writeSettingsRecord({dir:app.getPath('userData'),profileId,defaults:CONFIG_DEFAULT,value:out});
+  return publicSettings(profileId);
 }
 const actionTool = {
   name:'browser_action', strict:true,
@@ -201,7 +205,7 @@ class BrowserAgent {
   async start(goal) {
     if (this.state.running) throw Error('已有 AI 任务正在运行');
     if (typeof goal!=='string' || !goal.trim() || goal.length>5000) throw Error('请输入 1–5000 字的任务');
-    const settings=validateSettings(loadSettings()), tab=this.w.tabs.find(t=>t.id===this.w.activeTab);
+    const settings=validateSettings(loadSettings(this.w.profile?.id)), tab=this.w.tabs.find(t=>t.id===this.w.activeTab);
     if (!tab) throw Error('没有可控制的页面');
     if (!/^https?:/.test(tab.view.webContents.getURL())) throw Error('请先打开一个 HTTP / HTTPS 网页，再启动 AI');
     this.controller=new AbortController(); this.pauseRequested=false; this.visionWarning=false;
